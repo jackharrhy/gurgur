@@ -14,13 +14,20 @@ const voiceButton = document.querySelector<HTMLButtonElement>("#voice");
 if (!canvas || !connection || !light || !epoch || !tick || !voiceButton) throw new Error("game shell is incomplete");
 
 const history = createSnapshotTimeline();
+let heavyCube: { key: string; localTop: number } | null = null;
 const renderer = new WorldRenderer(canvas, history, (body) => {
   document.body.dataset.renderedX = String(body.position.x);
   document.body.dataset.renderedY = String(body.position.y);
   document.body.dataset.renderedZ = String(body.position.z);
+}, (body) => {
+  if (`${body.id.index}:${body.id.generation}` !== heavyCube?.key) return;
+  document.body.dataset.renderedHeavyCubeX = String(body.position.x);
+  document.body.dataset.renderedHeavyCubeY = String(body.position.y);
+  document.body.dataset.renderedHeavyCubeZ = String(body.position.z);
 });
-const predictor = createPredictionClient((body, correctionMagnitude) => {
+const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
+  renderer.setPredictedBodies(bodies);
   document.body.dataset.predictionReady = body ? "true" : "false";
   if (body) {
     document.body.dataset.predictedX = String(body.position.x);
@@ -30,7 +37,6 @@ const predictor = createPredictionClient((body, correctionMagnitude) => {
   document.body.dataset.predictionCorrection = String(correctionMagnitude);
 });
 let localPlayerKey: string | null = null;
-let heavyCube: { key: string; localTop: number } | null = null;
 let session: GameSession;
 let voice: VoiceChat;
 const input = new PlayerInput(

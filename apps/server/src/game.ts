@@ -9,6 +9,7 @@ import {
 import {
   MAX_CATCH_UP_TICKS,
   INPUT_INTENT_TIMEOUT_TICKS,
+  LOCAL_PHYSICS_RADIUS_METRES,
   PHYSICS_DT,
   PHYSICS_SUBSTEPS,
   PROTOCOL_VERSION,
@@ -21,6 +22,7 @@ import {
   type RuntimeId,
   type Snapshot,
   type Vec3,
+  type WorldBundle,
   type WorldMessage,
 } from "@gurgur/shared";
 import { createMechanismRuntime, type MechanismRuntime } from "./mechanisms";
@@ -47,6 +49,7 @@ type Player = {
 type PlayerSlot = { generation: number; player: Player | null };
 export class AuthoritativeGame {
   readonly #physics: PhysicsWorld;
+  readonly #bundle: WorldBundle;
   readonly #store: WorldStore;
   readonly #onSnapshot: (snapshot: Snapshot) => void;
   readonly #onWorld: (world: WorldMessage) => void;
@@ -70,6 +73,7 @@ export class AuthoritativeGame {
 
   private constructor(
     physics: PhysicsWorld,
+    bundle: WorldBundle,
     store: WorldStore,
     onSnapshot: (snapshot: Snapshot) => void,
     onWorld: (world: WorldMessage) => void,
@@ -78,6 +82,7 @@ export class AuthoritativeGame {
     playerSpawn: Vec3 | null,
   ) {
     this.#physics = physics;
+    this.#bundle = bundle;
     this.#store = store;
     this.#onSnapshot = onSnapshot;
     this.#onWorld = onWorld;
@@ -90,16 +95,18 @@ export class AuthoritativeGame {
     store: WorldStore,
     onSnapshot: (snapshot: Snapshot) => void,
     onWorld: (world: WorldMessage) => void,
-    options: { playerSpawn?: Vec3; extraDynamicBodies?: number } = {},
+    options: { playerSpawn?: Vec3; extraDynamicBodies?: number; worldBundle?: WorldBundle } = {},
   ): Promise<AuthoritativeGame> {
+    const bundle = options.worldBundle ?? WORLD_BUNDLE;
     const physics = await PhysicsWorld.create();
     physics.createStaticMesh({
-      vertices: WORLD_BUNDLE.staticCollision.vertices,
-      triangles: WORLD_BUNDLE.staticCollision.triangles,
+      vertices: bundle.staticCollision.vertices,
+      triangles: bundle.staticCollision.triangles,
     });
-    const restored = store.load(WORLD_BUNDLE.mapRevision);
+    const restored = store.load(bundle.mapRevision);
     const game = new AuthoritativeGame(
       physics,
+      bundle,
       store,
       onSnapshot,
       onWorld,
@@ -108,7 +115,7 @@ export class AuthoritativeGame {
       options.playerSpawn ? { ...options.playerSpawn } : null,
     );
     game.#extraDynamicBodyCount = options.extraDynamicBodies ?? 0;
-    game.#runtimeBodies = createRuntimeBodies(physics, restored, game.#extraDynamicBodyCount);
+    game.#runtimeBodies = createRuntimeBodies(physics, bundle, restored, game.#extraDynamicBodyCount);
     for (const body of game.#runtimeBodies) game.#dirtyBodies.add(key(body.handle));
     game.#mechanismRuntime = game.#createMechanismRuntime(restored);
     for (const player of restored?.players ?? []) game.#dormantPlayers.set(player.persistentId, structuredClone(player));
@@ -117,7 +124,7 @@ export class AuthoritativeGame {
 
   get worldEpoch(): number { return this.#worldEpoch; }
   get serverTick(): number { return this.#serverTick; }
-  get mapRevision(): string { return WORLD_BUNDLE.mapRevision; }
+  get mapRevision(): string { return this.#bundle.mapRevision; }
   playerPosition(id: RuntimeId): Vec3 | null {
     return this.#resolvePlayer(id)?.player.state.position ?? null;
   }
@@ -231,17 +238,19 @@ export class AuthoritativeGame {
 
   snapshot(options: { full?: boolean } = { full: true }): Snapshot {
     const full = options.full !== false;
+    const players = this.#players();
     const bodies = this.#runtimeBodies.flatMap(({ handle }) => {
       const identity = key(handle);
-      if (!full && !this.#dirtyBodies.has(identity)) return [];
       const { awake, ...state } = this.#physics.state(handle);
+      const predictionRelevant = players.some((player) => distance(player.state.position, state.position) <= LOCAL_PHYSICS_RADIUS_METRES);
+      if (!full && !this.#dirtyBodies.has(identity) && !predictionRelevant) return [];
       return [{ ...state, flags: this.#snapshotFlags(handle, state.position, awake) }];
     });
     if (!full) this.#dirtyBodies.clear();
     return {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick,
-      bodies: bodies.concat(this.#players().map((player) => ({
+      bodies: bodies.concat(players.map((player) => ({
         id: player.id,
         position: player.state.position,
         rotation: yawRotation(player.state.yaw),
@@ -249,7 +258,7 @@ export class AuthoritativeGame {
         angularVelocity: { x: 0, y: 0, z: 0 },
         flags: this.#snapshotFlags(player.id, player.state.position, true),
       }))),
-      players: this.#players().map((player) => ({
+      players: players.map((player) => ({
         id: player.id,
         position: player.state.position,
         yaw: player.state.yaw,
@@ -268,7 +277,7 @@ export class AuthoritativeGame {
       type: "world",
       protocolVersion: PROTOCOL_VERSION,
       worldEpoch: this.#worldEpoch,
-      bundle: WORLD_BUNDLE,
+      bundle: this.#bundle,
       runtimeEntities: [
         ...this.#runtimeBodies.map(({ handle, ...runtime }) => ({ ...runtime, id: handle })),
         ...this.#players().map((player) => ({
@@ -283,8 +292,8 @@ export class AuthoritativeGame {
   reset(): Snapshot {
     this.#physics.recreate();
     this.#physics.createStaticMesh({
-      vertices: WORLD_BUNDLE.staticCollision.vertices,
-      triangles: WORLD_BUNDLE.staticCollision.triangles,
+      vertices: this.#bundle.staticCollision.vertices,
+      triangles: this.#bundle.staticCollision.triangles,
     });
     this.#runtimeBodies = [];
     this.#dormantPlayers.clear();
@@ -294,7 +303,7 @@ export class AuthoritativeGame {
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
-    this.#runtimeBodies = createRuntimeBodies(this.#physics, null, this.#extraDynamicBodyCount);
+    this.#runtimeBodies = createRuntimeBodies(this.#physics, this.#bundle, null, this.#extraDynamicBodyCount);
     for (const body of this.#runtimeBodies) this.#dirtyBodies.add(key(body.handle));
     this.#mechanismRuntime = this.#createMechanismRuntime(null);
     for (const player of this.#players()) {
@@ -318,7 +327,7 @@ export class AuthoritativeGame {
   }
 
   save(): void {
-    this.#store.save(WORLD_BUNDLE.mapRevision, {
+    this.#store.save(this.#bundle.mapRevision, {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick,
       bodies: this.#runtimeBodies.map((body) => ({
@@ -369,6 +378,7 @@ export class AuthoritativeGame {
   #createMechanismRuntime(restored: PersistedWorld | null): MechanismRuntime {
     return createMechanismRuntime({
       physics: this.#physics,
+      bundle: this.#bundle,
       bodies: this.#runtimeBodies,
       restored,
       currentTick: () => this.#serverTick,
@@ -487,9 +497,9 @@ export class AuthoritativeGame {
     persistentId: string,
     restored?: PersistedWorld["players"][number],
   ): Player {
-    const spawn = WORLD_BUNDLE.entities.find((entity) => entity.classname === "info_player_start")?.origin;
+    const spawn = this.#bundle.entities.find((entity) => entity.classname === "info_player_start")?.origin;
     if (!spawn) throw new Error("map requires an info_player_start");
-    const yaw = Number(WORLD_BUNDLE.entities.find((entity) => entity.classname === "info_player_start")?.runtimeProperties.angle ?? 0);
+    const yaw = Number(this.#bundle.entities.find((entity) => entity.classname === "info_player_start")?.runtimeProperties.angle ?? 0);
     const state: PlayerControllerState = restored ? {
       position: { ...restored.position },
       verticalVelocity: restored.verticalVelocity,
@@ -606,4 +616,8 @@ function key(id: RuntimeId): string {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function distance(a: Vec3, b: Vec3): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }

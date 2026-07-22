@@ -41,8 +41,18 @@ Concrete cases live under the subsystem that owns the invariant. The current
 dynamic-support regression drops a player onto `physics.cube.heavy` from the
 production Systems Garden bundle, waits for both authority and prediction to
 settle on the body, jumps, and verifies the player lands on the same support.
-Run it with `bun run smoke:dynamic`; run the ordinary and shaped-link browser
-paths with `bun run smoke:browser` and `bun run smoke:latency`.
+The minimal `content/maps/fixtures/network-boxes.map` fixture separately drives
+sustained pushing and stacked-box jump scripts through the real authority and
+predictor with delayed sparse snapshots. Those tests record authority-to-
+prediction player error, body error, grounded disagreement, and collision
+penetration throughout the script.
+
+The `dynamic-push` browser scenario samples the actual rendered capsule and
+rendered heavy cube on `requestAnimationFrame` under 150 ms simulated RTT. It
+requires visible cube response and fails if the presented capsule enters the
+cube by more than 3.5 cm. Run it with `bun run smoke:push`; run dynamic support
+with `bun run smoke:dynamic`, and the ordinary shaped-link path with
+`bun run smoke:latency`.
 
 This policy follows the useful parts of Crashcat's named KCC bug fixtures and
 stress scene, Bongle's fixed-tick controller/environment scripts, and Bongle's
@@ -101,6 +111,13 @@ quality target; it must remain bounded, avoid correctness failures, and recover
 after the impairment clears.
 
 Additional gates are:
+
+- local-contact simulation tracks authority within 1 cm for sustained pushing,
+  within 6 cm for stacked support/jump scripts, and keeps measured predicted
+  collision penetration below 6 mm in the minimal fixture;
+- presentation collision is measured independently from simulation divergence;
+  the shaped-RTT browser push regression allows at most 3.5 cm including the
+  controller skin/tolerance;
 
 - the 60 Hz server tick stays below 8 ms p95 and 12 ms p99 with 16 clients and
   the baseline dynamic world;

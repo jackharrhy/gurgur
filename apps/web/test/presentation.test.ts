@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BodySnapshot } from "@gurgur/shared";
-import { createPredictedPoseTimeline } from "../src/presentation";
+import { createPredictedPoseTimeline, mergeBodySamples } from "../src/presentation";
 
 const pose = (x: number): BodySnapshot => ({
   id: { index: 1, generation: 1 },
@@ -24,5 +24,11 @@ describe("predicted display-rate presentation", () => {
     buffer.push(pose(0), 0);
     buffer.push(pose(2), 1000 / 60);
     expect(buffer.sample(1000 / 60)?.position.x).toBe(2);
+  });
+
+  test("uses locally predicted contact bodies instead of their delayed authoritative poses", () => {
+    const delayed = pose(0);
+    const predicted = pose(0.5);
+    expect(mergeBodySamples([delayed], [predicted])).toEqual([predicted]);
   });
 });

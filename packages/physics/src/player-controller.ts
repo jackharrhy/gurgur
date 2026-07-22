@@ -9,8 +9,8 @@ export const PLAYER_GROUND_SNAP = 0.4;
 const GROUND_PROBE = 0.06;
 const EPSILON = 0.002;
 const STANDING_HALF_SEGMENT = 0.55;
-const CROUCHED_HALF_SEGMENT = 0.25;
-const CROUCH_HEIGHT_DELTA = STANDING_HALF_SEGMENT - CROUCHED_HALF_SEGMENT;
+export const PLAYER_CROUCHED_HALF_SEGMENT = 0.25;
+const CROUCH_HEIGHT_DELTA = STANDING_HALF_SEGMENT - PLAYER_CROUCHED_HALF_SEGMENT;
 const WALKABLE_NORMAL_Y = Math.cos(50 * Math.PI / 180);
 
 export type PlayerControllerInput = {
@@ -56,7 +56,7 @@ export function stepPlayerController(
   } else if (!wantsCrouch && crouched) {
     const standing = { ...basePosition, y: basePosition.y + CROUCH_HEIGHT_DELTA };
     const ceiling = world.raycastClosest(
-      { x: basePosition.x, y: basePosition.y + CROUCHED_HALF_SEGMENT + 0.35 - 0.01, z: basePosition.z },
+      { x: basePosition.x, y: basePosition.y + PLAYER_CROUCHED_HALF_SEGMENT + 0.35 - 0.01, z: basePosition.z },
       { x: 0, y: CROUCH_HEIGHT_DELTA + 0.02, z: 0 },
     );
     if (!ceiling && world.capsuleFits(standing, { halfSegment: STANDING_HALF_SEGMENT })) {
@@ -64,7 +64,7 @@ export function stepPlayerController(
       crouched = false;
     }
   }
-  const halfSegment = crouched ? CROUCHED_HALF_SEGMENT : STANDING_HALF_SEGMENT;
+  const halfSegment = crouched ? PLAYER_CROUCHED_HALF_SEGMENT : STANDING_HALF_SEGMENT;
   const halfHeight = halfSegment + 0.35;
   const capsule = { halfSegment };
   const support = state.grounded ? world.raycastClosest(

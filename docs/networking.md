@@ -4,8 +4,9 @@
 
 The Bun server is authoritative. Clients send sequenced input and interaction
 intent; the server validates those commands, advances one shared simulation, and
-publishes authoritative state. The local player is predicted and reconciled.
-Remote players and bodies render from snapshot history.
+publishes authoritative state. The local player and nearby dynamic contact region
+are predicted and reconciled. Remote players and unrelated bodies render from
+snapshot history.
 
 The server runs a fixed 60 Hz simulation with four Box3D substeps per tick.
 Clients sample and send input at 60 Hz. The server publishes snapshots at 20 Hz.
@@ -63,19 +64,31 @@ results, transforms, or successful outcomes.
 ## Prediction and reconciliation
 
 The client prediction worker runs the same pinned Box3D Wasm, controller code,
-coordinate conversion, constants, fixed timestep, and input codec as the server.
-It predicts the local player only. Held and remote bodies remain authoritative
-and use snapshot presentation; grab success is never predicted.
+coordinate conversion, material properties, constants, fixed timestep, and input
+codec as the server. It predicts the local player plus dynamic bodies within five
+metres of that player. Dynamic bodies outside that local region remain
+non-simulated collision proxies and use authoritative snapshot presentation.
+Grab success is never predicted.
 
-Every prediction tick stores the input command and replayable player state. An
-authoritative player sample contains server tick, transform, linear velocity,
-controller ground state, and last processed input sequence. On receipt, the
-client restores that state, drops acknowledged commands, replays the remainder,
-and stores any small correction as a render-only offset. Errors at or above
-0.25 m and explicit discontinuities snap immediately; smaller visual offsets
-decay over 100 ms.
+Every prediction tick stores the input command and replayable player state. The
+client applies controller movement and reaction impulses before advancing its
+local Box3D region by the same fixed step as the server. An authoritative player
+sample contains server tick, transform, linear velocity, controller ground
+state, and last processed input sequence. Sparse snapshots also include complete
+same-tick states for dynamic bodies within five metres of any player, even when
+those bodies are otherwise clean. On receipt, the client restores that local
+state, drops acknowledged commands, replays the remainder, and stores any small
+player correction as a render-only offset.
 
-Global puzzle results, remote bodies, ownership, and world interactions are never
+Errors at or above 0.25 m and explicit discontinuities snap immediately; smaller
+visual offsets decay over 100 ms. Render-only correction is collision-clamped so
+the smoothing path cannot move the displayed capsule through current prediction
+geometry. Locally predicted bodies replace their delayed authoritative samples
+for presentation while they remain in the local region.
+
+This is speculation, not delegated authority. The server still validates intent
+and owns every transform, impulse result, interaction, and puzzle outcome. Global
+puzzle results, remote players, ownership, and world interactions are never
 predicted as truth. Teleport, respawn, `worldEpoch` change, and map reload clear
 prediction and interpolation history.
 
@@ -83,7 +96,9 @@ prediction and interpolation history.
 
 Snapshots are keyed by authoritative server tick, never packet-arrival time. The
 client estimates server time from ping/pong samples and renders remote entities
-150 ms behind it. Snapshot history retains 500 ms. At the 20 Hz snapshot rate,
+and unrelated bodies 150 ms behind it. The local player and locally predicted
+dynamic bodies render near current predicted time instead. Snapshot history
+retains 500 ms. At the 20 Hz snapshot rate,
 this maintains:
 
 ```text

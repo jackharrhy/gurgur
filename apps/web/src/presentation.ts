@@ -43,6 +43,14 @@ export function createPredictedPoseTimeline(): PredictedPoseTimeline {
   return { push, sample, clear };
 }
 
+export function mergeBodySamples(authoritative: BodySnapshot[], predicted: BodySnapshot[]): BodySnapshot[] {
+  const predictedById = new Map(predicted.map((body) => [key(body), body]));
+  const merged = authoritative.map((body) => predictedById.get(key(body)) ?? body);
+  const authoritativeIds = new Set(authoritative.map(key));
+  for (const body of predicted) if (!authoritativeIds.has(key(body))) merged.push(body);
+  return merged;
+}
+
 function clone(body: BodySnapshot): BodySnapshot {
   return {
     ...body,

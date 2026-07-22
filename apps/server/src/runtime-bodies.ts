@@ -1,25 +1,29 @@
 import type { BodyKind, PhysicsWorld } from "@gurgur/physics";
-import type { RuntimeEntity, RuntimeId } from "@gurgur/shared";
+import type { RuntimeEntity, RuntimeId, WorldBundle } from "@gurgur/shared";
 import type { PersistedWorld } from "./store";
-import { WORLD_BUNDLE } from "./world";
 
 type PhysicalRuntimeEntity = Extract<RuntimeEntity, { brushIndex: number }>;
 export type RuntimeBody = PhysicalRuntimeEntity & { handle: RuntimeId };
 
 export function createRuntimeBodies(
   physics: PhysicsWorld,
+  bundle: WorldBundle,
   restored: PersistedWorld | null,
   extraDynamicBodyCount = 0,
 ): RuntimeBody[] {
-  const bodies = createAuthoredBodies(physics, restored);
-  bodies.push(...createStressBodies(physics, restored, extraDynamicBodyCount));
+  const bodies = createAuthoredBodies(physics, bundle, restored);
+  bodies.push(...createStressBodies(physics, bundle, restored, extraDynamicBodyCount));
   return bodies;
 }
 
-function createAuthoredBodies(physics: PhysicsWorld, restored: PersistedWorld | null): RuntimeBody[] {
+function createAuthoredBodies(
+  physics: PhysicsWorld,
+  bundle: WorldBundle,
+  restored: PersistedWorld | null,
+): RuntimeBody[] {
   const bodies: RuntimeBody[] = [];
   const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
-  for (const [entityIndex, entity] of WORLD_BUNDLE.entities.entries()) {
+  for (const [entityIndex, entity] of bundle.entities.entries()) {
     if (
       entity.classname !== "func_physics"
       && entity.classname !== "func_door"
@@ -30,7 +34,7 @@ function createAuthoredBodies(physics: PhysicsWorld, restored: PersistedWorld | 
       throw new Error(`physical map entity ${entityIndex} must have at least one brush and an authoredId`);
     }
     const brushIndex = entity.brushIndices[0]!;
-    const brush = WORLD_BUNDLE.brushes[brushIndex]!;
+    const brush = bundle.brushes[brushIndex]!;
     const type: BodyKind = entity.classname === "func_physics"
       ? "dynamic"
       : entity.classname === "func_button" ? "static" : "kinematic";
@@ -41,7 +45,7 @@ function createAuthoredBodies(physics: PhysicsWorld, restored: PersistedWorld | 
     };
     const saved = restoredById.get(entity.authoredId);
     const hulls = entity.brushIndices.map((index) => ({
-      vertices: WORLD_BUNDLE.brushes[index]!.worldVertices.map((vertex) => ({
+      vertices: bundle.brushes[index]!.worldVertices.map((vertex) => ({
         x: vertex.x - brush.center.x,
         y: vertex.y - brush.center.y,
         z: vertex.z - brush.center.z,
@@ -76,6 +80,7 @@ function createAuthoredBodies(physics: PhysicsWorld, restored: PersistedWorld | 
 
 function createStressBodies(
   physics: PhysicsWorld,
+  bundle: WorldBundle,
   restored: PersistedWorld | null,
   count: number,
 ): RuntimeBody[] {
@@ -83,9 +88,9 @@ function createStressBodies(
     throw new Error("extra dynamic body count must be between 0 and 512");
   }
   if (count === 0) return [];
-  const templateEntity = WORLD_BUNDLE.entities.find((entity) => entity.authoredId === "physics.stack.01");
+  const templateEntity = bundle.entities.find((entity) => entity.authoredId === "physics.stack.01");
   const brushIndex = templateEntity?.brushIndices[0];
-  const brush = brushIndex === undefined ? null : WORLD_BUNDLE.brushes[brushIndex];
+  const brush = brushIndex === undefined ? null : bundle.brushes[brushIndex];
   if (!templateEntity || brushIndex === undefined || !brush) {
     throw new Error("dynamic stress-body template is missing");
   }

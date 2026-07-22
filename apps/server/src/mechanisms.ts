@@ -1,8 +1,7 @@
 import type { PhysicsStepEvents, PhysicsWorld } from "@gurgur/physics";
-import { PHYSICS_DT, type RuntimeId, type Vec3 } from "@gurgur/shared";
+import { PHYSICS_DT, type RuntimeId, type Vec3, type WorldBundle } from "@gurgur/shared";
 import type { RuntimeBody } from "./runtime-bodies";
 import type { PersistedWorld } from "./store";
-import { WORLD_BUNDLE } from "./world";
 
 type Trigger = {
   handle: RuntimeId;
@@ -58,6 +57,7 @@ export type MechanismRuntime = {
 
 type MechanismRuntimeOptions = {
   physics: PhysicsWorld;
+  bundle: WorldBundle;
   bodies: RuntimeBody[];
   restored: PersistedWorld | null;
   currentTick(): number;
@@ -66,7 +66,7 @@ type MechanismRuntimeOptions = {
 };
 
 export function createMechanismRuntime(options: MechanismRuntimeOptions): MechanismRuntime {
-  const { physics, bodies, restored, currentTick, playerProxies, requestSave } = options;
+  const { physics, bundle, bodies, restored, currentTick, playerProxies, requestSave } = options;
   const triggers: Trigger[] = [];
   const mechanisms: Mechanism[] = [];
   const relays: Relay[] = [];
@@ -157,11 +157,11 @@ export function createMechanismRuntime(options: MechanismRuntimeOptions): Mechan
     }
   };
 
-  populate({ physics, bodies, restored, triggers, mechanisms, relays, buttons, setTransform });
+  populate({ physics, bundle, bodies, restored, triggers, mechanisms, relays, buttons, setTransform });
   return { triggers, mechanisms, relays, buttons, delayedSignals, step, processSensorBegins, emitTarget };
 }
 
-type Population = Pick<MechanismRuntimeOptions, "physics" | "bodies" | "restored"> & {
+type Population = Pick<MechanismRuntimeOptions, "physics" | "bundle" | "bodies" | "restored"> & {
   triggers: Trigger[];
   mechanisms: Mechanism[];
   relays: Relay[];
@@ -170,14 +170,14 @@ type Population = Pick<MechanismRuntimeOptions, "physics" | "bodies" | "restored
 };
 
 function populate(options: Population): void {
-  const { physics, bodies, restored, triggers, mechanisms, relays, buttons, setTransform } = options;
+  const { physics, bundle, bodies, restored, triggers, mechanisms, relays, buttons, setTransform } = options;
   const bodyByAuthoredId = new Map(bodies.map((body) => [body.authoredId, body]));
   const restoredMechanisms = new Map(restored?.mechanisms.map((state) => [state.authoredId, state]));
   const restoredSignals = new Map(restored?.signals.map((state) => [state.authoredId, state]));
-  for (const entity of WORLD_BUNDLE.entities) {
+  for (const entity of bundle.entities) {
     if (entity.classname === "trigger_once" || entity.classname === "trigger_multiple") {
       if (!entity.authoredId) throw new Error(`${entity.classname} requires an authoredId`);
-      const brush = WORLD_BUNDLE.brushes[entity.brushIndices[0]!]!;
+      const brush = bundle.brushes[entity.brushIndices[0]!]!;
       const saved = restoredSignals.get(entity.authoredId);
       triggers.push({
         handle: physics.createSensorHull({ position: zero(), vertices: brush.worldVertices }),
@@ -219,7 +219,7 @@ function populate(options: Population): void {
     if (entity.classname !== "func_door" && entity.classname !== "func_platform") continue;
     const body = bodyByAuthoredId.get(entity.authoredId!);
     if (!body) throw new Error(`mechanism body ${entity.authoredId} is missing`);
-    const start = { ...WORLD_BUNDLE.brushes[entity.brushIndices[0]!]!.center };
+    const start = { ...bundle.brushes[entity.brushIndices[0]!]!.center };
     const direction = entity.runtimeProperties.moveDirection as Vec3;
     const distance = Number(entity.runtimeProperties.distance);
     const saved = restoredMechanisms.get(entity.authoredId!);

@@ -12,10 +12,11 @@ type WorkerRequest =
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let predictor: PlayerPredictor;
 let worldBarrier = Promise.resolve();
-predictor = new PlayerPredictor((body: BodySnapshot | null) => {
+predictor = new PlayerPredictor((body: BodySnapshot | null, bodies: BodySnapshot[]) => {
   scope.postMessage({
     type: "presentation",
     body,
+    bodies,
     correctionMagnitude: predictor?.correctionMagnitude ?? 0,
   });
 }, { wasmUrl: "/box3d.wasm" });

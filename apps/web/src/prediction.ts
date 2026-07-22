@@ -1,6 +1,7 @@
 import {
   PHYSICS_DT,
   PHYSICS_SUBSTEPS,
+  LOCAL_PHYSICS_RADIUS_METRES,
   type BodySnapshot,
   type InputCommand,
   type PlayerStateSnapshot,
@@ -12,7 +13,9 @@ import {
 } from "@gurgur/shared";
 import {
   PhysicsWorld,
+  PLAYER_CROUCHED_HALF_SEGMENT,
   stepPlayerController,
+  type BodyKind,
   type PlayerControllerState,
 } from "@gurgur/physics";
 
@@ -24,6 +27,9 @@ const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
 type PredictedFrame = { command: InputCommand; state: PlayerControllerState | null };
 type CollisionProxy = {
   handle: RuntimeId;
+  networkId: RuntimeId;
+  bodyKind: BodyKind;
+  locallySimulated: boolean;
   position: Vec3;
   rotation: Quat;
   linearVelocity: Vec3;
@@ -31,7 +37,7 @@ type CollisionProxy = {
 };
 
 export class PlayerPredictor {
-  readonly #onPresentation: (body: BodySnapshot | null) => void;
+  readonly #onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void;
   readonly #wasmUrl: string | null;
   #physics: PhysicsWorld | null = null;
   #localPlayer: RuntimeId | null = null;
@@ -48,7 +54,10 @@ export class PlayerPredictor {
   #playerProxy: RuntimeId | null = null;
   #playerProxyCrouched = false;
 
-  constructor(onPresentation: (body: BodySnapshot | null) => void, options: { wasmUrl?: string } = {}) {
+  constructor(
+    onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void,
+    options: { wasmUrl?: string } = {},
+  ) {
     this.#onPresentation = onPresentation;
     this.#wasmUrl = options.wasmUrl ?? null;
   }
@@ -60,7 +69,7 @@ export class PlayerPredictor {
     this.#history = [];
     this.#correction = zero();
     this.#correctionSecondsRemaining = 0;
-    this.#onPresentation(null);
+    this.#onPresentation(null, []);
   }
 
   async setWorld(message: WorldMessage): Promise<void> {
@@ -82,7 +91,7 @@ export class PlayerPredictor {
     this.#correction = zero();
     this.#correctionSecondsRemaining = 0;
     this.#pendingAuthority = null;
-    this.#onPresentation(null);
+    this.#onPresentation(null, []);
 
     const physics = await PhysicsWorld.create(this.#wasmUrl ? {
       locateFile: (path) => path.endsWith("box3d.wasm") ? this.#wasmUrl! : path,
@@ -97,6 +106,16 @@ export class PlayerPredictor {
       const brush = message.bundle.brushes[runtime.brushIndex];
       if (!brush) throw new Error(`runtime brush ${runtime.brushIndex} does not exist`);
       const rotation = identityRotation();
+      const bodyKind: BodyKind = runtime.classname === "func_physics"
+        ? "dynamic"
+        : runtime.classname === "func_button" ? "static" : "kinematic";
+      const type = bodyKind === "dynamic" ? "kinematic" : bodyKind;
+      const authored = message.bundle.entities.find((entity) => entity.authoredId === runtime.authoredId);
+      const material = {
+        density: Number(authored?.runtimeProperties.density ?? 1),
+        friction: Number(authored?.runtimeProperties.friction ?? 0.6),
+        restitution: Number(authored?.runtimeProperties.restitution ?? 0),
+      };
       const brushIndices = runtime.brushIndices ?? [runtime.brushIndex];
       const hulls = brushIndices.map((index) => ({
         vertices: message.bundle.brushes[index]!.worldVertices.map((vertex) => ({
@@ -105,8 +124,11 @@ export class PlayerPredictor {
       }));
       proxies.set(idKey(runtime.id), {
         handle: brushIndices.length === 1
-          ? physics.createHull({ type: "kinematic", position: brush.center, rotation, vertices: brush.localVertices })
-          : physics.createCompoundHulls({ type: "kinematic", position: brush.center, rotation, hulls }),
+          ? physics.createHull({ type, position: brush.center, rotation, vertices: brush.localVertices, ...material })
+          : physics.createCompoundHulls({ type, position: brush.center, rotation, hulls, ...material }),
+        networkId: { ...runtime.id },
+        bodyKind,
+        locallySimulated: false,
         position: { ...brush.center },
         rotation,
         linearVelocity: zero(),
@@ -132,9 +154,10 @@ export class PlayerPredictor {
     this.#history.push(frame);
     if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
     if (!this.#physics || !this.#state) return;
+    this.#updateLocalPhysicsScope();
     this.#state = stepPlayerController(this.#physics, this.#state, command, PHYSICS_DT);
     this.#updatePlayerProxy();
-    this.#advanceCollisionProxies();
+    this.#stepPhysics();
     frame.state = cloneState(this.#state);
     this.#decayCorrection();
     this.#emit();
@@ -156,10 +179,12 @@ export class PlayerPredictor {
     );
     this.#state = controllerState(authority);
     this.#updatePlayerProxy();
+    this.#updateLocalPhysicsScope();
     for (const frame of this.#history) {
+      this.#updateLocalPhysicsScope();
       this.#state = stepPlayerController(this.#physics, this.#state, frame.command, PHYSICS_DT);
       this.#updatePlayerProxy();
-      this.#advanceCollisionProxies();
+      this.#stepPhysics();
       frame.state = cloneState(this.#state);
     }
 
@@ -185,6 +210,18 @@ export class PlayerPredictor {
   get pendingInputCount(): number { return this.#history.length; }
   get correctionMagnitude(): number { return length(this.#correction); }
   get predictedPosition(): Vec3 | null { return this.#state ? { ...this.#state.position } : null; }
+  get predictedGrounded(): boolean | null { return this.#state?.grounded ?? null; }
+  predictedBody(id: RuntimeId): BodySnapshot | null {
+    const proxy = this.#collisionProxies.get(idKey(id));
+    return proxy ? {
+      id: { ...id },
+      position: { ...proxy.position },
+      rotation: { ...proxy.rotation },
+      linearVelocity: { ...proxy.linearVelocity },
+      angularVelocity: { ...proxy.angularVelocity },
+    } : null;
+  }
+  get predictedBodies(): BodySnapshot[] { return this.#nearbyPredictedBodies(); }
   get lastReconciliationError(): number { return this.#lastReconciliationError; }
 
   dispose(): void {
@@ -194,11 +231,17 @@ export class PlayerPredictor {
     this.#collisionProxies.clear();
     this.#playerProxy = null;
     this.#playerProxyCrouched = false;
-    this.#onPresentation(null);
+    this.#onPresentation(null, []);
   }
 
   #presentationPosition(): Vec3 | null {
-    return this.#state ? add(this.#state.position, this.#correction) : null;
+    if (!this.#state) return null;
+    if (!this.#physics || length(this.#correction) < 0.000001) return { ...this.#state.position };
+    return this.#physics.moveCapsule(
+      this.#state.position,
+      this.#correction,
+      this.#state.crouched ? { halfSegment: PLAYER_CROUCHED_HALF_SEGMENT } : {},
+    );
   }
 
   #decayCorrection(): void {
@@ -216,7 +259,7 @@ export class PlayerPredictor {
       id: this.#localPlayer,
       position: this.#presentationPosition()!,
       rotation: { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) },
-    });
+    }, this.#nearbyPredictedBodies());
   }
 
   #synchronizeCollisionProxies(snapshot: Snapshot): void {
@@ -229,17 +272,60 @@ export class PlayerPredictor {
       proxy.linearVelocity = { ...(body.linearVelocity ?? zero()) };
       proxy.angularVelocity = { ...(body.angularVelocity ?? zero()) };
       this.#physics.setBodyTransform(proxy.handle, proxy.position, proxy.rotation);
-      this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
+      this.#physics.setBodyVelocity(
+        proxy.handle,
+        proxy.bodyKind === "dynamic" && !proxy.locallySimulated ? zero() : proxy.linearVelocity,
+        proxy.bodyKind === "dynamic" && !proxy.locallySimulated ? zero() : proxy.angularVelocity,
+      );
     }
   }
 
-  #advanceCollisionProxies(): void {
+  #stepPhysics(): void {
     if (!this.#physics) return;
+    this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
     for (const proxy of this.#collisionProxies.values()) {
-      proxy.position = add(proxy.position, multiply(proxy.linearVelocity, PHYSICS_DT));
-      proxy.rotation = integrateRotation(proxy.rotation, proxy.angularVelocity, PHYSICS_DT);
-      this.#physics.setBodyTransform(proxy.handle, proxy.position, proxy.rotation);
+      if (proxy.bodyKind === "dynamic" && !proxy.locallySimulated) continue;
+      const state = this.#physics.state(proxy.handle);
+      proxy.position = { ...state.position };
+      proxy.rotation = { ...state.rotation };
+      proxy.linearVelocity = { ...state.linearVelocity };
+      proxy.angularVelocity = { ...state.angularVelocity };
     }
+  }
+
+  #updateLocalPhysicsScope(): void {
+    if (!this.#physics || !this.#state) return;
+    for (const proxy of this.#collisionProxies.values()) {
+      if (proxy.bodyKind !== "dynamic") continue;
+      const shouldSimulate = length(subtract(proxy.position, this.#state.position)) <= LOCAL_PHYSICS_RADIUS_METRES;
+      if (shouldSimulate === proxy.locallySimulated) continue;
+      proxy.locallySimulated = shouldSimulate;
+      this.#physics.setBodyType(proxy.handle, shouldSimulate ? "dynamic" : "kinematic");
+      this.#physics.setBodyVelocity(
+        proxy.handle,
+        shouldSimulate ? proxy.linearVelocity : zero(),
+        shouldSimulate ? proxy.angularVelocity : zero(),
+      );
+      if (!shouldSimulate) {
+        proxy.linearVelocity = zero();
+        proxy.angularVelocity = zero();
+      }
+    }
+  }
+
+  #nearbyPredictedBodies(): BodySnapshot[] {
+    if (!this.#state) return [];
+    return [...this.#collisionProxies.values()].flatMap((proxy) =>
+      length(subtract(proxy.position, this.#state!.position)) <= LOCAL_PHYSICS_RADIUS_METRES
+        ? [{
+          id: { ...proxy.networkId },
+          position: { ...proxy.position },
+          rotation: { ...proxy.rotation },
+          linearVelocity: { ...proxy.linearVelocity },
+          angularVelocity: { ...proxy.angularVelocity },
+        }]
+        : [],
+    );
   }
 
   #updatePlayerProxy(): void {
@@ -282,24 +368,3 @@ function multiply(value: Vec3, amount: number): Vec3 {
   return { x: value.x * amount, y: value.y * amount, z: value.z * amount };
 }
 function length(value: Vec3): number { return Math.hypot(value.x, value.y, value.z); }
-
-function integrateRotation(rotation: Quat, angularVelocity: Vec3, seconds: number): Quat {
-  const speed = length(angularVelocity);
-  if (speed < 0.000001) return rotation;
-  const halfAngle = speed * seconds / 2;
-  const scale = Math.sin(halfAngle) / speed;
-  const delta = {
-    x: angularVelocity.x * scale,
-    y: angularVelocity.y * scale,
-    z: angularVelocity.z * scale,
-    w: Math.cos(halfAngle),
-  };
-  const next = {
-    x: delta.w * rotation.x + delta.x * rotation.w + delta.y * rotation.z - delta.z * rotation.y,
-    y: delta.w * rotation.y - delta.x * rotation.z + delta.y * rotation.w + delta.z * rotation.x,
-    z: delta.w * rotation.z + delta.x * rotation.y - delta.y * rotation.x + delta.z * rotation.w,
-    w: delta.w * rotation.w - delta.x * rotation.x - delta.y * rotation.y - delta.z * rotation.z,
-  };
-  const inverseLength = 1 / Math.hypot(next.x, next.y, next.z, next.w);
-  return { x: next.x * inverseLength, y: next.y * inverseLength, z: next.z * inverseLength, w: next.w * inverseLength };
-}

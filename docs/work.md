@@ -16,9 +16,10 @@ The production foundation exists end to end but is not release-complete:
   bodies, and hashes the result as `mapRevision`;
 - protocol v6 has bounded exact JSON control unions and explicit binary input,
   snapshot, and lifecycle codecs, including multi-brush lifecycle identity;
-- local prediction/replay, display-frame smoothing, 150 ms remote interpolation,
-  movement-event dirty replication, generation-safe reconnect, and epoch reset
-  run through the real browser/server path;
+- local player and nearby dynamic-body prediction/replay, collision-clamped
+  display correction, 150 ms unrelated-remote interpolation, movement-event
+  dirty replication, generation-safe reconnect, and epoch reset run through the
+  real browser/server path;
 - doors, platforms, buttons, triggers, relays, delayed signals, grabs, player
   controller state, sleep state, and cooldown/latch state survive schema-v5
   tick-boundary snapshots and process restart;
@@ -33,7 +34,7 @@ The production foundation exists end to end but is not release-complete:
 
 ## Executable evidence
 
-`bun run check` covers 81 fast/contract tests plus eight real-server integration
+`bun run check` covers 84 fast/contract tests plus eight real-server integration
 and shutdown/configuration tests. The browser commands cover ordinary movement,
 300 ms RTT prediction, dynamic-body landing, grab, touch, gamepad, stale-session
 recovery, and six-page voice. Failures retain browser state and screenshots.
@@ -44,11 +45,14 @@ five-second outage, receiver stall, connected reset, per-profile metrics, and
 canonical budget gates. Reports are generated under ignored `reports/` paths and
 retained only while diagnosing a regression.
 
-The 2026-07-22 cleanup baseline completed a mixed-profile 16-client run with zero
-correctness errors and 2.08 ms server-tick p95, but it is not a movement-quality
-pass: aggregate prediction error was 0.50 m p95, 1.95 m p99, and 7.28 m maximum,
-with 34.5% extrapolated presentation samples. These numbers keep netcode quality
-as active work even though the authority remained bounded.
+The 2026-07-22 local-contact prediction slice completed a mixed-profile 16-client
+run with zero correctness errors and 1.79 ms server-tick p95. Limiting speculative
+dynamics to the five-metre local region restored headless-client cost close to the
+cleanup baseline. It is still not a movement-quality pass: aggregate prediction
+error was 0.50 m p95, 1.92 m p99, and 7.51 m maximum, with 35.3% extrapolated
+presentation samples. Those network-stall and recovery numbers remain active
+work; the new authored push/stack regressions separately pass their sub-centimetre
+local-contact gates.
 
 Scheduled soaks are first-class commands:
 
@@ -65,13 +69,12 @@ tests.
 
 ## Active focus
 
-- Reproduce sustained lateral player pressure against dynamic boxes at both the
-  controller and real-browser layers. The current landing regression does not
-  cover the reported case where the predicted or authoritative capsule phases
-  into a pushed body.
-- Use that fixture to separate controller collision, dynamic-body impulse,
-  prediction-proxy synchronization, and snapshot presentation errors before
-  changing movement constants.
+- Extend the local-contact region from a distance-bounded set to an explicit
+  contact-connected island if authored mechanisms create cases where five metres
+  includes too much unrelated dynamic work or excludes a coupled body.
+- Diagnose the remaining mixed-profile prediction spikes, snapshot age, and
+  extrapolation as ordered-link/recovery behavior; do not loosen the canonical
+  budgets to make the current matrix pass.
 - Finish the mixed-profile multiplayer gates for correction recovery, receiver
   stalls, reconnect, and epoch reset. Keep the deterministic link model and real
   server/client harness; do not rebuild these as mocks.
@@ -104,6 +107,7 @@ bun run harness:matrix
 bun run smoke:browser
 bun run smoke:latency
 bun run smoke:dynamic
+bun run smoke:push
 bun run smoke:grab
 bun run smoke:touch
 bun run smoke:gamepad

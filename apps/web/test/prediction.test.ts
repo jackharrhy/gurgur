@@ -86,8 +86,11 @@ describe("PlayerPredictor", () => {
           brushIndex,
         }],
       });
-      const cubeTop = brush.center.y + Math.max(...brush.localVertices.map((vertex) => vertex.y));
-      const start = { x: brush.center.x, y: cubeTop + 2.5, z: brush.center.z };
+      const start = {
+        x: brush.center.x,
+        y: brush.center.y + Math.max(...brush.localVertices.map((vertex) => vertex.y)) + 2.5,
+        z: brush.center.z,
+      };
       predictor.reconcile({
         worldEpoch: 1,
         serverTick: 0,
@@ -111,7 +114,11 @@ describe("PlayerPredictor", () => {
         }],
       });
       for (let sequence = 0; sequence < 120; sequence += 1) predictor.pushInput(command(sequence, 0));
-      expect(predictor.predictedPosition!.y).toBeCloseTo(cubeTop + 0.9, 1);
+      const predictedCube = predictor.predictedBody(cubeId)!;
+      expect(predictor.predictedPosition!.y).toBeCloseTo(
+        predictedCube.position.y + Math.max(...brush.localVertices.map((vertex) => vertex.y)) + 0.9,
+        1,
+      );
     } finally {
       predictor.dispose();
     }

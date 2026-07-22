@@ -5,6 +5,7 @@ export const PHYSICS_SUBSTEPS = 4;
 export const SNAPSHOT_HZ = 20;
 export const SNAPSHOT_INTERVAL_TICKS = PHYSICS_HZ / SNAPSHOT_HZ;
 export const INTERPOLATION_DELAY_TICKS = 9;
+export const LOCAL_PHYSICS_RADIUS_METRES = 5;
 export const SNAPSHOT_FLAG_CREATED = 1 << 0;
 export const SNAPSHOT_FLAG_TELEPORT = 1 << 1;
 export const SNAPSHOT_FLAG_WAKE = 1 << 2;

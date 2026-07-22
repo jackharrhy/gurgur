@@ -9,7 +9,7 @@ import {
   type WorldMessage,
 } from "@gurgur/shared";
 import type { SnapshotTimeline } from "./interpolation";
-import { createPredictedPoseTimeline } from "./presentation";
+import { createPredictedPoseTimeline, mergeBodySamples, type PredictedPoseTimeline } from "./presentation";
 import {
   createRetroRenderPipeline,
   createSpriteNodeMaterial,
@@ -31,7 +31,9 @@ export class WorldRenderer {
   #worldRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
   readonly #predictedLocal = createPredictedPoseTimeline();
+  readonly #predictedBodies = new Map<string, PredictedPoseTimeline>();
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
+  readonly #onBodyPresentation: (body: BodySnapshot) => void;
   #viewYaw = 0;
   #viewPitch = -0.18;
   #cameraFollowing = false;
@@ -40,9 +42,11 @@ export class WorldRenderer {
     canvas: HTMLCanvasElement,
     history: SnapshotTimeline,
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
+    onBodyPresentation: (body: BodySnapshot) => void = () => {},
   ) {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
+    this.#onBodyPresentation = onBodyPresentation;
     this.#renderer = new THREE.WebGPURenderer({ canvas, antialias: false, powerPreference: "high-performance" });
     this.#renderer.setPixelRatio(1);
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -71,6 +75,7 @@ export class WorldRenderer {
     this.#worldRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
     this.#meshes.clear();
+    this.#predictedBodies.clear();
     this.#cameraFollowing = false;
     for (const batch of message.bundle.renderBatches) this.#worldRoot.add(this.#meshForBatch(batch));
     for (const entity of message.bundle.entities) {
@@ -106,6 +111,7 @@ export class WorldRenderer {
       const mesh = this.#meshes.get(idKey(id));
       if (!mesh) continue;
       this.#meshes.delete(idKey(id));
+      this.#predictedBodies.delete(idKey(id));
       this.#worldRoot.remove(mesh);
       mesh.traverse((object) => {
         if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
@@ -124,6 +130,21 @@ export class WorldRenderer {
   setPredictedPlayer(body: BodySnapshot | null): void {
     if (body) this.#predictedLocal.push(body, performance.now());
     else this.#predictedLocal.clear();
+  }
+
+  setPredictedBodies(bodies: BodySnapshot[]): void {
+    const now = performance.now();
+    const retained = new Set<string>();
+    for (const body of bodies) {
+      const identity = idKey(body.id);
+      retained.add(identity);
+      const timeline = this.#predictedBodies.get(identity) ?? createPredictedPoseTimeline();
+      timeline.push(body, now);
+      this.#predictedBodies.set(identity, timeline);
+    }
+    for (const identity of this.#predictedBodies.keys()) {
+      if (!retained.has(identity)) this.#predictedBodies.delete(identity);
+    }
   }
 
   setViewAngles(yaw: number, pitch: number): void {
@@ -150,10 +171,16 @@ export class WorldRenderer {
       if (document.hidden) return;
       const latest = this.#history.latestTick;
       if (latest !== null) {
-        const estimatedServerTick = this.#history.serverTickAt(performance.now());
-        this.#apply(this.#history.sample(estimatedServerTick - INTERPOLATION_DELAY_TICKS));
+        const now = performance.now();
+        const estimatedServerTick = this.#history.serverTickAt(now);
+        const authoritative = this.#history.sample(estimatedServerTick - INTERPOLATION_DELAY_TICKS);
+        const predictedBodies = [...this.#predictedBodies.values()].flatMap((timeline) => {
+          const body = timeline.sample(now);
+          return body ? [body] : [];
+        });
+        this.#apply(mergeBodySamples(authoritative, predictedBodies));
         const current = this.#history.sample(estimatedServerTick);
-        const predictedLocal = this.#predictedLocal.sample(performance.now());
+        const predictedLocal = this.#predictedLocal.sample(now);
         if (predictedLocal) {
           this.#apply([predictedLocal]);
           this.#follow(predictedLocal);
@@ -416,6 +443,7 @@ export class WorldRenderer {
       if (!mesh) continue;
       mesh.position.set(body.position.x, body.position.y, body.position.z);
       mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
+      this.#onBodyPresentation(body);
     }
   }
 

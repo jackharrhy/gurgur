@@ -46,6 +46,14 @@ application state only at a completed tick boundary.
 Box3D's cross-platform determinism reduces prediction error but is not a lockstep
 contract. The server remains authoritative and clients always reconcile.
 
+The prediction worker keeps all authored moving-body geometry available for
+queries but advances dynamics only inside a five-metre region around its local
+player. A body entering that region is restored from the latest authoritative
+same-tick state and promoted to dynamic; a body leaving it returns to a
+non-simulated proxy. This bounds client physics cost while allowing controller
+reaction impulses, stacked support, and nearby rigid-body contacts to replay in
+the same order as the authority.
+
 ## Coordinates and scale
 
 TrenchBroom uses Z-up map space. Three.js and Box3D use Y-up world space. The only

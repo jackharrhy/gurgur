@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { createGurgurServer, type GurgurServer } from "../apps/server/src/server";
 import worldBundleJson from "../content/generated/systems-garden.json";
-import { PLAYER_HALF_HEIGHT } from "../packages/physics/src/index";
+import { PLAYER_CAPSULE_RADIUS, PLAYER_HALF_HEIGHT } from "../packages/physics/src/index";
 import type { WorldBundle } from "../packages/shared/src/index";
 
 const directory = process.env.GURGUR_URL ? null : await mkdtemp(join(tmpdir(), "gurgur-browser-"));
@@ -12,11 +12,15 @@ const scenario = process.env.SMOKE_SCENARIO ?? "movement";
 const bundle = worldBundleJson as unknown as WorldBundle;
 const heavyEntity = bundle.entities.find((entity) => entity.authoredId === "physics.cube.heavy");
 const heavyBrush = heavyEntity?.brushIndices.length === 1 ? bundle.brushes[heavyEntity.brushIndices[0]!] : null;
-if ((scenario === "dynamic-landing" || scenario === "grab") && !heavyBrush) throw new Error("Systems Garden heavy cube fixture is missing");
+if (["dynamic-landing", "dynamic-push", "grab"].includes(scenario) && !heavyBrush) throw new Error("Systems Garden heavy cube fixture is missing");
 const playerSpawn = heavyBrush ? (scenario === "grab" ? {
   x: heavyBrush.center.x,
   y: PLAYER_HALF_HEIGHT,
   z: heavyBrush.center.z + 2.5,
+} : scenario === "dynamic-push" ? {
+  x: heavyBrush.center.x - Math.max(...heavyBrush.localVertices.map((vertex) => Math.abs(vertex.x))) - 1.2,
+  y: PLAYER_HALF_HEIGHT,
+  z: heavyBrush.center.z,
 } : {
   x: heavyBrush.center.x,
   y: heavyBrush.center.y + Math.max(...heavyBrush.localVertices.map((vertex) => vertex.y)) + 2.5,
@@ -28,7 +32,7 @@ const server: GurgurServer | null = directory ? await createGurgurServer({
   port: 0,
   hostname: "127.0.0.1",
   databasePath: join(directory, "world.sqlite"),
-  playerSpawn: scenario === "dynamic-landing" || scenario === "grab" ? playerSpawn : undefined,
+  playerSpawn: ["dynamic-landing", "dynamic-push", "grab"].includes(scenario) ? playerSpawn : undefined,
 }) : null;
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
 const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
@@ -75,7 +79,37 @@ try {
     y: Number(document.body.dataset.predictedY),
     z: Number(document.body.dataset.predictedZ),
   }));
-  if (scenario === "dynamic-landing") {
+  if (scenario === "dynamic-push") {
+    const cubeHalfX = Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.x)));
+    const samples = page.evaluate(() => new Promise<Array<{ playerX: number; cubeX: number }>>((resolve) => {
+      const values: Array<{ playerX: number; cubeX: number }> = [];
+      const started = performance.now();
+      const sample = (now: number): void => {
+        values.push({
+          playerX: Number(document.body.dataset.renderedX),
+          cubeX: Number(document.body.dataset.renderedHeavyCubeX),
+        });
+        if (now - started >= 1_500) resolve(values);
+        else requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }));
+    const cubeStartX = Number(await page.evaluate(() => document.body.dataset.heavyCubeX));
+    await page.keyboard.down("d");
+    const presented = await samples;
+    await page.keyboard.up("d");
+    const presentedCubeEndX = presented.findLast(({ cubeX }) => Number.isFinite(cubeX))?.cubeX ?? cubeStartX;
+    if (presentedCubeEndX < cubeStartX + 0.01) {
+      throw new Error(`dynamic cube did not visibly respond to the push: ${(presentedCubeEndX - cubeStartX).toFixed(4)}m`);
+    }
+    const penetrations = presented
+      .filter(({ playerX, cubeX }) => Number.isFinite(playerX) && Number.isFinite(cubeX))
+      .map(({ playerX, cubeX }) => playerX + PLAYER_CAPSULE_RADIUS - (cubeX - cubeHalfX));
+    const maxPenetration = Math.max(0, ...penetrations);
+    if (maxPenetration > 0.035) {
+      throw new Error(`presented player phased into dynamic cube by ${maxPenetration.toFixed(4)}m`);
+    }
+  } else if (scenario === "dynamic-landing") {
     await page.waitForFunction(
       (halfHeight) => {
         const supportY = Number(document.body.dataset.heavyCubeTopY) + halfHeight;

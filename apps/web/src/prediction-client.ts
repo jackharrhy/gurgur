@@ -9,6 +9,7 @@ type WorkerRequest =
 type WorkerResponse = {
   type: "presentation";
   body: BodySnapshot | null;
+  bodies: BodySnapshot[];
   correctionMagnitude: number;
 } | { type: "world-ready"; worldEpoch: number };
 
@@ -21,14 +22,14 @@ export type PredictionClient = {
 };
 
 export function createPredictionClient(
-  onPresentation: (body: BodySnapshot | null, correctionMagnitude: number) => void,
+  onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[], correctionMagnitude: number) => void,
 ): PredictionClient {
   const worker = new Worker("/prediction-worker.js", { type: "module", name: "gurgur-prediction" });
   const worldWaiters = new Map<number, Array<() => void>>();
 
   worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
     if (event.data.type === "presentation") {
-      onPresentation(event.data.body, event.data.correctionMagnitude);
+      onPresentation(event.data.body, event.data.bodies, event.data.correctionMagnitude);
     } else {
       for (const resolve of worldWaiters.get(event.data.worldEpoch) ?? []) resolve();
       worldWaiters.delete(event.data.worldEpoch);

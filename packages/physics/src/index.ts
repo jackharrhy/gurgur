@@ -453,6 +453,10 @@ export class PhysicsWorld {
     this.#box3d.b3Body_SetAngularVelocity(body, angularVelocity);
   }
 
+  setBodyType(id: RuntimeId, type: BodyKind): void {
+    this.#box3d.b3Body_SetType(this.#resolve(id), this.#bodyType(type));
+  }
+
   setBodyAwake(id: RuntimeId, awake: boolean): void {
     this.#box3d.b3Body_SetAwake(this.#resolve(id), awake);
   }

@@ -16,6 +16,7 @@
     "smoke:browser": "bun scripts/smoke-browser.ts",
     "smoke:latency": "SMOKE_LATENCY_MS=150 bun scripts/smoke-browser.ts",
     "smoke:dynamic": "SMOKE_SCENARIO=dynamic-landing bun scripts/smoke-browser.ts",
+    "smoke:push": "SMOKE_SCENARIO=dynamic-push SMOKE_LATENCY_MS=75 bun scripts/smoke-browser.ts",
     "smoke:grab": "SMOKE_SCENARIO=grab bun scripts/smoke-browser.ts",
     "smoke:touch": "SMOKE_SCENARIO=touch bun scripts/smoke-browser.ts",
     "smoke:gamepad": "SMOKE_SCENARIO=gamepad bun scripts/smoke-browser.ts",
