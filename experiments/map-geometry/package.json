@@ -1,0 +1,8 @@
+{
+  "name": "@gurgur-experiment/map-geometry",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun run test.ts"
+  }
+}

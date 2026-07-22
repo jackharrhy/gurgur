@@ -1,0 +1,13 @@
+export const PROTOCOL_VERSION = 6;
+export const PHYSICS_HZ = 60;
+export const PHYSICS_DT = 1 / PHYSICS_HZ;
+export const PHYSICS_SUBSTEPS = 4;
+export const SNAPSHOT_HZ = 20;
+export const SNAPSHOT_INTERVAL_TICKS = PHYSICS_HZ / SNAPSHOT_HZ;
+export const INTERPOLATION_DELAY_TICKS = 9;
+export const SNAPSHOT_FLAG_CREATED = 1 << 0;
+export const SNAPSHOT_FLAG_TELEPORT = 1 << 1;
+export const SNAPSHOT_FLAG_WAKE = 1 << 2;
+export const SNAPSHOT_FLAG_SLEEP = 1 << 3;
+export const MAX_CATCH_UP_TICKS = 4;
+export const INPUT_INTENT_TIMEOUT_TICKS = Math.ceil(0.75 / PHYSICS_DT);

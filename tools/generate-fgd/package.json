@@ -1,0 +1,8 @@
+{
+  "name": "@gurgur/generate-fgd",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gurgur/entity-schema": "workspace:*"
+  }
+}

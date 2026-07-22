@@ -1,0 +1,8 @@
+{
+  "name": "@gurgur-experiment/realtime-transport",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "bun run test.ts"
+  }
+}

@@ -1,0 +1,80 @@
+import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WorldStore } from "../src/store";
+
+describe("WorldStore", () => {
+  test("round-trips authoritative state and rejects another map revision", () => {
+    const store = new WorldStore(":memory:");
+    try {
+      const world = {
+        worldEpoch: 4,
+        serverTick: 900,
+        bodies: [{
+          authoredId: "physics.crate.1",
+          position: { x: 1, y: 2, z: 3 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          linearVelocity: { x: 4, y: 5, z: 6 },
+          angularVelocity: { x: 7, y: 8, z: 9 },
+          awake: false,
+        }],
+        mechanisms: [{ authoredId: "door.1", progress: 0.4, direction: 1 as const, resumeAtTick: 0 }],
+        signals: [
+          { authoredId: "relay.1", kind: "relay" as const, readyAtTick: 0, latched: true },
+          { authoredId: "trigger.1", kind: "trigger" as const, readyAtTick: 910, latched: true },
+        ],
+        delayedSignals: [{ target: "door.1", dueTick: 920 }],
+        players: [{
+          persistentId: "session-hash", position: { x: 10, y: 2, z: -3 }, yaw: 1,
+          verticalVelocity: -2, grounded: false, lastJumpCounter: 4, stepCooldown: 2, crouched: true,
+          grabbedAuthoredId: "physics.crate.1", grabLength: 1.75,
+        }],
+      };
+      store.save("map-a", world);
+      expect(store.load("map-a")).toEqual(world);
+      expect(store.load("map-b")).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  test("rolls back the complete tick-boundary transaction when one row fails", () => {
+    const store = new WorldStore(":memory:");
+    const baseline = {
+      worldEpoch: 1, serverTick: 10,
+      bodies: [{
+        authoredId: "body", position: { x: 0, y: 1, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 },
+        linearVelocity: { x: 0, y: 0, z: 0 }, angularVelocity: { x: 0, y: 0, z: 0 }, awake: true,
+      }],
+      mechanisms: [], signals: [], delayedSignals: [], players: [],
+    };
+    try {
+      store.save("map", baseline);
+      expect(() => store.save("map", { ...baseline, serverTick: 11, bodies: [baseline.bodies[0]!, baseline.bodies[0]!] })).toThrow();
+      expect(store.load("map")).toEqual(baseline);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("rejects an explicit schema-v2 fixture before reading its rows", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "gurgur-old-schema-"));
+    const path = join(directory, "world.sqlite");
+    const database = new Database(path, { create: true });
+    database.run(`CREATE TABLE world_snapshot (
+      singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, map_revision TEXT NOT NULL,
+      world_epoch INTEGER NOT NULL, server_tick INTEGER NOT NULL, saved_at_ms INTEGER NOT NULL
+    ) STRICT`);
+    database.run("INSERT INTO world_snapshot VALUES (1, 2, 'map', 4, 90, 0)");
+    database.close();
+    const store = new WorldStore(path);
+    try {
+      expect(store.load("map")).toBeNull();
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

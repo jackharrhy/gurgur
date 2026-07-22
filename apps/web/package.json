@@ -1,0 +1,9 @@
+{
+  "name": "@gurgur/web",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gurgur/physics": "workspace:*",
+    "@gurgur/shared": "workspace:*"
+  }
+}

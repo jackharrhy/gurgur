@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#17111f" />
+    <title>gurgur</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <main>
+      <canvas id="world" aria-label="Gurgur game world"></canvas>
+      <section class="hud" aria-live="polite">
+        <div class="brand">GURGUR<span>_OS</span></div>
+        <div class="status"><i id="light"></i><span id="connection">connecting</span></div>
+        <div class="telemetry">WORLD <span id="epoch">–</span> // TICK <span id="tick">–</span></div>
+        <button id="voice" type="button">enable voice</button>
+      </section>
+      <p class="caption">[ CLICK TO CAPTURE ] &nbsp; WASD MOVE &nbsp; SPACE JUMP &nbsp; E USE</p>
+      <section class="touch-actions" aria-label="Touch controls">
+        <button type="button" data-touch-action="jump">jump</button>
+        <button type="button" data-touch-action="use">use</button>
+        <button type="button" data-touch-action="grab">grab</button>
+        <button type="button" data-touch-action="crouch">crouch</button>
+      </section>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

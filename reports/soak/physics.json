@@ -1,0 +1,15 @@
+{
+  "reportVersion": 1,
+  "churnCycles": 10000,
+  "tickCount": 1000000,
+  "finalGeneration": 10000,
+  "checkpointHash": "10640c0c30c66aa0c71f601e2f4bdc8b01a558f8b179f21314683f7947fffcd1",
+  "elapsedMs": 1391.7977090000002,
+  "memory": {
+    "rss": 185810944,
+    "heapTotal": 83125248,
+    "heapUsed": 38024211,
+    "external": 35987246,
+    "arrayBuffers": 17302837
+  }
+}

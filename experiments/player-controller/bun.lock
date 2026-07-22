@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "@gurgur-experiment/player-controller",
+      "dependencies": {
+        "box3d.js": "0.0.2",
+      },
+    },
+  },
+  "packages": {
+    "box3d.js": ["box3d.js@0.0.2", "", {}, "sha512-ziC6IqMbMAYns1aJ7E1czhBEE2Kj+/QK9L16vMXOz7UaXKUj9gX7Za5ut+Dg3euHK6I/1brFSHOpmOwCI6FhYQ=="],
+  }
+}

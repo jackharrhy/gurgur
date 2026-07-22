@@ -1,0 +1,10 @@
+{
+  "name": "@gurgur/compile-map",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gurgur/entity-schema": "workspace:*",
+    "@gurgur/shared": "workspace:*",
+    "@gurgur/world-compiler": "workspace:*"
+  }
+}

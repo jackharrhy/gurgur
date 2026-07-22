@@ -1,0 +1,8 @@
+{
+  "name": "@gurgur/entity-schema",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

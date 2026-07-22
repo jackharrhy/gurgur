@@ -1,0 +1,32 @@
+# Gurgur
+
+Route work through the authoritative document for the subsystem:
+
+- Product behavior and scope: [`docs/product.md`](docs/product.md)
+- Runtime boundaries, identity, and persistence: [`docs/architecture.md`](docs/architecture.md)
+- Tick, protocol, prediction, transport, and voice: [`docs/networking.md`](docs/networking.md)
+- Box3D integration, geometry, and controller: [`docs/physics.md`](docs/physics.md)
+- Valve 220 compiler and entity schema: [`docs/maps.md`](docs/maps.md)
+- Browser shell, Three.js, assets, and deployment: [`docs/web.md`](docs/web.md)
+- Test harnesses, network profiles, and quality budgets: [`docs/testing.md`](docs/testing.md)
+- Selected technology rationale: [`docs/decisions/README.md`](docs/decisions/README.md)
+- Active work, experiments, and status: [`docs/work.md`](docs/work.md)
+- Pinned source material: [`docs/references.md`](docs/references.md)
+
+Keep these invariants:
+
+- One Bun server owns one persistent, authoritative Box3D simulation.
+- Clients send intent, never authoritative transforms or interaction results.
+- TrenchBroom Valve 220 maps and the TypeScript entity schema are authored truth.
+- Physics advances at a fixed server timestep; never step it by client time.
+- Replication, persistence, `mapRevision`, and `worldEpoch` are separate.
+- Gameplay networking and realtime voice are separate data and media planes.
+
+Canonical design documents state selected behavior. Put TODOs, sequencing, and
+completion status only in `docs/work.md`. Put decision tests under `experiments/`;
+after a result changes architecture, add a decision record and update the owning
+canonical document.
+
+Prefer a complete vertical slice and direct code over speculative frameworks.
+Build production systems with their harnesses. For behavior changes, add focused
+tests, run the relevant multiplayer profile, and keep generated files reproducible.

@@ -1,0 +1,11 @@
+{
+  "name": "@gurgur/world-compiler",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@gurgur/entity-schema": "workspace:*",
+    "@gurgur/map-format": "workspace:*",
+    "@gurgur/shared": "workspace:*"
+  }
+}

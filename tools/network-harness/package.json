@@ -1,0 +1,12 @@
+{
+  "name": "@gurgur/network-harness",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gurgur/shared": "workspace:*"
+  },
+  "scripts": {
+    "check": "bun test",
+    "run": "bun src/run.ts"
+  }
+}
