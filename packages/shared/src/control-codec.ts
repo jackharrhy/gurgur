@@ -1,22 +1,33 @@
 import { PROTOCOL_VERSION } from "./config";
 import type {
-  ClientControlMessage, HelloMessage, PingMessage, PongMessage, VoiceBlockMessage, VoicePeersMessage,
-  VoiceReadyMessage, VoiceSignalForwardMessage, VoiceSignalMessage, WelcomeMessage,
+  ClientControlMessage,
+  HelloMessage,
+  PingMessage,
+  PongMessage,
+  VoiceBlockMessage,
+  VoicePeersMessage,
+  VoiceReadyMessage,
+  VoiceSignalForwardMessage,
+  VoiceSignalMessage,
+  WelcomeMessage,
 } from "./types";
 import type { RuntimeEntity, WorldManifestMessage } from "./world";
 
 type RecordValue = Record<string, unknown>;
 
 export function decodeClientControl(text: string): ClientControlMessage {
-  if (text.length === 0 || text.length > 32_768) throw new Error("control packet length is invalid");
+  if (text.length === 0 || text.length > 32_768)
+    throw new Error("control packet length is invalid");
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
     throw new Error("control packet is not valid JSON");
   }
-  if (!record(value) || typeof value.type !== "string") throw new Error("control packet must be an object with a type");
-  if (value.protocolVersion !== PROTOCOL_VERSION) throw new Error("control protocol version mismatch");
+  if (!record(value) || typeof value.type !== "string")
+    throw new Error("control packet must be an object with a type");
+  if (value.protocolVersion !== PROTOCOL_VERSION)
+    throw new Error("control protocol version mismatch");
   if (value.type === "hello") return hello(value);
   if (value.type === "ping") return ping(value);
   if (value.type === "voice-ready") return voiceReady(value);
@@ -25,8 +36,12 @@ export function decodeClientControl(text: string): ClientControlMessage {
   throw new Error("unknown control packet type");
 }
 
-export type ServerTextMessage = WelcomeMessage | PongMessage | VoicePeersMessage
-  | VoiceSignalForwardMessage | WorldManifestMessage;
+export type ServerTextMessage =
+  | WelcomeMessage
+  | PongMessage
+  | VoicePeersMessage
+  | VoiceSignalForwardMessage
+  | WorldManifestMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
   const value = parseControl(text);
@@ -39,47 +54,90 @@ export function decodeServerControl(text: string): ServerTextMessage {
 }
 
 function parseControl(text: string): RecordValue {
-  if (text.length === 0 || text.length > 32_768) throw new Error("control packet length is invalid");
+  if (text.length === 0 || text.length > 32_768)
+    throw new Error("control packet length is invalid");
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
     throw new Error("control packet is not valid JSON");
   }
-  if (!record(value) || typeof value.type !== "string") throw new Error("control packet must be an object with a type");
-  if (value.protocolVersion !== PROTOCOL_VERSION) throw new Error("control protocol version mismatch");
+  if (!record(value) || typeof value.type !== "string")
+    throw new Error("control packet must be an object with a type");
+  if (value.protocolVersion !== PROTOCOL_VERSION)
+    throw new Error("control protocol version mismatch");
   return value;
 }
 
 function hello(value: RecordValue): HelloMessage {
-  exact(value, ["type", "protocolVersion", "mapRevision", "worldEpoch", "sessionToken", "socketGeneration"]);
-  if (!nullableString(value.mapRevision, 128) || !nullableSafeInteger(value.worldEpoch, 0)
-    || !nullableString(value.sessionToken, 128) || !safeInteger(value.socketGeneration, 0)) {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "mapRevision",
+    "worldEpoch",
+    "sessionToken",
+    "socketGeneration",
+  ]);
+  if (
+    !nullableString(value.mapRevision, 128) ||
+    !nullableSafeInteger(value.worldEpoch, 0) ||
+    !nullableString(value.sessionToken, 128) ||
+    !safeInteger(value.socketGeneration, 0)
+  ) {
     throw new Error("hello fields are invalid");
   }
   return value as HelloMessage;
 }
 
 function welcome(value: RecordValue): WelcomeMessage {
-  exact(value, ["type", "protocolVersion", "worldEpoch", "playerId", "mapRevision", "physicsHz", "snapshotHz",
-    "sessionToken", "socketGeneration", "peerId", "voiceConfig"]);
-  if (!safeInteger(value.worldEpoch, 0) || !runtimeId(value.playerId) || !string(value.mapRevision, 128, 1)
-    || !finitePositive(value.physicsHz) || !finitePositive(value.snapshotHz) || !string(value.sessionToken, 128, 16)
-    || !safeInteger(value.socketGeneration, 0) || !string(value.peerId, 128, 1) || !record(value.voiceConfig)) {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "playerId",
+    "mapRevision",
+    "physicsHz",
+    "snapshotHz",
+    "sessionToken",
+    "socketGeneration",
+    "peerId",
+    "voiceConfig",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !runtimeId(value.playerId) ||
+    !string(value.mapRevision, 128, 1) ||
+    !finitePositive(value.physicsHz) ||
+    !finitePositive(value.snapshotHz) ||
+    !string(value.sessionToken, 128, 16) ||
+    !safeInteger(value.socketGeneration, 0) ||
+    !string(value.peerId, 128, 1) ||
+    !record(value.voiceConfig)
+  ) {
     throw new Error("welcome fields are invalid");
   }
   exact(value.voiceConfig, ["iceServers", "iceTransportPolicy"]);
-  if (!Array.isArray(value.voiceConfig.iceServers) || value.voiceConfig.iceServers.length > 16
-    || !["all", "relay"].includes(String(value.voiceConfig.iceTransportPolicy))) {
+  if (
+    !Array.isArray(value.voiceConfig.iceServers) ||
+    value.voiceConfig.iceServers.length > 16 ||
+    !["all", "relay"].includes(String(value.voiceConfig.iceTransportPolicy))
+  ) {
     throw new Error("voice configuration is invalid");
   }
   for (const server of value.voiceConfig.iceServers) {
     if (!record(server)) throw new Error("ICE server is invalid");
     exact(server, ["urls", "username", "credential"]);
-    const urlsValid = string(server.urls, 2_048, 1)
-      || (Array.isArray(server.urls) && server.urls.length > 0 && server.urls.length <= 16
-        && server.urls.every((url) => string(url, 2_048, 1)));
-    if (!urlsValid || !optionalString(server.username, 512) || !optionalString(server.credential, 2_048)) {
+    const urlsValid =
+      string(server.urls, 2_048, 1) ||
+      (Array.isArray(server.urls) &&
+        server.urls.length > 0 &&
+        server.urls.length <= 16 &&
+        server.urls.every((url) => string(url, 2_048, 1)));
+    if (
+      !urlsValid ||
+      !optionalString(server.username, 512) ||
+      !optionalString(server.credential, 2_048)
+    ) {
       throw new Error("ICE server is invalid");
     }
   }
@@ -87,9 +145,21 @@ function welcome(value: RecordValue): WelcomeMessage {
 }
 
 function world(value: RecordValue): WorldManifestMessage {
-  exact(value, ["type", "protocolVersion", "worldEpoch", "mapRevision", "bundleUrl", "runtimeEntities"]);
-  if (!safeInteger(value.worldEpoch, 0) || !string(value.mapRevision, 128, 1) || !string(value.bundleUrl, 2_048, 1)
-    || !Array.isArray(value.runtimeEntities) || value.runtimeEntities.length > 65_535) {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "mapRevision",
+    "bundleUrl",
+    "runtimeEntities",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !string(value.mapRevision, 128, 1) ||
+    !string(value.bundleUrl, 2_048, 1) ||
+    !Array.isArray(value.runtimeEntities) ||
+    value.runtimeEntities.length > 65_535
+  ) {
     throw new Error("world fields are invalid");
   }
   for (const entity of value.runtimeEntities) validateRuntimeEntity(entity);
@@ -98,8 +168,13 @@ function world(value: RecordValue): WorldManifestMessage {
 
 function pong(value: RecordValue): PongMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "nonce", "sentAtMs", "serverTick"]);
-  if (!safeInteger(value.worldEpoch, 0) || !safeInteger(value.nonce, 0) || !finite(value.sentAtMs)
-    || !safeInteger(value.serverTick, 0)) throw new Error("pong fields are invalid");
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.nonce, 0) ||
+    !finite(value.sentAtMs) ||
+    !safeInteger(value.serverTick, 0)
+  )
+    throw new Error("pong fields are invalid");
   return value as PongMessage;
 }
 
@@ -111,15 +186,25 @@ function voicePeers(value: RecordValue): VoicePeersMessage {
   for (const peer of value.peers) {
     if (!record(peer)) throw new Error("voice peer is invalid");
     exact(peer, ["peerId", "distance", "relative", "polite"]);
-    if (!string(peer.peerId, 128, 1) || !finite(peer.distance) || peer.distance < 0
-      || !vec3(peer.relative) || typeof peer.polite !== "boolean") throw new Error("voice peer is invalid");
+    if (
+      !string(peer.peerId, 128, 1) ||
+      !finite(peer.distance) ||
+      peer.distance < 0 ||
+      !vec3(peer.relative) ||
+      typeof peer.polite !== "boolean"
+    )
+      throw new Error("voice peer is invalid");
   }
   return value as VoicePeersMessage;
 }
 
 function voiceSignalForward(value: RecordValue): VoiceSignalForwardMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "fromPeerId", "signal"]);
-  if (!safeInteger(value.worldEpoch, 0) || !string(value.fromPeerId, 128, 1) || !record(value.signal)) {
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !string(value.fromPeerId, 128, 1) ||
+    !record(value.signal)
+  ) {
     throw new Error("voice-signal fields are invalid");
   }
   validateVoiceSignal(value.signal);
@@ -128,7 +213,11 @@ function voiceSignalForward(value: RecordValue): VoiceSignalForwardMessage {
 
 function ping(value: RecordValue): PingMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "nonce", "sentAtMs"]);
-  if (!safeInteger(value.worldEpoch, 0) || !safeInteger(value.nonce, 0) || !finite(value.sentAtMs)) {
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.nonce, 0) ||
+    !finite(value.sentAtMs)
+  ) {
     throw new Error("ping fields are invalid");
   }
   return value as PingMessage;
@@ -136,13 +225,18 @@ function ping(value: RecordValue): PingMessage {
 
 function voiceReady(value: RecordValue): VoiceReadyMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "enabled"]);
-  if (!safeInteger(value.worldEpoch, 0) || typeof value.enabled !== "boolean") throw new Error("voice-ready fields are invalid");
+  if (!safeInteger(value.worldEpoch, 0) || typeof value.enabled !== "boolean")
+    throw new Error("voice-ready fields are invalid");
   return value as VoiceReadyMessage;
 }
 
 function voiceBlock(value: RecordValue): VoiceBlockMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "peerId", "blocked"]);
-  if (!safeInteger(value.worldEpoch, 0) || !string(value.peerId, 128, 1) || typeof value.blocked !== "boolean") {
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !string(value.peerId, 128, 1) ||
+    typeof value.blocked !== "boolean"
+  ) {
     throw new Error("voice-block fields are invalid");
   }
   return value as VoiceBlockMessage;
@@ -150,7 +244,11 @@ function voiceBlock(value: RecordValue): VoiceBlockMessage {
 
 function voiceSignal(value: RecordValue): VoiceSignalMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "toPeerId", "signal"]);
-  if (!safeInteger(value.worldEpoch, 0) || !string(value.toPeerId, 128, 1) || !record(value.signal)) {
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !string(value.toPeerId, 128, 1) ||
+    !record(value.signal)
+  ) {
     throw new Error("voice-signal fields are invalid");
   }
   validateVoiceSignal(value.signal);
@@ -162,34 +260,52 @@ function validateVoiceSignal(signal: RecordValue): void {
   if (signal.description !== undefined) {
     if (!record(signal.description)) throw new Error("voice description is invalid");
     exact(signal.description, ["type", "sdp"]);
-    if (!["offer", "answer", "pranswer", "rollback"].includes(String(signal.description.type))
-      || (signal.description.sdp !== undefined && !string(signal.description.sdp, 16_000))) {
+    if (
+      !["offer", "answer", "pranswer", "rollback"].includes(String(signal.description.type)) ||
+      (signal.description.sdp !== undefined && !string(signal.description.sdp, 16_000))
+    ) {
       throw new Error("voice description is invalid");
     }
   }
   if (signal.candidate !== undefined) {
     if (!record(signal.candidate)) throw new Error("voice candidate is invalid");
     exact(signal.candidate, ["candidate", "sdpMid", "sdpMLineIndex", "usernameFragment"]);
-    if (!string(signal.candidate.candidate, 4_096)
-      || !nullableOptionalString(signal.candidate.sdpMid, 256)
-      || !nullableOptionalSafeInteger(signal.candidate.sdpMLineIndex, 0)
-      || !nullableOptionalString(signal.candidate.usernameFragment, 256)) {
+    if (
+      !string(signal.candidate.candidate, 4_096) ||
+      !nullableOptionalString(signal.candidate.sdpMid, 256) ||
+      !nullableOptionalSafeInteger(signal.candidate.sdpMLineIndex, 0) ||
+      !nullableOptionalString(signal.candidate.usernameFragment, 256)
+    ) {
       throw new Error("voice candidate is invalid");
     }
   }
-  if (signal.description === undefined && signal.candidate === undefined) throw new Error("voice signal is empty");
+  if (signal.description === undefined && signal.candidate === undefined)
+    throw new Error("voice signal is empty");
 }
 
 function validateRuntimeEntity(value: unknown): asserts value is RuntimeEntity {
   if (!record(value)) throw new Error("runtime entity is invalid");
-  const physical = ["func_physics", "func_door", "func_platform", "func_button"].includes(String(value.classname));
-  exact(value, physical ? ["id", "authoredId", "classname", "brushIndex", "brushIndices"] : ["id", "authoredId", "classname"]);
-  if (!runtimeId(value.id) || !string(value.authoredId, 512, 1)) throw new Error("runtime entity is invalid");
+  const physical = ["func_physics", "func_door", "func_platform", "func_button"].includes(
+    String(value.classname),
+  );
+  exact(
+    value,
+    physical
+      ? ["id", "authoredId", "classname", "brushIndex", "brushIndices"]
+      : ["id", "authoredId", "classname"],
+  );
+  if (!runtimeId(value.id) || !string(value.authoredId, 512, 1))
+    throw new Error("runtime entity is invalid");
   if (physical) {
-    if (!safeInteger(value.brushIndex, 0) || (value.brushIndices !== undefined && (
-      !Array.isArray(value.brushIndices) || value.brushIndices.length === 0 || value.brushIndices.length > 1_024
-      || !value.brushIndices.every((index) => safeInteger(index, 0))
-    ))) throw new Error("runtime entity is invalid");
+    if (
+      !safeInteger(value.brushIndex, 0) ||
+      (value.brushIndices !== undefined &&
+        (!Array.isArray(value.brushIndices) ||
+          value.brushIndices.length === 0 ||
+          value.brushIndices.length > 1_024 ||
+          !value.brushIndices.every((index) => safeInteger(index, 0))))
+    )
+      throw new Error("runtime entity is invalid");
   } else if (value.classname !== "player") throw new Error("runtime entity classname is invalid");
 }
 
@@ -210,7 +326,8 @@ function record(value: unknown): value is RecordValue {
 }
 
 function exact(value: RecordValue, fields: string[]): void {
-  if (Object.keys(value).some((key) => !fields.includes(key))) throw new Error("control packet has unknown fields");
+  if (Object.keys(value).some((key) => !fields.includes(key)))
+    throw new Error("control packet has unknown fields");
 }
 
 function finite(value: unknown): value is number {

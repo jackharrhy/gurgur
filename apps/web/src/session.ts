@@ -10,7 +10,6 @@ import {
   type InputCommand,
   type HelloMessage,
   type LifecycleMessage,
-  type PongMessage,
   type Snapshot,
   type WelcomeMessage,
   type WorldMessage,
@@ -70,9 +69,12 @@ export class GameSession {
     this.#socket = socket;
     socket.addEventListener("open", () => {
       const hello: HelloMessage = {
-        type: "hello", protocolVersion: PROTOCOL_VERSION,
-        mapRevision: this.#mapRevision, worldEpoch: this.#worldEpoch,
-        sessionToken: this.#sessionToken, socketGeneration,
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        mapRevision: this.#mapRevision,
+        worldEpoch: this.#worldEpoch,
+        sessionToken: this.#sessionToken,
+        socketGeneration,
       };
       socket.send(JSON.stringify(hello));
     });
@@ -101,64 +103,76 @@ export class GameSession {
   }
 
   #handleMessage(socket: WebSocket, data: string | ArrayBuffer): void {
-      if (typeof data === "string") {
-        let message;
-        try {
-          message = decodeServerControl(data);
-        } catch {
-          socket.close(4002, "invalid server control packet");
-          return;
-        }
-        if (message.type === "welcome") {
-          if (message.protocolVersion !== PROTOCOL_VERSION) {
-            socket.close(4002, "protocol version mismatch");
-            return;
-          }
-          this.#worldEpoch = message.worldEpoch;
-          this.#mapRevision = message.mapRevision;
-          this.#sessionToken = message.sessionToken;
-          writeSessionToken(message.sessionToken);
-          this.#retryAttempt = 0;
-          this.#callbacks.welcome(message);
-          this.#startPings();
-        } else if (message.type === "world") {
-          if (message.protocolVersion !== PROTOCOL_VERSION || message.mapRevision !== this.#mapRevision) return;
-          this.#worldEpoch = message.worldEpoch;
-          this.#loadedWorldEpoch = null;
-          if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
-          this.#snapshotFrame = null;
-          this.#snapshotQueue = [];
-          this.#pendingLifecycles = [];
-          void this.#loadWorld(message, socket);
-        } else if (message.type === "pong") {
-          if (message.protocolVersion !== PROTOCOL_VERSION || message.worldEpoch !== this.#worldEpoch) return;
-          const now = performance.now();
-          const sample = Math.max(0, now - message.sentAtMs);
-          const previous = this.#rttMs || sample;
-          this.#rttMs += (sample - this.#rttMs) * 0.125;
-          this.#jitterMs += (Math.abs(sample - previous) - this.#jitterMs) * 0.25;
-          this.#callbacks.clock?.(message.serverTick, now, sample / 2);
-          this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
-        } else if (message.type === "voice-peers") {
-          if (message.protocolVersion === PROTOCOL_VERSION && message.worldEpoch === this.#worldEpoch) {
-            this.#callbacks.voicePeers?.(message);
-          }
-        } else if (message.type === "voice-signal") {
-          if (message.protocolVersion === PROTOCOL_VERSION && message.worldEpoch === this.#worldEpoch) {
-            this.#callbacks.voiceSignal?.(message);
-          }
-        }
+    if (typeof data === "string") {
+      let message;
+      try {
+        message = decodeServerControl(data);
+      } catch {
+        socket.close(4002, "invalid server control packet");
         return;
       }
-      if (new DataView(data).getUint8(0) === LIFECYCLE_TAG) {
-        const message = decodeLifecycle(data);
-        if (message.worldEpoch === this.#loadedWorldEpoch) this.#callbacks.lifecycle(message);
-        else if (message.worldEpoch === this.#worldEpoch) this.#pendingLifecycles.push(message);
-      } else {
-        const snapshot = decodeSnapshot(data);
-        if (snapshot.worldEpoch === this.#loadedWorldEpoch) this.#queueSnapshot(snapshot);
-        else if (snapshot.worldEpoch === this.#worldEpoch) retainSnapshot(this.#snapshotQueue, snapshot);
+      if (message.type === "welcome") {
+        if (message.protocolVersion !== PROTOCOL_VERSION) {
+          socket.close(4002, "protocol version mismatch");
+          return;
+        }
+        this.#worldEpoch = message.worldEpoch;
+        this.#mapRevision = message.mapRevision;
+        this.#sessionToken = message.sessionToken;
+        writeSessionToken(message.sessionToken);
+        this.#retryAttempt = 0;
+        this.#callbacks.welcome(message);
+        this.#startPings();
+      } else if (message.type === "world") {
+        if (
+          message.protocolVersion !== PROTOCOL_VERSION ||
+          message.mapRevision !== this.#mapRevision
+        )
+          return;
+        this.#worldEpoch = message.worldEpoch;
+        this.#loadedWorldEpoch = null;
+        if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
+        this.#snapshotFrame = null;
+        this.#snapshotQueue = [];
+        this.#pendingLifecycles = [];
+        void this.#loadWorld(message, socket);
+      } else if (message.type === "pong") {
+        if (message.protocolVersion !== PROTOCOL_VERSION || message.worldEpoch !== this.#worldEpoch)
+          return;
+        const now = performance.now();
+        const sample = Math.max(0, now - message.sentAtMs);
+        const previous = this.#rttMs || sample;
+        this.#rttMs += (sample - this.#rttMs) * 0.125;
+        this.#jitterMs += (Math.abs(sample - previous) - this.#jitterMs) * 0.25;
+        this.#callbacks.clock?.(message.serverTick, now, sample / 2);
+        this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
+      } else if (message.type === "voice-peers") {
+        if (
+          message.protocolVersion === PROTOCOL_VERSION &&
+          message.worldEpoch === this.#worldEpoch
+        ) {
+          this.#callbacks.voicePeers?.(message);
+        }
+      } else if (message.type === "voice-signal") {
+        if (
+          message.protocolVersion === PROTOCOL_VERSION &&
+          message.worldEpoch === this.#worldEpoch
+        ) {
+          this.#callbacks.voiceSignal?.(message);
+        }
       }
+      return;
+    }
+    if (new DataView(data).getUint8(0) === LIFECYCLE_TAG) {
+      const message = decodeLifecycle(data);
+      if (message.worldEpoch === this.#loadedWorldEpoch) this.#callbacks.lifecycle(message);
+      else if (message.worldEpoch === this.#worldEpoch) this.#pendingLifecycles.push(message);
+    } else {
+      const snapshot = decodeSnapshot(data);
+      if (snapshot.worldEpoch === this.#loadedWorldEpoch) this.#queueSnapshot(snapshot);
+      else if (snapshot.worldEpoch === this.#worldEpoch)
+        retainSnapshot(this.#snapshotQueue, snapshot);
+    }
   }
 
   close(): void {
@@ -201,13 +215,15 @@ export class GameSession {
     const send = (): void => {
       const socket = this.#socket;
       if (socket?.readyState === WebSocket.OPEN && this.#worldEpoch !== null) {
-        socket.send(JSON.stringify({
-          type: "ping",
-          protocolVersion: PROTOCOL_VERSION,
-          worldEpoch: this.#worldEpoch,
-          nonce: this.#pingNonce++,
-          sentAtMs: performance.now(),
-        }));
+        socket.send(
+          JSON.stringify({
+            type: "ping",
+            protocolVersion: PROTOCOL_VERSION,
+            worldEpoch: this.#worldEpoch,
+            nonce: this.#pingNonce++,
+            sentAtMs: performance.now(),
+          }),
+        );
       }
     };
     send();
@@ -225,8 +241,14 @@ export class GameSession {
       const response = await fetch(message.bundleUrl);
       if (!response.ok) throw new Error(`world bundle request failed with ${response.status}`);
       const bundle = decodeWorldBundle(await response.arrayBuffer());
-      if (bundle.mapRevision !== message.mapRevision) throw new Error("world bundle revision mismatch");
-      if (generation !== this.#worldLoadGeneration || this.#socket !== socket || this.#worldEpoch !== message.worldEpoch) return;
+      if (bundle.mapRevision !== message.mapRevision)
+        throw new Error("world bundle revision mismatch");
+      if (
+        generation !== this.#worldLoadGeneration ||
+        this.#socket !== socket ||
+        this.#worldEpoch !== message.worldEpoch
+      )
+        return;
       const world: WorldMessage = { ...message, bundle };
       this.#callbacks.world(world);
       this.#callbacks.status("connected");
@@ -234,7 +256,7 @@ export class GameSession {
       for (const lifecycle of this.#pendingLifecycles) this.#callbacks.lifecycle(lifecycle);
       this.#pendingLifecycles = [];
       this.#scheduleSnapshotFrame();
-    } catch (error) {
+    } catch {
       if (generation === this.#worldLoadGeneration) socket.close(4011, "world load failed");
     }
   }
@@ -267,13 +289,25 @@ export function retainSnapshot(queue: Snapshot[], snapshot: Snapshot): void {
 }
 
 function readSessionToken(): string | null {
-  try { return sessionStorage.getItem("gurgur.session"); } catch { return null; }
+  try {
+    return sessionStorage.getItem("gurgur.session");
+  } catch {
+    return null;
+  }
 }
 
 function writeSessionToken(token: string): void {
-  try { sessionStorage.setItem("gurgur.session", token); } catch { /* memory-only fallback */ }
+  try {
+    sessionStorage.setItem("gurgur.session", token);
+  } catch {
+    /* memory-only fallback */
+  }
 }
 
 function clearSessionToken(): void {
-  try { sessionStorage.removeItem("gurgur.session"); } catch { /* memory-only fallback */ }
+  try {
+    sessionStorage.removeItem("gurgur.session");
+  } catch {
+    /* memory-only fallback */
+  }
 }

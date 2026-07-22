@@ -99,11 +99,18 @@ export type VoiceSignalMessage = {
   toPeerId: string;
   signal: {
     description?: { type: "offer" | "answer" | "pranswer" | "rollback"; sdp?: string };
-    candidate?: { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null; usernameFragment?: string | null };
+    candidate?: {
+      candidate: string;
+      sdpMid?: string | null;
+      sdpMLineIndex?: number | null;
+      usernameFragment?: string | null;
+    };
   };
 };
 
-export type VoiceSignalForwardMessage = Omit<VoiceSignalMessage, "toPeerId"> & { fromPeerId: string };
+export type VoiceSignalForwardMessage = Omit<VoiceSignalMessage, "toPeerId"> & {
+  fromPeerId: string;
+};
 
 export type VoicePeersMessage = {
   type: "voice-peers";
@@ -112,8 +119,17 @@ export type VoicePeersMessage = {
   peers: Array<{ peerId: string; distance: number; relative: Vec3; polite: boolean }>;
 };
 
-export type ClientControlMessage = HelloMessage | PingMessage | VoiceReadyMessage | VoiceBlockMessage | VoiceSignalMessage;
-export type ServerControlMessage = WelcomeMessage | PongMessage | VoicePeersMessage | VoiceSignalForwardMessage;
+export type ClientControlMessage =
+  | HelloMessage
+  | PingMessage
+  | VoiceReadyMessage
+  | VoiceBlockMessage
+  | VoiceSignalMessage;
+export type ServerControlMessage =
+  | WelcomeMessage
+  | PongMessage
+  | VoicePeersMessage
+  | VoiceSignalForwardMessage;
 
 export type InputCommand = {
   type: "input";

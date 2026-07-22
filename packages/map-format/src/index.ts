@@ -13,7 +13,13 @@ export type MapFace = {
 };
 
 export type MapBrush = { faces: MapFace[]; line: number; column: number; brushIndex: number };
-export type MapEntity = { properties: Record<string, string>; brushes: MapBrush[]; line: number; column: number; entityIndex: number };
+export type MapEntity = {
+  properties: Record<string, string>;
+  brushes: MapBrush[];
+  line: number;
+  column: number;
+  entityIndex: number;
+};
 export type ValveMap = { entities: MapEntity[]; sourceName: string };
 
 const NUMBER = "([-+\\d.eE]+)";
@@ -29,9 +35,18 @@ function finite(values: string[], sourceName: string, line: number): number[] {
   return numbers;
 }
 
-function parseFace(text: string, sourceName: string, line: number, column: number, faceIndex: number): MapFace {
+function parseFace(
+  text: string,
+  sourceName: string,
+  line: number,
+  column: number,
+  faceIndex: number,
+): MapFace {
   const match = FACE_PATTERN.exec(text);
-  if (!match) throw new Error(`${sourceName}:${line}:${column}: face ${faceIndex}: expected a Valve 220 face`);
+  if (!match)
+    throw new Error(
+      `${sourceName}:${line}:${column}: face ${faceIndex}: expected a Valve 220 face`,
+    );
   const values = finite(match.slice(1, 10), sourceName, line);
   const u = finite(match.slice(11, 15), sourceName, line);
   const v = finite(match.slice(15, 19), sourceName, line);
@@ -65,21 +80,39 @@ export function parseValve220(source: string, sourceName = "<map>"): ValveMap {
     const column = Math.max(1, uncommented.search(/\S/) + 1);
     if (!line || line.startsWith("//")) continue;
     if (line === "{") {
-      if (depth === 0) entity = { properties: {}, brushes: [], line: lineNumber, column, entityIndex: entities.length };
-      else if (depth === 1) brush = { faces: [], line: lineNumber, column, brushIndex: entity?.brushes.length ?? 0 };
-      else throw new Error(`${sourceName}:${lineNumber}:${column}: entity ${entity?.entityIndex ?? -1}: brushes cannot be nested`);
+      if (depth === 0)
+        entity = {
+          properties: {},
+          brushes: [],
+          line: lineNumber,
+          column,
+          entityIndex: entities.length,
+        };
+      else if (depth === 1)
+        brush = { faces: [], line: lineNumber, column, brushIndex: entity?.brushes.length ?? 0 };
+      else
+        throw new Error(
+          `${sourceName}:${lineNumber}:${column}: entity ${entity?.entityIndex ?? -1}: brushes cannot be nested`,
+        );
       depth += 1;
       continue;
     }
     if (line === "}") {
       if (depth === 2) {
         if (!brush || !entity || brush.faces.length < 4) {
-          throw new Error(`${sourceName}:${lineNumber}:${column}: entity ${entity?.entityIndex ?? -1}, brush ${brush?.brushIndex ?? -1}: brush requires at least four faces`);
+          const location = `${sourceName}:${lineNumber}:${column}`;
+          throw new Error(
+            `${location}: entity ${entity?.entityIndex ?? -1}, ` +
+              `brush ${brush?.brushIndex ?? -1}: brush requires at least four faces`,
+          );
         }
         entity.brushes.push(brush);
         brush = null;
       } else if (depth === 1) {
-        if (!entity?.properties.classname) throw new Error(`${sourceName}:${lineNumber}:${column}: entity ${entity?.entityIndex ?? -1}: entity lacks classname`);
+        if (!entity?.properties.classname)
+          throw new Error(
+            `${sourceName}:${lineNumber}:${column}: entity ${entity?.entityIndex ?? -1}: entity lacks classname`,
+          );
         entities.push(entity);
         entity = null;
       } else {
@@ -90,8 +123,14 @@ export function parseValve220(source: string, sourceName = "<map>"): ValveMap {
     }
     if (depth === 1 && entity) {
       const property = parseProperty(line);
-      if (!property) throw new Error(`${sourceName}:${lineNumber}:${column}: entity ${entity.entityIndex}: malformed entity property`);
-      if (property[0] in entity.properties) throw new Error(`${sourceName}:${lineNumber}:${column}: entity ${entity.entityIndex}: duplicate property ${property[0]}`);
+      if (!property)
+        throw new Error(
+          `${sourceName}:${lineNumber}:${column}: entity ${entity.entityIndex}: malformed entity property`,
+        );
+      if (property[0] in entity.properties)
+        throw new Error(
+          `${sourceName}:${lineNumber}:${column}: entity ${entity.entityIndex}: duplicate property ${property[0]}`,
+        );
       entity.properties[property[0]] = property[1];
     } else if (depth === 2 && brush) {
       brush.faces.push(parseFace(line, sourceName, lineNumber, column, brush.faces.length));
@@ -103,7 +142,8 @@ export function parseValve220(source: string, sourceName = "<map>"): ValveMap {
   if (entities.length === 0 || entities[0]?.properties.classname !== "worldspawn") {
     throw new Error(`${sourceName}: first entity must be worldspawn`);
   }
-  if (entities[0].properties.mapversion !== "220") throw new Error(`${sourceName}: mapversion must be 220`);
+  if (entities[0].properties.mapversion !== "220")
+    throw new Error(`${sourceName}: mapversion must be 220`);
   return { entities, sourceName };
 }
 
@@ -112,9 +152,18 @@ function stripComment(line: string): string {
   let escaped = false;
   for (let index = 0; index < line.length - 1; index += 1) {
     const character = line[index]!;
-    if (escaped) { escaped = false; continue; }
-    if (character === "\\" && quoted) { escaped = true; continue; }
-    if (character === '"') { quoted = !quoted; continue; }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quoted) {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
     if (!quoted && character === "/" && line[index + 1] === "/") return line.slice(0, index);
   }
   return line;

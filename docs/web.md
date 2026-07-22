@@ -83,16 +83,16 @@ interaction rays, map geometry, and network transforms remain full precision.
 
 The server exposes a deliberately small surface:
 
-| Route | Purpose |
-| --- | --- |
-| `/` and SPA fallback | browser application |
-| `/game` | gameplay WebSocket upgrade |
-| `/healthz` | process and event-loop health |
-| `/readyz` | map, Box3D, and SQLite readiness |
-| `/metrics` | simulation and send-queue metrics |
-| `/world.bin` | immutable compiled map bundle |
-| `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets |
-| `/admin/reset` | authenticated world reset request |
+| Route                                     | Purpose                           |
+| ----------------------------------------- | --------------------------------- |
+| `/` and SPA fallback                      | browser application               |
+| `/game`                                   | gameplay WebSocket upgrade        |
+| `/healthz`                                | process and event-loop health     |
+| `/readyz`                                 | map, Box3D, and SQLite readiness  |
+| `/metrics`                                | simulation and send-queue metrics |
+| `/world.bin`                              | immutable compiled map bundle     |
+| `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets         |
+| `/admin/reset`                            | authenticated world reset request |
 
 Browser assets and gameplay share an origin, so no application CORS layer is
 required. Administrative authorization remains server-side and never trusts UI

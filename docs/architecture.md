@@ -58,14 +58,14 @@ codecs and drives the real server and client simulation boundaries.
 
 ## State ownership
 
-| State | Owner | Lifetime |
-| --- | --- | --- |
-| Authored geometry and defaults | compiled world bundle | one `mapRevision` |
-| Live bodies and constraints | server Box3D world | one `worldEpoch` |
-| Gameplay and entity state | server registries | one `worldEpoch` |
-| Replicated view | each client | disposable |
-| Local-player prediction | client worker | until correction/reset |
-| Durable application state | SQLite | across process restarts |
+| State                          | Owner                 | Lifetime                |
+| ------------------------------ | --------------------- | ----------------------- |
+| Authored geometry and defaults | compiled world bundle | one `mapRevision`       |
+| Live bodies and constraints    | server Box3D world    | one `worldEpoch`        |
+| Gameplay and entity state      | server registries     | one `worldEpoch`        |
+| Replicated view                | each client           | disposable              |
+| Local-player prediction        | client worker         | until correction/reset  |
+| Durable application state      | SQLite                | across process restarts |
 
 Box3D handles, Wasm pointers, and registry slots are process-local. They are
 wrapped in generation-bearing runtime handles and never persisted or sent as
@@ -73,13 +73,13 @@ stable identity.
 
 ## Identity and versioning
 
-| Concept | Meaning |
-| --- | --- |
-| `authoredId` | explicit stable ID for a persistent map entity |
-| `{ index, generation }` | runtime network identity safe against slot reuse |
-| `mapRevision` | SHA-256 content hash of the compiled world bundle |
-| `worldEpoch` | monotonic reset/reload generation used to reject stale work |
-| `protocolVersion` | exact client/server wire compatibility version |
+| Concept                 | Meaning                                                     |
+| ----------------------- | ----------------------------------------------------------- |
+| `authoredId`            | explicit stable ID for a persistent map entity              |
+| `{ index, generation }` | runtime network identity safe against slot reuse            |
+| `mapRevision`           | SHA-256 content hash of the compiled world bundle           |
+| `worldEpoch`            | monotonic reset/reload generation used to reject stale work |
+| `protocolVersion`       | exact client/server wire compatibility version              |
 
 Every persistent authored entity has a unique explicit `authoredId`, enforced by
 the compiler. Source positions are diagnostics, never identity.

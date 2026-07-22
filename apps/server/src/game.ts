@@ -38,8 +38,33 @@ type Player = {
   persistentId: string;
   proxy: RuntimeId;
   state: PlayerControllerState;
-  input: Pick<InputCommand, "moveX" | "moveZ" | "lookYaw" | "lookPitch" | "buttons" | "jumpCounter" | "interactCounter" | "interactTarget" | "primaryCounter">;
-  pendingInputs: Array<Pick<InputCommand, "sequence" | "moveX" | "moveZ" | "lookYaw" | "lookPitch" | "buttons" | "jumpCounter" | "interactCounter" | "interactTarget" | "primaryCounter">>;
+  input: Pick<
+    InputCommand,
+    | "moveX"
+    | "moveZ"
+    | "lookYaw"
+    | "lookPitch"
+    | "buttons"
+    | "jumpCounter"
+    | "interactCounter"
+    | "interactTarget"
+    | "primaryCounter"
+  >;
+  pendingInputs: Array<
+    Pick<
+      InputCommand,
+      | "sequence"
+      | "moveX"
+      | "moveZ"
+      | "lookYaw"
+      | "lookPitch"
+      | "buttons"
+      | "jumpCounter"
+      | "interactCounter"
+      | "interactTarget"
+      | "primaryCounter"
+    >
+  >;
   lastSequence: number;
   lastProcessedInputSequence: number;
   lastInputServerTick: number;
@@ -116,16 +141,28 @@ export class AuthoritativeGame {
       options.playerSpawn ? { ...options.playerSpawn } : null,
     );
     game.#extraDynamicBodyCount = options.extraDynamicBodies ?? 0;
-    game.#runtimeBodies = createRuntimeBodies(physics, bundle, restored, game.#extraDynamicBodyCount);
+    game.#runtimeBodies = createRuntimeBodies(
+      physics,
+      bundle,
+      restored,
+      game.#extraDynamicBodyCount,
+    );
     for (const body of game.#runtimeBodies) game.#dirtyBodies.add(key(body.handle));
     game.#mechanismRuntime = game.#createMechanismRuntime(restored);
-    for (const player of restored?.players ?? []) game.#dormantPlayers.set(player.persistentId, structuredClone(player));
+    for (const player of restored?.players ?? [])
+      game.#dormantPlayers.set(player.persistentId, structuredClone(player));
     return game;
   }
 
-  get worldEpoch(): number { return this.#worldEpoch; }
-  get serverTick(): number { return this.#serverTick; }
-  get mapRevision(): string { return this.#bundle.mapRevision; }
+  get worldEpoch(): number {
+    return this.#worldEpoch;
+  }
+  get serverTick(): number {
+    return this.#serverTick;
+  }
+  get mapRevision(): string {
+    return this.#bundle.mapRevision;
+  }
   playerPosition(id: RuntimeId): Vec3 | null {
     return this.#resolvePlayer(id)?.player.state.position ?? null;
   }
@@ -139,11 +176,19 @@ export class AuthoritativeGame {
     resolved.player.input = { ...resolved.player.input, moveX: 0, moveZ: 0, buttons: 0 };
     return true;
   }
-  metrics(): { tickP95Ms: number; tickP99Ms: number; tickMaxMs: number; discardedOverloadSeconds: number } {
-    const sorted = [...this.#tickDurationsMs].sort((a, b) => a - b);
-    const percentile = (amount: number): number => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * amount))] ?? 0;
+  metrics(): {
+    tickP95Ms: number;
+    tickP99Ms: number;
+    tickMaxMs: number;
+    discardedOverloadSeconds: number;
+  } {
+    const sorted = [...this.#tickDurationsMs].toSorted((a, b) => a - b);
+    const percentile = (amount: number): number =>
+      sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * amount))] ?? 0;
     return {
-      tickP95Ms: percentile(0.95), tickP99Ms: percentile(0.99), tickMaxMs: sorted.at(-1) ?? 0,
+      tickP95Ms: percentile(0.95),
+      tickP99Ms: percentile(0.99),
+      tickMaxMs: sorted.at(-1) ?? 0,
       discardedOverloadSeconds: this.#discardedOverloadSeconds,
     };
   }
@@ -162,7 +207,10 @@ export class AuthoritativeGame {
     const id = { index: PLAYER_INDEX_BASE + slotIndex, generation };
     const restored = this.#dormantPlayers.get(persistentId);
     this.#dormantPlayers.delete(persistentId);
-    this.#playerSlots[slotIndex] = { generation, player: this.#newPlayer(id, persistentId, restored) };
+    this.#playerSlots[slotIndex] = {
+      generation,
+      player: this.#newPlayer(id, persistentId, restored),
+    };
     return id;
   }
 
@@ -183,7 +231,8 @@ export class AuthoritativeGame {
   acceptInput(id: RuntimeId, command: InputCommand): boolean {
     const resolved = this.#resolvePlayer(id);
     if (!resolved) return false;
-    if (command.worldEpoch !== this.#worldEpoch || command.sequence <= resolved.player.lastSequence) return true;
+    if (command.worldEpoch !== this.#worldEpoch || command.sequence <= resolved.player.lastSequence)
+      return true;
     if (resolved.player.pendingInputs.length >= 120) resolved.player.pendingInputs.length = 0;
     resolved.player.lastSequence = command.sequence;
     resolved.player.pendingInputs.push({
@@ -226,7 +275,8 @@ export class AuthoritativeGame {
       this.#serverTick += 1;
       this.#accumulator -= PHYSICS_DT;
       steps += 1;
-      if (this.#serverTick % SNAPSHOT_INTERVAL_TICKS === 0) this.#onSnapshot(this.snapshot({ full: false }));
+      if (this.#serverTick % SNAPSHOT_INTERVAL_TICKS === 0)
+        this.#onSnapshot(this.snapshot({ full: false }));
       if (this.#saveRequested) {
         this.#saveRequested = false;
         this.save();
@@ -245,30 +295,37 @@ export class AuthoritativeGame {
     const bodies = this.#runtimeBodies.flatMap(({ handle }) => {
       const identity = key(handle);
       const { awake, ...state } = this.#physics.state(handle);
-      const predictionRelevant = players.some((player) => distance(player.state.position, state.position) <= LOCAL_PHYSICS_RADIUS_METRES);
+      const predictionRelevant = players.some(
+        (player) => distance(player.state.position, state.position) <= LOCAL_PHYSICS_RADIUS_METRES,
+      );
       const remoteBodyDue = (snapshotIndex + handle.index) % UNRELATED_BODY_SNAPSHOT_STRIDE === 0;
-      if (!full && !predictionRelevant && (!this.#dirtyBodies.has(identity) || !remoteBodyDue)) return [];
+      if (!full && !predictionRelevant && (!this.#dirtyBodies.has(identity) || !remoteBodyDue))
+        return [];
       if (!full) this.#dirtyBodies.delete(identity);
-      return [{
-        ...state,
-        flags: discontinuity
-          ? SNAPSHOT_FLAG_TELEPORT
-          : this.#snapshotFlags(handle, state.position, awake),
-      }];
+      return [
+        {
+          ...state,
+          flags: discontinuity
+            ? SNAPSHOT_FLAG_TELEPORT
+            : this.#snapshotFlags(handle, state.position, awake),
+        },
+      ];
     });
     return {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick,
-      bodies: bodies.concat(players.map((player) => ({
-        id: player.id,
-        position: player.state.position,
-        rotation: yawRotation(player.state.yaw),
-        linearVelocity: { x: 0, y: player.state.verticalVelocity, z: 0 },
-        angularVelocity: { x: 0, y: 0, z: 0 },
-        flags: discontinuity
-          ? SNAPSHOT_FLAG_TELEPORT
-          : this.#snapshotFlags(player.id, player.state.position, true),
-      }))),
+      bodies: bodies.concat(
+        players.map((player) => ({
+          id: player.id,
+          position: player.state.position,
+          rotation: yawRotation(player.state.yaw),
+          linearVelocity: { x: 0, y: player.state.verticalVelocity, z: 0 },
+          angularVelocity: { x: 0, y: 0, z: 0 },
+          flags: discontinuity
+            ? SNAPSHOT_FLAG_TELEPORT
+            : this.#snapshotFlags(player.id, player.state.position, true),
+        })),
+      ),
       players: players.map((player) => ({
         id: player.id,
         position: player.state.position,
@@ -314,7 +371,12 @@ export class AuthoritativeGame {
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
-    this.#runtimeBodies = createRuntimeBodies(this.#physics, this.#bundle, null, this.#extraDynamicBodyCount);
+    this.#runtimeBodies = createRuntimeBodies(
+      this.#physics,
+      this.#bundle,
+      null,
+      this.#extraDynamicBodyCount,
+    );
     for (const body of this.#runtimeBodies) this.#dirtyBodies.add(key(body.handle));
     this.#mechanismRuntime = this.#createMechanismRuntime(null);
     for (const player of this.#players()) {
@@ -394,7 +456,9 @@ export class AuthoritativeGame {
       restored,
       currentTick: () => this.#serverTick,
       playerProxies: () => this.#players().map((player) => player.proxy),
-      requestSave: () => { this.#saveRequested = true; },
+      requestSave: () => {
+        this.#saveRequested = true;
+      },
     });
   }
 
@@ -433,9 +497,15 @@ export class AuthoritativeGame {
           player.grab = null;
         }
         this.#physics.destroy(player.proxy);
-        player.proxy = this.#physics.createPlayerProxy(player.state.position, { crouched: player.state.crouched });
+        player.proxy = this.#physics.createPlayerProxy(player.state.position, {
+          crouched: player.state.crouched,
+        });
       } else {
-        this.#physics.setBodyTransform(player.proxy, player.state.position, yawRotation(player.state.yaw));
+        this.#physics.setBodyTransform(
+          player.proxy,
+          player.state.position,
+          yawRotation(player.state.yaw),
+        );
       }
       if (player.input.interactCounter !== player.lastInteractCounter) {
         player.lastInteractCounter = player.input.interactCounter;
@@ -450,7 +520,9 @@ export class AuthoritativeGame {
 
   #tryInteract(player: Player, target: RuntimeId | null): void {
     if (!target) return;
-    const button = this.#mechanismRuntime.buttons.find((candidate) => key(candidate.handle) === key(target));
+    const button = this.#mechanismRuntime.buttons.find(
+      (candidate) => key(candidate.handle) === key(target),
+    );
     if (!button || button.readyAtTick > this.#serverTick) return;
     const horizontal = Math.cos(player.input.lookPitch);
     const direction = {
@@ -475,8 +547,17 @@ export class AuthoritativeGame {
       this.#saveRequested = true;
       return;
     }
-    if (!target || this.#players().some((candidate) => candidate.grab && key(candidate.grab.target) === key(target))) return;
-    const body = this.#runtimeBodies.find((candidate) => key(candidate.handle) === key(target) && candidate.classname === "func_physics");
+    if (
+      !target ||
+      this.#players().some(
+        (candidate) => candidate.grab && key(candidate.grab.target) === key(target),
+      )
+    )
+      return;
+    const body = this.#runtimeBodies.find(
+      (candidate) =>
+        key(candidate.handle) === key(target) && candidate.classname === "func_physics",
+    );
     if (!body) return;
     const horizontal = Math.cos(player.input.lookPitch);
     const direction = {
@@ -484,20 +565,33 @@ export class AuthoritativeGame {
       y: Math.sin(player.input.lookPitch),
       z: -Math.cos(player.input.lookYaw) * horizontal,
     };
-    const anchor = { x: player.state.position.x, y: player.state.position.y + 0.4, z: player.state.position.z };
+    const anchor = {
+      x: player.state.position.x,
+      y: player.state.position.y + 0.4,
+      z: player.state.position.z,
+    };
     const hit = this.#physics.raycastClosest(anchor, {
-      x: direction.x * 3, y: direction.y * 3, z: direction.z * 3,
+      x: direction.x * 3,
+      y: direction.y * 3,
+      z: direction.z * 3,
     });
     if (!hit || key(hit.body) !== key(body.handle)) return;
-    const length = Math.max(0.5, Math.hypot(hit.point.x - anchor.x, hit.point.y - anchor.y, hit.point.z - anchor.z));
+    const length = Math.max(
+      0.5,
+      Math.hypot(hit.point.x - anchor.x, hit.point.y - anchor.y, hit.point.z - anchor.z),
+    );
     player.grab = {
       target: body.handle,
       length,
       constraint: this.#physics.createDistanceConstraint({
-        bodyA: player.proxy, bodyB: body.handle,
-        worldAnchorA: anchor, worldAnchorB: hit.point,
+        bodyA: player.proxy,
+        bodyB: body.handle,
+        worldAnchorA: anchor,
+        worldAnchorB: hit.point,
         length,
-        hertz: 7, dampingRatio: 0.9, maxForce: 350,
+        hertz: 7,
+        dampingRatio: 0.9,
+        maxForce: 350,
       }),
     };
     this.#saveRequested = true;
@@ -508,36 +602,49 @@ export class AuthoritativeGame {
     persistentId: string,
     restored?: PersistedWorld["players"][number],
   ): Player {
-    const spawn = this.#bundle.entities.find((entity) => entity.classname === "info_player_start")?.origin;
+    const spawn = this.#bundle.entities.find(
+      (entity) => entity.classname === "info_player_start",
+    )?.origin;
     if (!spawn) throw new Error("map requires an info_player_start");
-    const yaw = Number(this.#bundle.entities.find((entity) => entity.classname === "info_player_start")?.runtimeProperties.angle ?? 0);
-    const state: PlayerControllerState = restored ? {
-      position: { ...restored.position },
-      verticalVelocity: restored.verticalVelocity,
-      yaw: restored.yaw,
-      grounded: restored.grounded,
-      lastJumpCounter: restored.lastJumpCounter,
-      stepCooldown: restored.stepCooldown,
-      crouched: restored.crouched,
-    } : {
-      position: this.#playerSpawn
-        ? { ...this.#playerSpawn }
-        : { x: spawn.x, y: spawn.y + PLAYER_HALF_HEIGHT, z: spawn.z },
-      verticalVelocity: 0,
-      yaw,
-      grounded: false,
-      lastJumpCounter: 0,
-      stepCooldown: 0,
-      crouched: false,
-    };
+    const yaw = Number(
+      this.#bundle.entities.find((entity) => entity.classname === "info_player_start")
+        ?.runtimeProperties.angle ?? 0,
+    );
+    const state: PlayerControllerState = restored
+      ? {
+          position: { ...restored.position },
+          verticalVelocity: restored.verticalVelocity,
+          yaw: restored.yaw,
+          grounded: restored.grounded,
+          lastJumpCounter: restored.lastJumpCounter,
+          stepCooldown: restored.stepCooldown,
+          crouched: restored.crouched,
+        }
+      : {
+          position: this.#playerSpawn
+            ? { ...this.#playerSpawn }
+            : { x: spawn.x, y: spawn.y + PLAYER_HALF_HEIGHT, z: spawn.z },
+          verticalVelocity: 0,
+          yaw,
+          grounded: false,
+          lastJumpCounter: 0,
+          stepCooldown: 0,
+          crouched: false,
+        };
     const player: Player = {
       id,
       persistentId,
       proxy: this.#physics.createPlayerProxy(state.position, { crouched: state.crouched }),
       state,
       input: {
-        moveX: 0, moveZ: 0, lookYaw: yaw, lookPitch: 0, buttons: 0, jumpCounter: 0,
-        interactCounter: 0, interactTarget: null,
+        moveX: 0,
+        moveZ: 0,
+        lookYaw: yaw,
+        lookPitch: 0,
+        buttons: 0,
+        jumpCounter: 0,
+        interactCounter: 0,
+        interactTarget: null,
         primaryCounter: 0,
       },
       pendingInputs: [],
@@ -549,8 +656,13 @@ export class AuthoritativeGame {
       grab: null,
     };
     if (restored?.grabbedAuthoredId) {
-      const target = this.#runtimeBodies.find((body) => body.authoredId === restored.grabbedAuthoredId);
-      const alreadyOwned = this.#players().some((candidate) => candidate.grab && target && key(candidate.grab.target) === key(target.handle));
+      const target = this.#runtimeBodies.find(
+        (body) => body.authoredId === restored.grabbedAuthoredId,
+      );
+      const alreadyOwned = this.#players().some(
+        (candidate) =>
+          candidate.grab && target && key(candidate.grab.target) === key(target.handle),
+      );
       if (target && !alreadyOwned) {
         this.#physics.setBodyAwake(target.handle, true);
         const anchor = { x: state.position.x, y: state.position.y + 0.4, z: state.position.z };
@@ -560,9 +672,14 @@ export class AuthoritativeGame {
           target: target.handle,
           length,
           constraint: this.#physics.createDistanceConstraint({
-            bodyA: player.proxy, bodyB: target.handle,
-            worldAnchorA: anchor, worldAnchorB: targetPosition,
-            length, hertz: 7, dampingRatio: 0.9, maxForce: 350,
+            bodyA: player.proxy,
+            bodyB: target.handle,
+            worldAnchorA: anchor,
+            worldAnchorB: targetPosition,
+            length,
+            hertz: 7,
+            dampingRatio: 0.9,
+            maxForce: 350,
           }),
         };
       }
@@ -589,7 +706,7 @@ export class AuthoritativeGame {
   }
 
   #players(): Player[] {
-    return this.#playerSlots.flatMap((slot) => slot.player ? [slot.player] : []);
+    return this.#playerSlots.flatMap((slot) => (slot.player ? [slot.player] : []));
   }
 
   #snapshotFlags(id: RuntimeId, position: Vec3, awake: boolean): number {
@@ -599,11 +716,14 @@ export class AuthoritativeGame {
     if (previous) {
       if (!previous.awake && awake) flags |= SNAPSHOT_FLAG_WAKE;
       if (previous.awake && !awake) flags |= SNAPSHOT_FLAG_SLEEP;
-      if (Math.hypot(
-        position.x - previous.position.x,
-        position.y - previous.position.y,
-        position.z - previous.position.z,
-      ) >= 2) flags |= SNAPSHOT_FLAG_TELEPORT;
+      if (
+        Math.hypot(
+          position.x - previous.position.x,
+          position.y - previous.position.y,
+          position.z - previous.position.z,
+        ) >= 2
+      )
+        flags |= SNAPSHOT_FLAG_TELEPORT;
     }
     this.#replicationState.set(identity, { position: { ...position }, awake });
     return flags;

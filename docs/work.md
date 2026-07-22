@@ -82,9 +82,12 @@ tests.
   contact-connected island if authored mechanisms create cases where five metres
   includes too much unrelated dynamic work or excludes a coupled body.
 - Continue decomposing lifecycle owners only where a smaller capability boundary
-  appears. The cleanup split map verification, runtime-body construction, and
-  mechanism/signal state out of the authoritative coordinator, and replaced
-  interpolation/presentation constructors with plain-data factories.
+  appears. Eight classes remain after converting browser input to a lexical
+  factory. Six directly guard external resources or durable queues; the broad
+  `AuthoritativeGame` and `PlayerPredictor` coordinators remain the concrete
+  decomposition targets. The cleanup already split map verification,
+  runtime-body construction, and mechanism/signal state out of the authority,
+  and replaced interpolation/presentation constructors with plain-data factories.
 - Treat the entity schema, generated FGD, map compiler, and production map tests
   as the stable content-authoring surface while controller/network work continues.
 

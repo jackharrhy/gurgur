@@ -13,6 +13,9 @@
     "build": "bun scripts/build.ts",
     "compile:map": "bun tools/compile-map/src/index.ts",
     "generate:fgd": "bun tools/generate-fgd/src/index.ts",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint . --deny-warnings --report-unused-disable-directives",
     "smoke:browser": "bun scripts/smoke-browser.ts",
     "smoke:latency": "SMOKE_LATENCY_MS=150 bun scripts/smoke-browser.ts",
     "smoke:dynamic": "SMOKE_SCENARIO=dynamic-landing bun scripts/smoke-browser.ts",
@@ -32,7 +35,7 @@
     "test:server": "bun test ./apps/server/test/server.integration.ts",
     "test:shutdown": "bun test ./apps/server/test/shutdown.integration.ts",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun run test && bun run test:server && bun run test:shutdown"
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run test:server && bun run test:shutdown"
   },
   "dependencies": {
     "@gurgur/entity-schema": "workspace:*",
@@ -43,6 +46,8 @@
   "devDependencies": {
     "@types/bun": "1.3.14",
     "@types/three": "0.185.1",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
     "playwright-core": "1.61.1",
     "typescript": "7.0.2"
   }

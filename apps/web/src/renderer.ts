@@ -9,7 +9,11 @@ import {
   type WorldMessage,
 } from "@gurgur/shared";
 import type { SnapshotTimeline } from "./interpolation";
-import { createPredictedPoseTimeline, mergeBodySamples, type PredictedPoseTimeline } from "./presentation";
+import {
+  createPredictedPoseTimeline,
+  mergeBodySamples,
+  type PredictedPoseTimeline,
+} from "./presentation";
 import {
   createRetroRenderPipeline,
   createSpriteNodeMaterial,
@@ -47,7 +51,11 @@ export class WorldRenderer {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
     this.#onBodyPresentation = onBodyPresentation;
-    this.#renderer = new THREE.WebGPURenderer({ canvas, antialias: false, powerPreference: "high-performance" });
+    this.#renderer = new THREE.WebGPURenderer({
+      canvas,
+      antialias: false,
+      powerPreference: "high-performance",
+    });
     this.#renderer.setPixelRatio(1);
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#renderer.shadowMap.enabled = false;
@@ -77,7 +85,8 @@ export class WorldRenderer {
     this.#meshes.clear();
     this.#predictedBodies.clear();
     this.#cameraFollowing = false;
-    for (const batch of message.bundle.renderBatches) this.#worldRoot.add(this.#meshForBatch(batch));
+    for (const batch of message.bundle.renderBatches)
+      this.#worldRoot.add(this.#meshForBatch(batch));
     for (const entity of message.bundle.entities) {
       if (entity.classname !== "env_sprite" || !entity.origin) continue;
       this.#worldRoot.add(this.#mapSprite(entity));
@@ -93,16 +102,22 @@ export class WorldRenderer {
         const brush = message.bundle.brushes[brushIndex];
         if (!brush) continue;
         const mesh = this.#meshForBrush(brush, true);
-        mesh.position.set(brush.center.x - origin.x, brush.center.y - origin.y, brush.center.z - origin.z);
+        mesh.position.set(
+          brush.center.x - origin.x,
+          brush.center.y - origin.y,
+          brush.center.z - origin.z,
+        );
         mesh.userData.runtimeId = runtime.id;
-        mesh.userData.interactable = runtime.classname === "func_button" || runtime.classname === "func_physics";
+        mesh.userData.interactable =
+          runtime.classname === "func_button" || runtime.classname === "func_physics";
         mesh.userData.interactionOccluder = true;
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
       this.#worldRoot.add(group);
     }
-    for (const player of message.runtimeEntities.filter((entity) => entity.classname === "player")) this.#addPlayer(player);
+    for (const player of message.runtimeEntities.filter((entity) => entity.classname === "player"))
+      this.#addPlayer(player);
     this.#scene.add(this.#worldRoot);
   }
 
@@ -120,7 +135,8 @@ export class WorldRenderer {
         for (const material of materials) material.dispose();
       });
     }
-    for (const entity of message.created) if (entity.classname === "player") this.#addPlayer(entity);
+    for (const entity of message.created)
+      if (entity.classname === "player") this.#addPlayer(entity);
   }
 
   setLocalPlayer(id: RuntimeId): void {
@@ -239,9 +255,16 @@ export class WorldRenderer {
     const materialNames = [...new Set(brush.triangleMaterials)];
     const materialIndices = new Map(materialNames.map((name, index) => [name, index]));
     for (let triangle = 0; triangle < brush.triangles.length; triangle += 1) {
-      geometry.addGroup(triangle * 3, 3, materialIndices.get(brush.triangleMaterials[triangle]!) ?? 0);
+      geometry.addGroup(
+        triangle * 3,
+        3,
+        materialIndices.get(brush.triangleMaterials[triangle]!) ?? 0,
+      );
     }
-    const mesh = new THREE.Mesh(geometry, materialNames.map((name) => this.#material(name, brush.classname)));
+    const mesh = new THREE.Mesh(
+      geometry,
+      materialNames.map((name) => this.#material(name, brush.classname)),
+    );
     mesh.name = brush.authoredId ?? `${brush.classname}-${brush.entityIndex}`;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
@@ -251,11 +274,32 @@ export class WorldRenderer {
 
   #meshForBatch(batch: CompiledRenderBatch): THREE.Mesh {
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(batch.positions.flatMap((v) => [v.x, v.y, v.z]), 3));
-    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(batch.normals.flatMap((v) => [v.x, v.y, v.z]), 3));
-    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(batch.uvs.flatMap((v) => [v.x / 64, v.y / 64]), 2));
+    geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(
+        batch.positions.flatMap((v) => [v.x, v.y, v.z]),
+        3,
+      ),
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.Float32BufferAttribute(
+        batch.normals.flatMap((v) => [v.x, v.y, v.z]),
+        3,
+      ),
+    );
+    geometry.setAttribute(
+      "uv",
+      new THREE.Float32BufferAttribute(
+        batch.uvs.flatMap((v) => [v.x / 64, v.y / 64]),
+        2,
+      ),
+    );
     geometry.setIndex(batch.indices);
-    const mesh = new THREE.Mesh(geometry, this.#material(batch.material, batch.sensor ? "trigger_batch" : "worldspawn"));
+    const mesh = new THREE.Mesh(
+      geometry,
+      this.#material(batch.material, batch.sensor ? "trigger_batch" : "worldspawn"),
+    );
     mesh.name = `material.${batch.material}`;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
@@ -266,7 +310,10 @@ export class WorldRenderer {
   #addPlayer(player: Extract<LifecycleMessage["created"][number], { classname: "player" }>): void {
     if (this.#meshes.has(idKey(player.id))) return;
     const local = this.#localPlayer && idKey(player.id) === idKey(this.#localPlayer);
-    const material = createSpriteNodeMaterial(this.#spriteTexture(local ? "player-local" : "player-remote"), false);
+    const material = createSpriteNodeMaterial(
+      this.#spriteTexture(local ? "player-local" : "player-remote"),
+      false,
+    );
     material.alphaTest = 0.45;
     const mesh = new THREE.Sprite(material);
     mesh.center.set(0.5, 0.08);
@@ -327,25 +374,37 @@ export class WorldRenderer {
     } else if (name.includes("CAUTION")) {
       context.lineWidth = 6;
       for (let offset = -32; offset < 64; offset += 12) {
-        context.beginPath(); context.moveTo(offset, 32); context.lineTo(offset + 32, 0); context.stroke();
+        context.beginPath();
+        context.moveTo(offset, 32);
+        context.lineTo(offset + 32, 0);
+        context.stroke();
       }
     } else if (name.includes("METAL") || name.includes("DOOR")) {
       context.fillRect(0, 0, 32, 2);
       context.fillRect(0, 15, 32, 2);
       context.fillStyle = palette[2];
-      for (const x of [2, 14, 18, 30]) for (const y of [3, 13, 19, 29]) context.fillRect(x, y, 1, 1);
+      for (const x of [2, 14, 18, 30])
+        for (const y of [3, 13, 19, 29]) context.fillRect(x, y, 1, 1);
     } else if (name.includes("WOOD")) {
       for (let y = 5; y < 32; y += 8) context.fillRect(0, y, 32, 2);
       context.fillStyle = palette[2];
       for (let x = 4; x < 32; x += 10) context.fillRect(x, 0, 1, 32);
     } else if (name.includes("DANGER")) {
-      for (let y = 0; y < 32; y += 8) for (let x = 0; x < 32; x += 8) {
-        if (((x + y) / 8) % 2 === 0) context.fillRect(x, y, 8, 8);
-      }
+      for (let y = 0; y < 32; y += 8)
+        for (let x = 0; x < 32; x += 8) {
+          if (((x + y) / 8) % 2 === 0) context.fillRect(x, y, 8, 8);
+        }
     } else {
       for (let y = 0; y < 32; y += 8) context.fillRect(0, y, 32, 1);
       context.fillStyle = palette[2];
-      for (const [x, y] of [[3, 4], [21, 6], [13, 13], [28, 21], [7, 27]] as const) context.fillRect(x, y, 2, 2);
+      for (const [x, y] of [
+        [3, 4],
+        [21, 6],
+        [13, 13],
+        [28, 21],
+        [7, 27],
+      ] as const)
+        context.fillRect(x, y, 2, 2);
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.name = name;
@@ -405,26 +464,42 @@ export class WorldRenderer {
     };
     if (name.startsWith("player")) {
       const coat = name.endsWith("local") ? "#e5b94b" : "#42a58c";
-      rect("#30243f", 10, 6, 12, 22); rect("#f1c49b", 12, 3, 8, 9);
-      rect(coat, 8, 10, 16, 15); rect("#efe1b4", 14, 12, 4, 5);
-      rect("#181625", 9, 27, 5, 4); rect("#181625", 18, 27, 5, 4);
-      rect("#4e3252", 11, 5, 10, 3); rect("#f05d5e", 15, 6, 2, 2);
+      rect("#30243f", 10, 6, 12, 22);
+      rect("#f1c49b", 12, 3, 8, 9);
+      rect(coat, 8, 10, 16, 15);
+      rect("#efe1b4", 14, 12, 4, 5);
+      rect("#181625", 9, 27, 5, 4);
+      rect("#181625", 18, 27, 5, 4);
+      rect("#4e3252", 11, 5, 10, 3);
+      rect("#f05d5e", 15, 6, 2, 2);
     } else if (name === "terminal") {
-      rect("#29243c", 6, 5, 20, 26); rect("#566176", 8, 7, 16, 13);
-      rect("#46d9b1", 10, 9, 12, 7); rect("#b8f5c8", 11, 10, 7, 1);
-      rect("#db5b54", 10, 23, 3, 3); rect("#e9bd56", 16, 23, 3, 3);
+      rect("#29243c", 6, 5, 20, 26);
+      rect("#566176", 8, 7, 16, 13);
+      rect("#46d9b1", 10, 9, 12, 7);
+      rect("#b8f5c8", 11, 10, 7, 1);
+      rect("#db5b54", 10, 23, 3, 3);
+      rect("#e9bd56", 16, 23, 3, 3);
     } else if (name === "sign") {
-      rect("#49334f", 14, 17, 4, 15); rect("#e5b94b", 3, 4, 26, 16);
-      rect("#31243b", 5, 6, 22, 12); rect("#f3e6bc", 7, 9, 18, 2); rect("#f05d5e", 12, 13, 8, 2);
+      rect("#49334f", 14, 17, 4, 15);
+      rect("#e5b94b", 3, 4, 26, 16);
+      rect("#31243b", 5, 6, 22, 12);
+      rect("#f3e6bc", 7, 9, 18, 2);
+      rect("#f05d5e", 12, 13, 8, 2);
     } else if (name === "lamp") {
-      rect("#34324a", 14, 12, 4, 20); rect("#566176", 10, 8, 12, 6);
-      rect("#fff3a8", 12, 3, 8, 9); rect("#e26a5c", 14, 5, 4, 5);
+      rect("#34324a", 14, 12, 4, 20);
+      rect("#566176", 10, 8, 12, 6);
+      rect("#fff3a8", 12, 3, 8, 9);
+      rect("#e26a5c", 14, 5, 4, 5);
     } else if (name === "crystal") {
-      rect("#47345d", 13, 7, 7, 24); rect("#6954a1", 9, 14, 6, 17);
-      rect("#63d6c1", 15, 3, 4, 21); rect("#b8f5c8", 16, 6, 2, 13);
+      rect("#47345d", 13, 7, 7, 24);
+      rect("#6954a1", 9, 14, 6, 17);
+      rect("#63d6c1", 15, 3, 4, 21);
+      rect("#b8f5c8", 16, 6, 2, 13);
     } else {
-      rect("#382d45", 14, 18, 4, 14); rect("#347e63", 7, 13, 8, 14);
-      rect("#4fb778", 4, 8, 8, 12); rect("#8bc56f", 17, 10, 10, 17);
+      rect("#382d45", 14, 18, 4, 14);
+      rect("#347e63", 7, 13, 8, 14);
+      rect("#4fb778", 4, 8, 8, 12);
+      rect("#8bc56f", 17, 10, 10, 17);
       rect("#d2cf78", 21, 6, 4, 9);
     }
     const texture = new THREE.CanvasTexture(canvas);

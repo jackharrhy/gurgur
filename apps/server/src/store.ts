@@ -133,9 +133,13 @@ export class WorldStore {
         awake INTEGER NOT NULL DEFAULT 1 CHECK (awake IN (0, 1))
       ) STRICT
     `);
-    const bodyColumns = this.#database.query<{ name: string }, []>("PRAGMA table_info(body_state)").all();
+    const bodyColumns = this.#database
+      .query<{ name: string }, []>("PRAGMA table_info(body_state)")
+      .all();
     if (!bodyColumns.some((column) => column.name === "awake")) {
-      this.#database.run("ALTER TABLE body_state ADD COLUMN awake INTEGER NOT NULL DEFAULT 1 CHECK (awake IN (0, 1))");
+      this.#database.run(
+        "ALTER TABLE body_state ADD COLUMN awake INTEGER NOT NULL DEFAULT 1 CHECK (awake IN (0, 1))",
+      );
     }
     this.#database.run(`
       CREATE TABLE IF NOT EXISTS mechanism_state (
@@ -174,42 +178,58 @@ export class WorldStore {
         due_tick INTEGER NOT NULL CHECK (due_tick >= 0)
       ) STRICT
     `);
-    const playerColumns = this.#database.query<{ name: string }, []>("PRAGMA table_info(player_state)").all();
+    const playerColumns = this.#database
+      .query<{ name: string }, []>("PRAGMA table_info(player_state)")
+      .all();
     if (!playerColumns.some((column) => column.name === "grabbed_authored_id")) {
       this.#database.run("ALTER TABLE player_state ADD COLUMN grabbed_authored_id TEXT");
     }
     if (!playerColumns.some((column) => column.name === "grab_length")) {
-      this.#database.run("ALTER TABLE player_state ADD COLUMN grab_length REAL NOT NULL DEFAULT 0 CHECK (grab_length >= 0)");
+      this.#database.run(
+        "ALTER TABLE player_state ADD COLUMN grab_length REAL NOT NULL DEFAULT 0 CHECK (grab_length >= 0)",
+      );
     }
   }
 
   load(mapRevision: string): PersistedWorld | null {
-    const world = this.#database.query<WorldRow, []>(`
+    const world = this.#database
+      .query<WorldRow, []>(`
       SELECT map_revision, world_epoch, server_tick
       FROM world_snapshot WHERE singleton = 1 AND schema_version = ${SCHEMA_VERSION}
-    `).get();
+    `)
+      .get();
     if (!world || world.map_revision !== mapRevision) return null;
-    const bodies = this.#database.query<BodyRow, []>(`
+    const bodies = this.#database
+      .query<BodyRow, []>(`
       SELECT authored_id, px, py, pz, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz, awake
       FROM body_state ORDER BY authored_id
-    `).all();
-    const mechanisms = this.#database.query<MechanismRow, []>(`
+    `)
+      .all();
+    const mechanisms = this.#database
+      .query<MechanismRow, []>(`
       SELECT authored_id, progress, direction, resume_at_tick
       FROM mechanism_state ORDER BY authored_id
-    `).all();
-    const players = this.#database.query<PlayerRow, []>(`
+    `)
+      .all();
+    const players = this.#database
+      .query<PlayerRow, []>(`
       SELECT persistent_id, px, py, pz, yaw, vertical_velocity, grounded,
              last_jump_counter, step_cooldown, crouched, grabbed_authored_id, grab_length
       FROM player_state ORDER BY persistent_id
-    `).all();
-    const signals = this.#database.query<SignalRow, []>(`
+    `)
+      .all();
+    const signals = this.#database
+      .query<SignalRow, []>(`
       SELECT authored_id, kind, ready_at_tick, latched
       FROM signal_state ORDER BY authored_id
-    `).all();
-    const delayedSignals = this.#database.query<DelayedSignalRow, []>(`
+    `)
+      .all();
+    const delayedSignals = this.#database
+      .query<DelayedSignalRow, []>(`
       SELECT ordinal, target, due_tick
       FROM delayed_signal ORDER BY ordinal
-    `).all();
+    `)
+      .all();
     return {
       worldEpoch: world.world_epoch,
       serverTick: world.server_tick,
@@ -254,7 +274,8 @@ export class WorldStore {
 
   save(mapRevision: string, world: PersistedWorld): void {
     const transaction = this.#database.transaction(() => {
-      this.#database.query(`
+      this.#database
+        .query(`
         INSERT INTO world_snapshot (
           singleton, schema_version, map_revision, world_epoch, server_tick, saved_at_ms
         ) VALUES (1, $schemaVersion, $mapRevision, $worldEpoch, $serverTick, $savedAtMs)
@@ -264,13 +285,14 @@ export class WorldStore {
           world_epoch = excluded.world_epoch,
           server_tick = excluded.server_tick,
           saved_at_ms = excluded.saved_at_ms
-      `).run({
-        schemaVersion: SCHEMA_VERSION,
-        mapRevision,
-        worldEpoch: world.worldEpoch,
-        serverTick: world.serverTick,
-        savedAtMs: Date.now(),
-      });
+      `)
+        .run({
+          schemaVersion: SCHEMA_VERSION,
+          mapRevision,
+          worldEpoch: world.worldEpoch,
+          serverTick: world.serverTick,
+          savedAtMs: Date.now(),
+        });
       this.#database.run("DELETE FROM body_state");
       const insertBody = this.#database.query(`
         INSERT INTO body_state (
@@ -282,10 +304,19 @@ export class WorldStore {
       for (const body of world.bodies) {
         insertBody.run({
           authoredId: body.authoredId,
-          px: body.position.x, py: body.position.y, pz: body.position.z,
-          qx: body.rotation.x, qy: body.rotation.y, qz: body.rotation.z, qw: body.rotation.w,
-          vx: body.linearVelocity.x, vy: body.linearVelocity.y, vz: body.linearVelocity.z,
-          wx: body.angularVelocity.x, wy: body.angularVelocity.y, wz: body.angularVelocity.z,
+          px: body.position.x,
+          py: body.position.y,
+          pz: body.position.z,
+          qx: body.rotation.x,
+          qy: body.rotation.y,
+          qz: body.rotation.z,
+          qw: body.rotation.w,
+          vx: body.linearVelocity.x,
+          vy: body.linearVelocity.y,
+          vz: body.linearVelocity.z,
+          wx: body.angularVelocity.x,
+          wy: body.angularVelocity.y,
+          wz: body.angularVelocity.z,
           awake: Number(body.awake),
         });
       }
@@ -300,7 +331,8 @@ export class WorldStore {
         INSERT INTO signal_state (authored_id, kind, ready_at_tick, latched)
         VALUES ($authoredId, $kind, $readyAtTick, $latched)
       `);
-      for (const signal of world.signals) insertSignal.run({ ...signal, latched: Number(signal.latched) });
+      for (const signal of world.signals)
+        insertSignal.run({ ...signal, latched: Number(signal.latched) });
       this.#database.run("DELETE FROM delayed_signal");
       const insertDelayedSignal = this.#database.query(`
         INSERT INTO delayed_signal (ordinal, target, due_tick)
@@ -319,18 +351,21 @@ export class WorldStore {
           $lastJumpCounter, $stepCooldown, $crouched, $grabbedAuthoredId, $grabLength
         )
       `);
-      for (const player of world.players) insertPlayer.run({
-        persistentId: player.persistentId,
-        px: player.position.x, py: player.position.y, pz: player.position.z,
-        yaw: player.yaw,
-        verticalVelocity: player.verticalVelocity,
-        grounded: Number(player.grounded),
-        lastJumpCounter: player.lastJumpCounter,
-        stepCooldown: player.stepCooldown,
-        crouched: Number(player.crouched),
-        grabbedAuthoredId: player.grabbedAuthoredId,
-        grabLength: player.grabLength,
-      });
+      for (const player of world.players)
+        insertPlayer.run({
+          persistentId: player.persistentId,
+          px: player.position.x,
+          py: player.position.y,
+          pz: player.position.z,
+          yaw: player.yaw,
+          verticalVelocity: player.verticalVelocity,
+          grounded: Number(player.grounded),
+          lastJumpCounter: player.lastJumpCounter,
+          stepCooldown: player.stepCooldown,
+          crouched: Number(player.crouched),
+          grabbedAuthoredId: player.grabbedAuthoredId,
+          grabLength: player.grabLength,
+        });
     });
     transaction();
   }

@@ -82,11 +82,15 @@ export function createMechanismRuntime(options: MechanismRuntimeOptions): Mechan
       return;
     }
     const current = physics.state(mechanism.handle).position;
-    physics.setBodyVelocity(mechanism.handle, {
-      x: (position.x - current.x) / PHYSICS_DT,
-      y: (position.y - current.y) / PHYSICS_DT,
-      z: (position.z - current.z) / PHYSICS_DT,
-    }, zero());
+    physics.setBodyVelocity(
+      mechanism.handle,
+      {
+        x: (position.x - current.x) / PHYSICS_DT,
+        y: (position.y - current.y) / PHYSICS_DT,
+        z: (position.z - current.z) / PHYSICS_DT,
+      },
+      zero(),
+    );
   };
 
   const emitTarget = (targetname: string): void => {
@@ -114,7 +118,11 @@ export function createMechanismRuntime(options: MechanismRuntimeOptions): Mechan
       emitTarget(signal.target);
     }
     for (const mechanism of mechanisms) {
-      if (mechanism.direction === 0 && mechanism.resumeAtTick > 0 && mechanism.resumeAtTick <= tick) {
+      if (
+        mechanism.direction === 0 &&
+        mechanism.resumeAtTick > 0 &&
+        mechanism.resumeAtTick <= tick
+      ) {
         mechanism.direction = mechanism.progress >= 1 ? -1 : 1;
         mechanism.resumeAtTick = 0;
       }
@@ -128,7 +136,7 @@ export function createMechanismRuntime(options: MechanismRuntimeOptions): Mechan
         continue;
       }
       mechanism.progress = clamp(
-        mechanism.progress + mechanism.direction * mechanism.speed * PHYSICS_DT / distance,
+        mechanism.progress + (mechanism.direction * mechanism.speed * PHYSICS_DT) / distance,
         0,
         1,
       );
@@ -157,8 +165,27 @@ export function createMechanismRuntime(options: MechanismRuntimeOptions): Mechan
     }
   };
 
-  populate({ physics, bundle, bodies, restored, triggers, mechanisms, relays, buttons, setTransform });
-  return { triggers, mechanisms, relays, buttons, delayedSignals, step, processSensorBegins, emitTarget };
+  populate({
+    physics,
+    bundle,
+    bodies,
+    restored,
+    triggers,
+    mechanisms,
+    relays,
+    buttons,
+    setTransform,
+  });
+  return {
+    triggers,
+    mechanisms,
+    relays,
+    buttons,
+    delayedSignals,
+    step,
+    processSensorBegins,
+    emitTarget,
+  };
 }
 
 type Population = Pick<MechanismRuntimeOptions, "physics" | "bundle" | "bodies" | "restored"> & {
@@ -170,9 +197,12 @@ type Population = Pick<MechanismRuntimeOptions, "physics" | "bundle" | "bodies" 
 };
 
 function populate(options: Population): void {
-  const { physics, bundle, bodies, restored, triggers, mechanisms, relays, buttons, setTransform } = options;
+  const { physics, bundle, bodies, restored, triggers, mechanisms, relays, buttons, setTransform } =
+    options;
   const bodyByAuthoredId = new Map(bodies.map((body) => [body.authoredId, body]));
-  const restoredMechanisms = new Map(restored?.mechanisms.map((state) => [state.authoredId, state]));
+  const restoredMechanisms = new Map(
+    restored?.mechanisms.map((state) => [state.authoredId, state]),
+  );
   const restoredSignals = new Map(restored?.signals.map((state) => [state.authoredId, state]));
   for (const entity of bundle.entities) {
     if (entity.classname === "trigger_once" || entity.classname === "trigger_multiple") {
@@ -236,7 +266,7 @@ function populate(options: Population): void {
       },
       speed: Number(entity.runtimeProperties.speed),
       waitTicks: Math.max(0, Math.ceil(Number(entity.runtimeProperties.wait) / PHYSICS_DT)),
-      progress: saved?.progress ?? (Boolean(entity.runtimeProperties.startOpen) ? 1 : 0),
+      progress: saved?.progress ?? (entity.runtimeProperties.startOpen ? 1 : 0),
       direction: saved?.direction ?? 0,
       resumeAtTick: saved?.resumeAtTick ?? 0,
     };
@@ -245,8 +275,12 @@ function populate(options: Population): void {
   }
 }
 
-function key(id: RuntimeId): string { return `${id.index}:${id.generation}`; }
-function zero(): Vec3 { return { x: 0, y: 0, z: 0 }; }
+function key(id: RuntimeId): string {
+  return `${id.index}:${id.generation}`;
+}
+function zero(): Vec3 {
+  return { x: 0, y: 0, z: 0 };
+}
 function vectorLength(a: Vec3, b: Vec3): number {
   return Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
 }

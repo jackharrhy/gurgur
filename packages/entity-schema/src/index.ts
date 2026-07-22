@@ -21,7 +21,10 @@ const authoredId: PropertyDefinition = {
   description: "Stable unique persistence identity",
 };
 const target: PropertyDefinition = { type: "target", description: "Entity targetname to signal" };
-const targetname: PropertyDefinition = { type: "targetname", description: "Name other entities can target" };
+const targetname: PropertyDefinition = {
+  type: "targetname",
+  description: "Name other entities can target",
+};
 
 export const entityDefinitions = {
   worldspawn: {
@@ -32,7 +35,11 @@ export const entityDefinitions = {
     properties: {
       mapversion: { type: "number", description: "Valve map format version", default: 220 },
       message: { type: "string", description: "World display name", default: "Gurgur World" },
-      gravity: { type: "number", description: "Gravity magnitude in metres per second squared", default: 10 },
+      gravity: {
+        type: "number",
+        description: "Gravity magnitude in metres per second squared",
+        default: 10,
+      },
       skyColor: { type: "vector", description: "Linear RGB sky color", default: "0.08 0.11 0.09" },
     },
   },
@@ -44,7 +51,12 @@ export const entityDefinitions = {
     persistent: false,
     properties: {
       name: { type: "string", description: "Spawn identifier", default: "default" },
-      angle: { type: "number", description: "Yaw in map-space degrees", default: 0, conversion: "yaw-degrees" },
+      angle: {
+        type: "number",
+        description: "Yaw in map-space degrees",
+        default: 0,
+        conversion: "yaw-degrees",
+      },
     },
   },
   func_physics: {
@@ -65,12 +77,32 @@ export const entityDefinitions = {
     color: [105, 190, 155],
     persistent: true,
     properties: {
-      authoredId, targetname,
-      moveDirection: { type: "vector", description: "Map-space movement direction", default: "0 0 1", conversion: "map-direction" },
-      distance: { type: "number", description: "Travel distance in map units", default: 128, conversion: "map-distance" },
-      speed: { type: "number", description: "Travel speed in map units per second", default: 96, conversion: "map-speed" },
+      authoredId,
+      targetname,
+      moveDirection: {
+        type: "vector",
+        description: "Map-space movement direction",
+        default: "0 0 1",
+        conversion: "map-direction",
+      },
+      distance: {
+        type: "number",
+        description: "Travel distance in map units",
+        default: 128,
+        conversion: "map-distance",
+      },
+      speed: {
+        type: "number",
+        description: "Travel speed in map units per second",
+        default: 96,
+        conversion: "map-speed",
+      },
       wait: { type: "number", description: "Seconds before returning; -1 stays open", default: 2 },
-      startOpen: { type: "boolean", description: "Begin at the travelled endpoint", default: false },
+      startOpen: {
+        type: "boolean",
+        description: "Begin at the travelled endpoint",
+        default: false,
+      },
     },
   },
   func_platform: {
@@ -79,12 +111,32 @@ export const entityDefinitions = {
     color: [88, 166, 196],
     persistent: true,
     properties: {
-      authoredId, targetname,
-      moveDirection: { type: "vector", description: "Map-space movement direction", default: "0 0 1", conversion: "map-direction" },
-      distance: { type: "number", description: "Travel distance in map units", default: 128, conversion: "map-distance" },
-      speed: { type: "number", description: "Travel speed in map units per second", default: 64, conversion: "map-speed" },
+      authoredId,
+      targetname,
+      moveDirection: {
+        type: "vector",
+        description: "Map-space movement direction",
+        default: "0 0 1",
+        conversion: "map-direction",
+      },
+      distance: {
+        type: "number",
+        description: "Travel distance in map units",
+        default: 128,
+        conversion: "map-distance",
+      },
+      speed: {
+        type: "number",
+        description: "Travel speed in map units per second",
+        default: 64,
+        conversion: "map-speed",
+      },
       wait: { type: "number", description: "Seconds at each endpoint", default: 1 },
-      startOpen: { type: "boolean", description: "Begin at the travelled endpoint", default: false },
+      startOpen: {
+        type: "boolean",
+        description: "Begin at the travelled endpoint",
+        default: false,
+      },
     },
   },
   trigger_once: {
@@ -100,7 +152,8 @@ export const entityDefinitions = {
     color: [179, 112, 211],
     persistent: true,
     properties: {
-      authoredId, target,
+      authoredId,
+      target,
       wait: { type: "number", description: "Minimum seconds between signals", default: 0.5 },
     },
   },
@@ -111,7 +164,9 @@ export const entityDefinitions = {
     size: [-16, -16, -16, 16, 16, 16],
     persistent: true,
     properties: {
-      authoredId, targetname, target,
+      authoredId,
+      targetname,
+      target,
       delay: { type: "number", description: "Seconds before forwarding", default: 0 },
       once: { type: "boolean", description: "Forward only once per epoch", default: false },
     },
@@ -122,7 +177,8 @@ export const entityDefinitions = {
     color: [232, 112, 79],
     persistent: true,
     properties: {
-      authoredId, target,
+      authoredId,
+      target,
       wait: { type: "number", description: "Minimum seconds between uses", default: 1 },
     },
   },
@@ -133,7 +189,11 @@ export const entityDefinitions = {
     size: [-24, -24, -24, 24, 24, 24],
     persistent: false,
     properties: {
-      label: { type: "string", description: "Administrative display label", default: "Reset world" },
+      label: {
+        type: "string",
+        description: "Administrative display label",
+        default: "Reset world",
+      },
     },
   },
   env_sprite: {
@@ -144,7 +204,12 @@ export const entityDefinitions = {
     persistent: false,
     properties: {
       sprite: { type: "string", description: "Built-in pixel sprite name", default: "fern" },
-      scale: { type: "number", description: "Sprite height in map units", default: 64, conversion: "map-distance" },
+      scale: {
+        type: "number",
+        description: "Sprite height in map units",
+        default: 64,
+        conversion: "map-distance",
+      },
       glow: { type: "boolean", description: "Render without scene lighting", default: false },
     },
   },

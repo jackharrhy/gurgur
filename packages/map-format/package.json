@@ -2,6 +2,10 @@
   "name": "@gurgur/map-format",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@gurgur/shared": "workspace:*" }
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gurgur/shared": "workspace:*"
+  }
 }

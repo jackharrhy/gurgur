@@ -59,19 +59,19 @@ Runtime startup rejects an unsupported bundle version before creating the world.
 
 The base schema contains:
 
-| Class | Purpose |
-| --- | --- |
-| `worldspawn` | world metadata, gravity, materials, environment |
-| `info_player_start` | player spawn transform |
-| `func_physics` | dynamic convex brush body |
-| `func_door` | kinematic door mechanism |
-| `func_platform` | kinematic moving platform |
-| `trigger_once` | one-shot sensor event |
-| `trigger_multiple` | repeatable sensor event |
-| `logic_relay` | typed mechanism signal relay |
-| `func_button` | physical/use-activated signal source |
-| `info_world_reset` | authenticated administrative reset marker |
-| `env_sprite` | camera-facing render-only pixel-art prop |
+| Class               | Purpose                                         |
+| ------------------- | ----------------------------------------------- |
+| `worldspawn`        | world metadata, gravity, materials, environment |
+| `info_player_start` | player spawn transform                          |
+| `func_physics`      | dynamic convex brush body                       |
+| `func_door`         | kinematic door mechanism                        |
+| `func_platform`     | kinematic moving platform                       |
+| `trigger_once`      | one-shot sensor event                           |
+| `trigger_multiple`  | repeatable sensor event                         |
+| `logic_relay`       | typed mechanism signal relay                    |
+| `func_button`       | physical/use-activated signal source            |
+| `info_world_reset`  | authenticated administrative reset marker       |
+| `env_sprite`        | camera-facing render-only pixel-art prop        |
 
 The schema drives compiler validation, FGD generation, and the TrenchBroom game
 configuration. The authoritative server constructs the corresponding runtime

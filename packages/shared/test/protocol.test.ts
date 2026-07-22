@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  PROTOCOL_VERSION, decodeInput, decodeLifecycle, decodeSnapshot, encodeInput, encodeLifecycle, encodeSnapshot,
+  PROTOCOL_VERSION,
+  decodeInput,
+  decodeLifecycle,
+  decodeSnapshot,
+  encodeInput,
+  encodeLifecycle,
+  encodeSnapshot,
 } from "../src";
 
 describe("snapshot codec", () => {
@@ -8,24 +14,28 @@ describe("snapshot codec", () => {
     const snapshot = {
       worldEpoch: 4,
       serverTick: 120,
-      bodies: [{
-        id: { index: 7, generation: 2 },
-        position: { x: 1.25, y: -2.5, z: 3.75 },
-        rotation: { x: 0, y: 0.7071067, z: 0, w: 0.7071067 },
-        linearVelocity: { x: 4, y: -1, z: 2 },
-        angularVelocity: { x: 0.1, y: 0.2, z: 0.3 },
-      }],
-      players: [{
-        id: { index: 9, generation: 3 },
-        position: { x: -1, y: 2, z: 4 },
-        yaw: 0.4,
-        verticalVelocity: -2.25,
-        grounded: false,
-        lastProcessedInputSequence: 18,
-        lastJumpCounter: 2,
-        stepCooldown: 4,
-        crouched: true,
-      }],
+      bodies: [
+        {
+          id: { index: 7, generation: 2 },
+          position: { x: 1.25, y: -2.5, z: 3.75 },
+          rotation: { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 },
+          linearVelocity: { x: 4, y: -1, z: 2 },
+          angularVelocity: { x: 0.1, y: 0.2, z: 0.3 },
+        },
+      ],
+      players: [
+        {
+          id: { index: 9, generation: 3 },
+          position: { x: -1, y: 2, z: 4 },
+          yaw: 0.4,
+          verticalVelocity: -2.25,
+          grounded: false,
+          lastProcessedInputSequence: 18,
+          lastJumpCounter: 2,
+          stepCooldown: 4,
+          crouched: true,
+        },
+      ],
     };
     const decoded = decodeSnapshot(encodeSnapshot(snapshot));
     expect(decoded.worldEpoch).toBe(snapshot.worldEpoch);
@@ -52,15 +62,31 @@ describe("snapshot codec", () => {
   test("serializes a player once and reconstructs its body sample on decode", () => {
     const id = { index: 0x8000_0001, generation: 2 };
     const snapshot = {
-      worldEpoch: 1, serverTick: 3,
-      bodies: [{
-        id, position: { x: 1, y: 2, z: 3 }, rotation: { x: 0, y: 0, z: 0, w: 1 },
-        linearVelocity: { x: 0, y: 4, z: 0 }, angularVelocity: { x: 0, y: 0, z: 0 }, flags: 2,
-      }],
-      players: [{
-        id, position: { x: 1, y: 2, z: 3 }, yaw: 0, verticalVelocity: 4, grounded: false,
-        lastProcessedInputSequence: 8, lastJumpCounter: 1, stepCooldown: 0, crouched: false,
-      }],
+      worldEpoch: 1,
+      serverTick: 3,
+      bodies: [
+        {
+          id,
+          position: { x: 1, y: 2, z: 3 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+          linearVelocity: { x: 0, y: 4, z: 0 },
+          angularVelocity: { x: 0, y: 0, z: 0 },
+          flags: 2,
+        },
+      ],
+      players: [
+        {
+          id,
+          position: { x: 1, y: 2, z: 3 },
+          yaw: 0,
+          verticalVelocity: 4,
+          grounded: false,
+          lastProcessedInputSequence: 8,
+          lastJumpCounter: 1,
+          stepCooldown: 0,
+          crouched: false,
+        },
+      ],
     };
     const encoded = encodeSnapshot(snapshot);
     expect(encoded.byteLength).toBe(15 + 41);
@@ -100,9 +126,20 @@ describe("input codec", () => {
 
   test("round-trips an absent interaction target", () => {
     const command = {
-      type: "input" as const, protocolVersion: PROTOCOL_VERSION, worldEpoch: 1,
-      sequence: 0, clientTick: 0, moveX: 0, moveZ: 0, lookYaw: 0, lookPitch: 0,
-      buttons: 0, jumpCounter: 0, interactCounter: 0, interactTarget: null, primaryCounter: 0,
+      type: "input" as const,
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: 1,
+      sequence: 0,
+      clientTick: 0,
+      moveX: 0,
+      moveZ: 0,
+      lookYaw: 0,
+      lookPitch: 0,
+      buttons: 0,
+      jumpCounter: 0,
+      interactCounter: 0,
+      interactTarget: null,
+      primaryCounter: 0,
     };
     expect(decodeInput(encodeInput(command)).interactTarget).toBeNull();
   });
@@ -111,13 +148,22 @@ describe("input codec", () => {
 describe("lifecycle codec", () => {
   test("round-trips created brush/player identities and removals", () => {
     const lifecycle = {
-      type: "lifecycle" as const, protocolVersion: PROTOCOL_VERSION, worldEpoch: 7,
+      type: "lifecycle" as const,
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: 7,
       created: [
         {
-          id: { index: 1, generation: 2 }, authoredId: "door.å", classname: "func_door" as const,
-          brushIndex: 9, brushIndices: [9, 10, 11],
+          id: { index: 1, generation: 2 },
+          authoredId: "door.å",
+          classname: "func_door" as const,
+          brushIndex: 9,
+          brushIndices: [9, 10, 11],
         },
-        { id: { index: 0x8000_0000, generation: 4 }, authoredId: "player.1", classname: "player" as const },
+        {
+          id: { index: 0x8000_0000, generation: 4 },
+          authoredId: "player.1",
+          classname: "player" as const,
+        },
       ],
       removed: [{ index: 3, generation: 8 }],
     };
@@ -126,8 +172,12 @@ describe("lifecycle codec", () => {
 
   test("rejects truncated lifecycle data", () => {
     const lifecycle = {
-      type: "lifecycle" as const, protocolVersion: PROTOCOL_VERSION, worldEpoch: 1,
-      created: [{ id: { index: 1, generation: 1 }, authoredId: "player.1", classname: "player" as const }],
+      type: "lifecycle" as const,
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: 1,
+      created: [
+        { id: { index: 1, generation: 1 }, authoredId: "player.1", classname: "player" as const },
+      ],
       removed: [],
     };
     const encoded = encodeLifecycle(lifecycle);

@@ -12,11 +12,14 @@ describe("ReliableOrderedLink", () => {
   });
 
   test("models loss as retransmission rather than application packet loss", () => {
-    const link = new ReliableOrderedLink({
-      ...NETWORK_PROFILES.typical,
-      lossRate: 1,
-      retransmitDelayMs: 200,
-    }, 1);
+    const link = new ReliableOrderedLink(
+      {
+        ...NETWORK_PROFILES.typical,
+        lossRate: 1,
+        retransmitDelayMs: 200,
+      },
+      1,
+    );
     link.send(0, 20, "first");
     link.send(1, 20, "second");
 
@@ -27,11 +30,14 @@ describe("ReliableOrderedLink", () => {
   });
 
   test("serializes packets through a bandwidth-limited ordered link", () => {
-    const link = new ReliableOrderedLink({
-      ...NETWORK_PROFILES.local,
-      roundTripLatencyMs: 0,
-      bandwidthBitsPerSecond: 1_000,
-    }, 2);
+    const link = new ReliableOrderedLink(
+      {
+        ...NETWORK_PROFILES.local,
+        roundTripLatencyMs: 0,
+        bandwidthBitsPerSecond: 1_000,
+      },
+      2,
+    );
     link.send(0, 100, "first");
     link.send(0, 100, "second");
     const packets = link.advance(2_000);

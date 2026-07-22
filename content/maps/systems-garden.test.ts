@@ -84,10 +84,12 @@ describe("Systems Garden map", () => {
     for (const brush of entities.flatMap((entity) => entity.brushes)) {
       const faces = facePoints(brush);
       const allPoints = faces.flat();
-      const center = allPoints.reduce<Tuple3>(
-        (sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]],
-        [0, 0, 0],
-      ).map((value) => value / allPoints.length) as Tuple3;
+      const center = allPoints
+        .reduce<Tuple3>(
+          (sum, point) => [sum[0] + point[0], sum[1] + point[1], sum[2] + point[2]],
+          [0, 0, 0],
+        )
+        .map((value) => value / allPoints.length) as Tuple3;
       for (const [a, b, c] of faces) {
         const inwardNormal = cross(subtract(b, a), subtract(c, a));
         expect(dot(inwardNormal, subtract(center, a))).toBeGreaterThan(0);
@@ -138,7 +140,9 @@ describe("Systems Garden map", () => {
     expect(door.runtimeProperties.distance).toBeCloseTo(Number(door.properties.distance) * 0.0254);
     expect(door.runtimeProperties.speed).toBeCloseTo(Number(door.properties.speed) * 0.0254);
     expect(door.runtimeProperties.moveDirection).toEqual({ x: 0, y: 1, z: 0 });
-    const spawn = compiledWorld.entities.find((entity) => entity.classname === "info_player_start")!;
+    const spawn = compiledWorld.entities.find(
+      (entity) => entity.classname === "info_player_start",
+    )!;
     expect(typeof spawn.runtimeProperties.angle).toBe("number");
   });
 

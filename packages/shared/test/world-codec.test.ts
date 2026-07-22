@@ -7,45 +7,77 @@ const bundle = (): WorldBundle => ({
   schemaVersion: 1,
   mapRevision: "a".repeat(64),
   sourceName: "fixture.map",
-  entities: [{
-    classname: "worldspawn",
-    properties: { classname: "worldspawn", mapversion: "220" },
-    runtimeProperties: { classname: "worldspawn", mapversion: 220 },
-    brushIndices: [0],
-  }],
-  brushes: [{
-    entityIndex: 0,
-    sourceBrushIndex: 0,
-    sourceLine: 3,
-    sourceColumn: 1,
-    classname: "worldspawn",
-    center: { x: 0, y: 0, z: 0 },
-    worldVertices: [
-      { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 },
-    ],
-    localVertices: [
-      { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 },
-    ],
-    triangles: [[0, 2, 1]],
-    triangleMaterials: ["STONE"],
-    triangleSourceFaces: [4],
-    triangleNormals: [{ x: 0, y: 1, z: 0 }],
-    triangleUvs: [[{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 0 }]],
-  }],
+  entities: [
+    {
+      classname: "worldspawn",
+      properties: { classname: "worldspawn", mapversion: "220" },
+      runtimeProperties: { classname: "worldspawn", mapversion: 220 },
+      brushIndices: [0],
+    },
+  ],
+  brushes: [
+    {
+      entityIndex: 0,
+      sourceBrushIndex: 0,
+      sourceLine: 3,
+      sourceColumn: 1,
+      classname: "worldspawn",
+      center: { x: 0, y: 0, z: 0 },
+      worldVertices: [
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 0, z: 0 },
+        { x: 0, y: 0, z: 1 },
+      ],
+      localVertices: [
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 0, z: 0 },
+        { x: 0, y: 0, z: 1 },
+      ],
+      triangles: [[0, 2, 1]],
+      triangleMaterials: ["STONE"],
+      triangleSourceFaces: [4],
+      triangleNormals: [{ x: 0, y: 1, z: 0 }],
+      triangleUvs: [
+        [
+          { x: 0, y: 0 },
+          { x: 0, y: 1 },
+          { x: 1, y: 0 },
+        ],
+      ],
+    },
+  ],
   staticCollision: {
-    vertices: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }],
+    vertices: [
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      { x: 0, y: 0, z: 1 },
+    ],
     triangles: [[0, 2, 1]],
     triangleSources: [{ entityIndex: 0, brushIndex: 0, faceIndex: 4 }],
   },
-  renderBatches: [{
-    material: "STONE",
-    sensor: false,
-    positions: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 1, y: 0, z: 0 }],
-    normals: [{ x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 0 }],
-    uvs: [{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 0 }],
-    indices: [0, 1, 2],
-    triangleSources: [{ entityIndex: 0, brushIndex: 0, faceIndex: 4 }],
-  }],
+  renderBatches: [
+    {
+      material: "STONE",
+      sensor: false,
+      positions: [
+        { x: 0, y: 0, z: 0 },
+        { x: 0, y: 0, z: 1 },
+        { x: 1, y: 0, z: 0 },
+      ],
+      normals: [
+        { x: 0, y: 1, z: 0 },
+        { x: 0, y: 1, z: 0 },
+        { x: 0, y: 1, z: 0 },
+      ],
+      uvs: [
+        { x: 0, y: 0 },
+        { x: 0, y: 1 },
+        { x: 1, y: 0 },
+      ],
+      indices: [0, 1, 2],
+      triangleSources: [{ entityIndex: 0, brushIndex: 0, faceIndex: 4 }],
+    },
+  ],
 });
 
 describe("versioned binary world bundle", () => {

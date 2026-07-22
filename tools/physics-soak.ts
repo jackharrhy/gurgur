@@ -5,7 +5,12 @@ import { PhysicsWorld } from "../packages/physics/src";
 
 const churnCycles = Number(process.env.PHYSICS_CHURN_CYCLES ?? 10_000);
 const tickCount = Number(process.env.PHYSICS_SOAK_TICKS ?? 1_000_000);
-if (!Number.isInteger(churnCycles) || churnCycles < 1 || !Number.isInteger(tickCount) || tickCount < 1) {
+if (
+  !Number.isInteger(churnCycles) ||
+  churnCycles < 1 ||
+  !Number.isInteger(tickCount) ||
+  tickCount < 1
+) {
   throw new Error("physics soak counts must be positive integers");
 }
 const world = await PhysicsWorld.create();
@@ -15,10 +20,13 @@ let lastGeneration = 0;
 try {
   for (let cycle = 0; cycle < churnCycles; cycle += 1) {
     const body = world.createBox({
-      type: "dynamic", position: { x: 0, y: 1, z: 0 }, halfExtents: { x: 0.25, y: 0.25, z: 0.25 },
+      type: "dynamic",
+      position: { x: 0, y: 1, z: 0 },
+      halfExtents: { x: 0.25, y: 0.25, z: 0.25 },
     });
     if (cycle === 0) firstIndex = body.index;
-    if (body.index !== firstIndex || body.generation <= lastGeneration) throw new Error(`handle churn failed at cycle ${cycle}`);
+    if (body.index !== firstIndex || body.generation <= lastGeneration)
+      throw new Error(`handle churn failed at cycle ${cycle}`);
     lastGeneration = body.generation;
     if (!world.destroy(body)) throw new Error(`destroy failed at cycle ${cycle}`);
   }

@@ -5,16 +5,21 @@ stateful subsystem ships with deterministic controls, metrics, and a headless
 path so correctness and performance can be measured before browser presentation
 hides the cause of a failure.
 
+The root static gate runs `oxfmt --check` with a 100-column target, `oxlint` with
+correctness and suspicious categories denied, and TypeScript checking before the
+runtime suites. Generated bundles, reports, runtime data, and TrenchBroom
+autosaves are excluded; authored source and tests are not.
+
 ## Test layers
 
-| Layer | Purpose |
-| --- | --- |
-| Unit | codecs, handles, math, map parsing, controller rules, persistence rows |
-| Contract | browser/server codec parity and physics-adapter ownership |
-| Simulation | fixed-tick world scenarios with deterministic input scripts |
-| Multiplayer | real server with shaped links and many headless clients |
-| Browser | rendering, worker prediction, input, interpolation, reconnect |
-| Soak | leaks, handle churn, persistence, reset, queue growth, long-run drift |
+| Layer       | Purpose                                                                |
+| ----------- | ---------------------------------------------------------------------- |
+| Unit        | codecs, handles, math, map parsing, controller rules, persistence rows |
+| Contract    | browser/server codec parity and physics-adapter ownership              |
+| Simulation  | fixed-tick world scenarios with deterministic input scripts            |
+| Multiplayer | real server with shaped links and many headless clients                |
+| Browser     | rendering, worker prediction, input, interpolation, reconnect          |
+| Soak        | leaks, handle churn, persistence, reset, queue growth, long-run drift  |
 
 Tests use original compact fixtures and fixed random seeds. A failure report
 includes the seed, build revision, map revision, world epoch, network profile,
@@ -80,12 +85,12 @@ headroom.
 
 ## Network profiles
 
-| Profile | RTT | Jitter | Simulated loss | Bandwidth |
-| --- | ---: | ---: | ---: | ---: |
-| Local | 2 ms | 0 ms | 0% | unlimited |
-| Typical | 80 ms | 20 ms | 1% | 10 Mbit/s |
-| Adverse | 150 ms | 40 ms | 5% | 1 Mbit/s |
-| Constrained | 250 ms | 80 ms | 8% | 256 Kbit/s |
+| Profile     |    RTT | Jitter | Simulated loss |  Bandwidth |
+| ----------- | -----: | -----: | -------------: | ---------: |
+| Local       |   2 ms |   0 ms |             0% |  unlimited |
+| Typical     |  80 ms |  20 ms |             1% |  10 Mbit/s |
+| Adverse     | 150 ms |  40 ms |             5% |   1 Mbit/s |
+| Constrained | 250 ms |  80 ms |             8% | 256 Kbit/s |
 
 The 16-client suite mixes profiles in one world instead of assigning one global
 latency. Outage cases pause a selected link for five seconds and then restore it.
@@ -106,10 +111,10 @@ includes scripted direction changes. A 60 Hz player at the 5 m/s speed cap moves
 behavior. The deterministic profile budgets are therefore:
 
 | Profile | Prediction p95 | Prediction p99 | Prediction max | Snapshot age p95 |
-| --- | ---: | ---: | ---: | ---: |
-| Local | 10 cm | 25 cm | 50 cm | 100 ms |
-| Typical | 10 cm | 50 cm | 1.0 m | 200 ms |
-| Adverse | 1.0 m | 1.25 m | 1.5 m | 450 ms |
+| ------- | -------------: | -------------: | -------------: | ---------------: |
+| Local   |          10 cm |          25 cm |          50 cm |           100 ms |
+| Typical |          10 cm |          50 cm |          1.0 m |           200 ms |
+| Adverse |          1.0 m |         1.25 m |          1.5 m |           450 ms |
 
 The Adverse raw bounds explicitly capture the selected ordered-WebSocket tradeoff:
 a retransmission stall can make current steering differ from the last intent the

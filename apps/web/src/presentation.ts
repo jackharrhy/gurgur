@@ -26,9 +26,10 @@ export function createPredictedPoseTimeline(): PredictedPoseTimeline {
 
   const push = (body: BodySnapshot, now: number): void => {
     const presented = sample(now);
-    const teleport = !presented
-      || key(presented) !== key(body)
-      || distance(presented.position, body.position) >= TELEPORT_METRES;
+    const teleport =
+      !presented ||
+      key(presented) !== key(body) ||
+      distance(presented.position, body.position) >= TELEPORT_METRES;
     previous = teleport ? clone(body) : presented;
     current = clone(body);
     receivedAt = now;
@@ -43,7 +44,10 @@ export function createPredictedPoseTimeline(): PredictedPoseTimeline {
   return { push, sample, clear };
 }
 
-export function mergeBodySamples(authoritative: BodySnapshot[], predicted: BodySnapshot[]): BodySnapshot[] {
+export function mergeBodySamples(
+  authoritative: BodySnapshot[],
+  predicted: BodySnapshot[],
+): BodySnapshot[] {
   const predictedById = new Map(predicted.map((body) => [key(body), body]));
   const merged = authoritative.map((body) => predictedById.get(key(body)) ?? body);
   const authoritativeIds = new Set(authoritative.map(key));
@@ -62,11 +66,15 @@ function clone(body: BodySnapshot): BodySnapshot {
   };
 }
 
-function key(body: BodySnapshot): string { return `${body.id.index}:${body.id.generation}`; }
+function key(body: BodySnapshot): string {
+  return `${body.id.index}:${body.id.generation}`;
+}
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
-function distance(a: Vec3, b: Vec3): number { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
+function distance(a: Vec3, b: Vec3): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
 function mixVec3(a: Vec3, b: Vec3, amount: number): Vec3 {
   return {
     x: a.x + (b.x - a.x) * amount,

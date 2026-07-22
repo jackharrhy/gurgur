@@ -25,19 +25,25 @@ function createAuthoredBodies(
   const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
   for (const [entityIndex, entity] of bundle.entities.entries()) {
     if (
-      entity.classname !== "func_physics"
-      && entity.classname !== "func_door"
-      && entity.classname !== "func_platform"
-      && entity.classname !== "func_button"
-    ) continue;
+      entity.classname !== "func_physics" &&
+      entity.classname !== "func_door" &&
+      entity.classname !== "func_platform" &&
+      entity.classname !== "func_button"
+    )
+      continue;
     if (!entity.authoredId || entity.brushIndices.length === 0) {
-      throw new Error(`physical map entity ${entityIndex} must have at least one brush and an authoredId`);
+      throw new Error(
+        `physical map entity ${entityIndex} must have at least one brush and an authoredId`,
+      );
     }
     const brushIndex = entity.brushIndices[0]!;
     const brush = bundle.brushes[brushIndex]!;
-    const type: BodyKind = entity.classname === "func_physics"
-      ? "dynamic"
-      : entity.classname === "func_button" ? "static" : "kinematic";
+    const type: BodyKind =
+      entity.classname === "func_physics"
+        ? "dynamic"
+        : entity.classname === "func_button"
+          ? "static"
+          : "kinematic";
     const material = {
       density: Number(entity.runtimeProperties.density ?? 1),
       friction: Number(entity.runtimeProperties.friction ?? 0.6),
@@ -51,17 +57,23 @@ function createAuthoredBodies(
         z: vertex.z - brush.center.z,
       })),
     }));
-    const handle = entity.brushIndices.length === 1
-      ? saved
-        ? physics.restoreHull({ type, vertices: brush.localVertices, ...material, ...saved })
-        : physics.createHull({ type, position: brush.center, vertices: brush.localVertices, ...material })
-      : physics.createCompoundHulls({
-        type,
-        position: saved?.position ?? brush.center,
-        rotation: saved?.rotation,
-        hulls,
-        ...material,
-      });
+    const handle =
+      entity.brushIndices.length === 1
+        ? saved
+          ? physics.restoreHull({ type, vertices: brush.localVertices, ...material, ...saved })
+          : physics.createHull({
+              type,
+              position: brush.center,
+              vertices: brush.localVertices,
+              ...material,
+            })
+        : physics.createCompoundHulls({
+            type,
+            position: saved?.position ?? brush.center,
+            rotation: saved?.rotation,
+            hulls,
+            ...material,
+          });
     if (saved && entity.brushIndices.length > 1) {
       physics.setBodyVelocity(handle, saved.linearVelocity, saved.angularVelocity);
       physics.setBodyAwake(handle, saved.awake);
@@ -104,8 +116,18 @@ function createStressBodies(
       z: -18 + (Math.floor(index / 8) % 4) * 3,
     };
     const handle = saved
-      ? physics.restoreHull({ type: "dynamic", vertices: brush.localVertices, density: 1, ...saved })
-      : physics.createHull({ type: "dynamic", position, vertices: brush.localVertices, density: 1 });
+      ? physics.restoreHull({
+          type: "dynamic",
+          vertices: brush.localVertices,
+          density: 1,
+          ...saved,
+        })
+      : physics.createHull({
+          type: "dynamic",
+          position,
+          vertices: brush.localVertices,
+          density: 1,
+        });
     return { id: handle, handle, authoredId, classname: "func_physics", brushIndex };
   });
 }

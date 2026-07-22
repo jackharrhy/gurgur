@@ -5,11 +5,15 @@ import { PROTOCOL_VERSION, decodeServerControl, type WelcomeMessage } from "../p
 import { createGurgurServer } from "../apps/server/src/server";
 
 const cycles = Number(process.env.CONNECTION_SOAK_CYCLES ?? 1_000);
-if (!Number.isInteger(cycles) || cycles < 1) throw new Error("CONNECTION_SOAK_CYCLES must be a positive integer");
+if (!Number.isInteger(cycles) || cycles < 1)
+  throw new Error("CONNECTION_SOAK_CYCLES must be a positive integer");
 const directory = await mkdtemp(join(tmpdir(), "gurgur-connection-soak-"));
 const adminToken = "connection-soak-admin-token";
 const server = await createGurgurServer({
-  port: 0, hostname: "127.0.0.1", databasePath: join(directory, "world.sqlite"), adminToken,
+  port: 0,
+  hostname: "127.0.0.1",
+  databasePath: join(directory, "world.sqlite"),
+  adminToken,
 });
 const startedAt = performance.now();
 let sessionToken: string | null = null;
@@ -20,9 +24,15 @@ let socket: WebSocket | null = null;
 try {
   for (let generation = 0; generation < cycles; generation += 1) {
     const next = new WebSocket(`ws://127.0.0.1:${server.port}/game`);
-    const welcome = await connect(next, { sessionToken, socketGeneration: generation, mapRevision, worldEpoch });
+    const welcome = await connect(next, {
+      sessionToken,
+      socketGeneration: generation,
+      mapRevision,
+      worldEpoch,
+    });
     const identity = `${welcome.playerId.index}:${welcome.playerId.generation}`;
-    if (playerIdentity !== null && identity !== playerIdentity) throw new Error(`player identity changed at cycle ${generation}`);
+    if (playerIdentity !== null && identity !== playerIdentity)
+      throw new Error(`player identity changed at cycle ${generation}`);
     playerIdentity = identity;
     sessionToken = welcome.sessionToken;
     mapRevision = welcome.mapRevision;
@@ -31,16 +41,22 @@ try {
     socket = next;
     if ((generation + 1) % 250 === 0 && generation + 1 < cycles) {
       const response = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
-        method: "POST", headers: { authorization: `Bearer ${adminToken}` },
+        method: "POST",
+        headers: { authorization: `Bearer ${adminToken}` },
       });
       if (!response.ok) throw new Error(`reset failed at cycle ${generation}`);
-      const snapshot = await response.json() as { worldEpoch: number };
+      const snapshot = (await response.json()) as { worldEpoch: number };
       worldEpoch = snapshot.worldEpoch;
     }
   }
   const report = {
-    reportVersion: 1, cycles, playerIdentity, finalWorldEpoch: worldEpoch,
-    elapsedMs: performance.now() - startedAt, server: server.metrics(), memory: process.memoryUsage(),
+    reportVersion: 1,
+    cycles,
+    playerIdentity,
+    finalWorldEpoch: worldEpoch,
+    elapsedMs: performance.now() - startedAt,
+    server: server.metrics(),
+    memory: process.memoryUsage(),
   };
   await mkdir("reports/soak", { recursive: true });
   await Bun.write("reports/soak/connections.json", `${JSON.stringify(report, null, 2)}\n`);
@@ -51,33 +67,62 @@ try {
   await rm(directory, { recursive: true, force: true });
 }
 
-function connect(socket: WebSocket, options: {
-  sessionToken: string | null; socketGeneration: number; mapRevision: string | null; worldEpoch: number | null;
-}): Promise<WelcomeMessage> {
+function connect(
+  clientSocket: WebSocket,
+  options: {
+    sessionToken: string | null;
+    socketGeneration: number;
+    mapRevision: string | null;
+    worldEpoch: number | null;
+  },
+): Promise<WelcomeMessage> {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("connection soak handshake timed out")), 3_000);
-    socket.addEventListener("open", () => socket.send(JSON.stringify({
-      type: "hello", protocolVersion: PROTOCOL_VERSION, ...options,
-    })), { once: true });
-    socket.addEventListener("message", (event) => {
+    const timeout = setTimeout(
+      () => reject(new Error("connection soak handshake timed out")),
+      3_000,
+    );
+    clientSocket.addEventListener(
+      "open",
+      () =>
+        clientSocket.send(
+          JSON.stringify({
+            type: "hello",
+            protocolVersion: PROTOCOL_VERSION,
+            ...options,
+          }),
+        ),
+      { once: true },
+    );
+    clientSocket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
       const message = decodeServerControl(event.data);
       if (message.type !== "welcome") return;
       clearTimeout(timeout);
       resolve(message);
     });
-    socket.addEventListener("error", () => reject(new Error("connection soak websocket failed")), { once: true });
+    clientSocket.addEventListener(
+      "error",
+      () => reject(new Error("connection soak websocket failed")),
+      {
+        once: true,
+      },
+    );
   });
 }
 
-function waitForClose(socket: WebSocket, expectedCode: number): Promise<void> {
-  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+function waitForClose(clientSocket: WebSocket, expectedCode: number): Promise<void> {
+  if (clientSocket.readyState === WebSocket.CLOSED) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("replaced socket did not close")), 3_000);
-    socket.addEventListener("close", (event) => {
-      clearTimeout(timeout);
-      if (event.code !== expectedCode) reject(new Error(`replaced socket closed with ${event.code}`));
-      else resolve();
-    }, { once: true });
+    clientSocket.addEventListener(
+      "close",
+      (event) => {
+        clearTimeout(timeout);
+        if (event.code !== expectedCode)
+          reject(new Error(`replaced socket closed with ${event.code}`));
+        else resolve();
+      },
+      { once: true },
+    );
   });
 }

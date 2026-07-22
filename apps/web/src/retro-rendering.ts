@@ -24,20 +24,22 @@ const retroClipPosition = tsl.Fn(() => {
 
 const pointLightPosition = tsl.uniform(new THREE.Vector3(-18, 34, 16));
 
-const vertexLighting = tsl.vertexStage(tsl.Fn(() => {
-  const normal = tsl.normalWorldGeometry.normalize();
-  const toLight = pointLightPosition.sub(tsl.positionWorld);
-  const lightDistance = toLight.length().max(0.001);
-  const diffuse = normal.dot(toLight.div(lightDistance)).max(0);
-  const attenuation = tsl.float(1).div(tsl.float(1).add(lightDistance.mul(0.035)));
-  const hemisphere = tsl.mix(
-    tsl.vec3(0.24, 0.15, 0.28),
-    tsl.vec3(0.76, 0.82, 0.86),
-    normal.y.mul(0.5).add(0.5),
-  );
-  const warmLight = tsl.vec3(1.0, 0.76, 0.48).mul(diffuse).mul(attenuation).mul(1.7);
-  return hemisphere.add(warmLight).clamp(0.12, 1.25);
-})());
+const vertexLighting = tsl.vertexStage(
+  tsl.Fn(() => {
+    const normal = tsl.normalWorldGeometry.normalize();
+    const toLight = pointLightPosition.sub(tsl.positionWorld);
+    const lightDistance = toLight.length().max(0.001);
+    const diffuse = normal.dot(toLight.div(lightDistance)).max(0);
+    const attenuation = tsl.float(1).div(tsl.float(1).add(lightDistance.mul(0.035)));
+    const hemisphere = tsl.mix(
+      tsl.vec3(0.24, 0.15, 0.28),
+      tsl.vec3(0.76, 0.82, 0.86),
+      normal.y.mul(0.5).add(0.5),
+    );
+    const warmLight = tsl.vec3(1.0, 0.76, 0.48).mul(diffuse).mul(attenuation).mul(1.7);
+    return hemisphere.add(warmLight).clamp(0.12, 1.25);
+  })(),
+);
 
 function animatedTexture(textureMap: THREE.Texture, name: string) {
   const perspectiveUv = tsl.uv();
@@ -96,7 +98,10 @@ export function createWorldNodeMaterial(
   return material;
 }
 
-export function createSpriteNodeMaterial(textureMap: THREE.Texture, glow: boolean): THREE.SpriteNodeMaterial {
+export function createSpriteNodeMaterial(
+  textureMap: THREE.Texture,
+  glow: boolean,
+): THREE.SpriteNodeMaterial {
   const material = new THREE.SpriteNodeMaterial({
     map: textureMap,
     transparent: true,
@@ -105,7 +110,8 @@ export function createSpriteNodeMaterial(textureMap: THREE.Texture, glow: boolea
     fog: true,
     blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
   });
-  if (glow) material.colorNode = tsl.materialColor.mul(tsl.sin(tsl.time.mul(2.8)).mul(0.12).add(1.0));
+  if (glow)
+    material.colorNode = tsl.materialColor.mul(tsl.sin(tsl.time.mul(2.8)).mul(0.12).add(1.0));
   return material;
 }
 

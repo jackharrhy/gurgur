@@ -1,5 +1,12 @@
 import type { Vec3 } from "./types";
-import type { CompiledBrush, CompiledEntity, CompiledIndexedMesh, CompiledRenderBatch, Vec2, WorldBundle } from "./world";
+import type {
+  CompiledBrush,
+  CompiledEntity,
+  CompiledIndexedMesh,
+  CompiledRenderBatch,
+  Vec2,
+  WorldBundle,
+} from "./world";
 
 const MAGIC = 0x44525747; // GWRD in little endian
 const FORMAT_VERSION = 2;
@@ -10,32 +17,53 @@ const ENTITIES_SECTION = 2;
 const GEOMETRY_SECTION = 3;
 
 type Section = { type: number; version: number; bytes: Uint8Array };
-type BrushMetadata = Omit<CompiledBrush,
-  "worldVertices" | "localVertices" | "triangles" | "triangleSourceFaces" | "triangleNormals" | "triangleUvs"
+type BrushMetadata = Omit<
+  CompiledBrush,
+  | "worldVertices"
+  | "localVertices"
+  | "triangles"
+  | "triangleSourceFaces"
+  | "triangleNormals"
+  | "triangleUvs"
 >;
 
 export function encodeWorldBundle(bundle: WorldBundle): Uint8Array {
-  if (bundle.bundleVersion !== FORMAT_VERSION) throw new Error(`unsupported world bundle version ${bundle.bundleVersion}`);
+  if (bundle.bundleVersion !== FORMAT_VERSION)
+    throw new Error(`unsupported world bundle version ${bundle.bundleVersion}`);
   const encoder = new TextEncoder();
   const sections: Section[] = [
     {
       type: METADATA_SECTION,
       version: 1,
-      bytes: encoder.encode(JSON.stringify({
-        bundleVersion: bundle.bundleVersion,
-        compilerVersion: bundle.compilerVersion,
-        schemaVersion: bundle.schemaVersion,
-        mapRevision: bundle.mapRevision,
-        sourceName: bundle.sourceName,
-        brushes: bundle.brushes.map(({ worldVertices: _world, localVertices: _local, triangles: _triangles,
-          triangleSourceFaces: _faces, triangleNormals: _normals, triangleUvs: _uvs, ...metadata }) => metadata),
-      })),
+      bytes: encoder.encode(
+        JSON.stringify({
+          bundleVersion: bundle.bundleVersion,
+          compilerVersion: bundle.compilerVersion,
+          schemaVersion: bundle.schemaVersion,
+          mapRevision: bundle.mapRevision,
+          sourceName: bundle.sourceName,
+          brushes: bundle.brushes.map(
+            ({
+              worldVertices: _world,
+              localVertices: _local,
+              triangles: _triangles,
+              triangleSourceFaces: _faces,
+              triangleNormals: _normals,
+              triangleUvs: _uvs,
+              ...metadata
+            }) => metadata,
+          ),
+        }),
+      ),
     },
     { type: ENTITIES_SECTION, version: 1, bytes: encoder.encode(JSON.stringify(bundle.entities)) },
     { type: GEOMETRY_SECTION, version: 1, bytes: encodeGeometry(bundle.brushes) },
   ];
   const tableBytes = sections.length * SECTION_ENTRY_BYTES;
-  const totalBytes = HEADER_BYTES + tableBytes + sections.reduce((sum, section) => sum + section.bytes.byteLength, 0);
+  const totalBytes =
+    HEADER_BYTES +
+    tableBytes +
+    sections.reduce((sum, section) => sum + section.bytes.byteLength, 0);
   const output = new Uint8Array(totalBytes);
   const view = new DataView(output.buffer);
   view.setUint32(0, MAGIC, true);
@@ -81,7 +109,15 @@ export function deriveWorldBuffers(brushes: CompiledBrush[]): {
       const key = `${material}\0${Number(sensor)}`;
       let batch = batches.get(key);
       if (!batch) {
-        batch = { material, sensor, positions: [], normals: [], uvs: [], indices: [], triangleSources: [] };
+        batch = {
+          material,
+          sensor,
+          positions: [],
+          normals: [],
+          uvs: [],
+          indices: [],
+          triangleSources: [],
+        };
         batches.set(key, batch);
       }
       const offset = batch.positions.length;
@@ -100,21 +136,25 @@ export function deriveWorldBuffers(brushes: CompiledBrush[]): {
   }
   return {
     staticCollision,
-    renderBatches: [...batches.values()].sort((a, b) =>
-      a.material.localeCompare(b.material) || Number(a.sensor) - Number(b.sensor)),
+    renderBatches: [...batches.values()].toSorted(
+      (a, b) => a.material.localeCompare(b.material) || Number(a.sensor) - Number(b.sensor),
+    ),
   };
 }
 
 export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBundle {
-  const bytes = input instanceof ArrayBuffer
-    ? new Uint8Array(input)
-    : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  const bytes =
+    input instanceof ArrayBuffer
+      ? new Uint8Array(input)
+      : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
   if (bytes.byteLength < HEADER_BYTES) throw new Error("world bundle header is truncated");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint32(0, true) !== MAGIC) throw new Error("world bundle magic mismatch");
-  if (view.getUint16(4, true) !== FORMAT_VERSION) throw new Error("unsupported world bundle version");
+  if (view.getUint16(4, true) !== FORMAT_VERSION)
+    throw new Error("unsupported world bundle version");
   const sectionCount = view.getUint16(6, true);
-  if (bytes.byteLength < HEADER_BYTES + sectionCount * SECTION_ENTRY_BYTES) throw new Error("world bundle section table is truncated");
+  if (bytes.byteLength < HEADER_BYTES + sectionCount * SECTION_ENTRY_BYTES)
+    throw new Error("world bundle section table is truncated");
   const sections = new Map<number, Uint8Array>();
   for (let index = 0; index < sectionCount; index += 1) {
     const entry = HEADER_BYTES + index * SECTION_ENTRY_BYTES;
@@ -122,9 +162,13 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
     const version = view.getUint16(entry + 2, true);
     const offset = view.getUint32(entry + 4, true);
     const length = view.getUint32(entry + 8, true);
-    if (version !== 1) throw new Error(`unsupported world bundle section ${type} version ${version}`);
+    if (version !== 1)
+      throw new Error(`unsupported world bundle section ${type} version ${version}`);
     if (sections.has(type)) throw new Error(`duplicate world bundle section ${type}`);
-    if (offset < HEADER_BYTES + sectionCount * SECTION_ENTRY_BYTES || offset + length > bytes.byteLength) {
+    if (
+      offset < HEADER_BYTES + sectionCount * SECTION_ENTRY_BYTES ||
+      offset + length > bytes.byteLength
+    ) {
       throw new Error(`world bundle section ${type} is out of bounds`);
     }
     sections.set(type, bytes.slice(offset, offset + length));
@@ -141,11 +185,13 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
     sourceName: string;
     brushes: BrushMetadata[];
   };
-  if (metadata.bundleVersion !== FORMAT_VERSION) throw new Error("world bundle metadata version mismatch");
+  if (metadata.bundleVersion !== FORMAT_VERSION)
+    throw new Error("world bundle metadata version mismatch");
   if (!Number.isInteger(metadata.compilerVersion) || !Number.isInteger(metadata.schemaVersion)) {
     throw new Error("world bundle compiler/schema version is invalid");
   }
-  if (!/^[0-9a-f]{64}$/.test(metadata.mapRevision)) throw new Error("world bundle revision is invalid");
+  if (!/^[0-9a-f]{64}$/.test(metadata.mapRevision))
+    throw new Error("world bundle revision is invalid");
   const entities = JSON.parse(decoder.decode(entityBytes)) as CompiledEntity[];
   const brushes = decodeGeometry(geometryBytes, metadata.brushes);
   const derived = deriveWorldBuffers(brushes);
@@ -162,16 +208,20 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
 }
 
 function encodeGeometry(brushes: CompiledBrush[]): Uint8Array {
-  const byteLength = brushes.reduce((sum, brush) =>
-    sum + 4 + brush.worldVertices.length * 24 + 4 + brush.triangles.length * 88, 0);
+  const byteLength = brushes.reduce(
+    (sum, brush) => sum + 4 + brush.worldVertices.length * 24 + 4 + brush.triangles.length * 88,
+    0,
+  );
   const bytes = new Uint8Array(byteLength);
   const view = new DataView(bytes.buffer);
   let offset = 0;
   for (const brush of brushes) {
     assertParallelBrushData(brush);
-    view.setUint32(offset, brush.worldVertices.length, true); offset += 4;
+    view.setUint32(offset, brush.worldVertices.length, true);
+    offset += 4;
     for (const vertex of brush.worldVertices) offset = writeVec3(view, offset, vertex);
-    view.setUint32(offset, brush.triangles.length, true); offset += 4;
+    view.setUint32(offset, brush.triangles.length, true);
+    offset += 4;
     for (let index = 0; index < brush.triangles.length; index += 1) {
       const triangle = brush.triangles[index]!;
       view.setUint32(offset, triangle[0], true);
@@ -195,14 +245,17 @@ function decodeGeometry(bytes: Uint8Array, metadata: BrushMetadata[]): CompiledB
   const brushes: CompiledBrush[] = [];
   for (const brush of metadata) {
     requireBytes(view, offset, 4);
-    const vertexCount = view.getUint32(offset, true); offset += 4;
+    const vertexCount = view.getUint32(offset, true);
+    offset += 4;
     const worldVertices: Vec3[] = [];
     for (let index = 0; index < vertexCount; index += 1) {
       requireBytes(view, offset, 24);
-      worldVertices.push(readVec3(view, offset)); offset += 24;
+      worldVertices.push(readVec3(view, offset));
+      offset += 24;
     }
     requireBytes(view, offset, 4);
-    const triangleCount = view.getUint32(offset, true); offset += 4;
+    const triangleCount = view.getUint32(offset, true);
+    offset += 4;
     const triangles: Array<[number, number, number]> = [];
     const triangleSourceFaces: number[] = [];
     const triangleNormals: Vec3[] = [];
@@ -210,9 +263,12 @@ function decodeGeometry(bytes: Uint8Array, metadata: BrushMetadata[]): CompiledB
     for (let index = 0; index < triangleCount; index += 1) {
       requireBytes(view, offset, 88);
       const triangle: [number, number, number] = [
-        view.getUint32(offset, true), view.getUint32(offset + 4, true), view.getUint32(offset + 8, true),
+        view.getUint32(offset, true),
+        view.getUint32(offset + 4, true),
+        view.getUint32(offset + 8, true),
       ];
-      if (triangle.some((vertex) => vertex >= vertexCount)) throw new Error("world bundle triangle index is out of bounds");
+      if (triangle.some((vertex) => vertex >= vertexCount))
+        throw new Error("world bundle triangle index is out of bounds");
       triangles.push(triangle);
       triangleSourceFaces.push(view.getUint32(offset + 12, true));
       triangleNormals.push(readVec3(view, offset + 16));
@@ -224,7 +280,8 @@ function decodeGeometry(bytes: Uint8Array, metadata: BrushMetadata[]): CompiledB
       }
       triangleUvs.push(uvs as [Vec2, Vec2, Vec2]);
     }
-    if (brush.triangleMaterials.length !== triangleCount) throw new Error("world bundle material count mismatch");
+    if (brush.triangleMaterials.length !== triangleCount)
+      throw new Error("world bundle material count mismatch");
     brushes.push({
       ...brush,
       worldVertices,
@@ -255,7 +312,11 @@ function writeVec3(view: DataView, offset: number, value: Vec3): number {
   return offset + 24;
 }
 function readVec3(view: DataView, offset: number): Vec3 {
-  return { x: view.getFloat64(offset, true), y: view.getFloat64(offset + 8, true), z: view.getFloat64(offset + 16, true) };
+  return {
+    x: view.getFloat64(offset, true),
+    y: view.getFloat64(offset + 8, true),
+    z: view.getFloat64(offset + 16, true),
+  };
 }
 function requireBytes(view: DataView, offset: number, count: number): void {
   if (offset + count > view.byteLength) throw new Error("world bundle geometry is truncated");
@@ -263,9 +324,12 @@ function requireBytes(view: DataView, offset: number, count: number): void {
 function assertParallelBrushData(brush: CompiledBrush): void {
   const count = brush.triangles.length;
   if (
-    brush.triangleMaterials.length !== count
-    || brush.triangleSourceFaces.length !== count
-    || brush.triangleNormals.length !== count
-    || brush.triangleUvs.length !== count
-  ) throw new Error(`compiled brush ${brush.entityIndex}:${brush.sourceBrushIndex} has inconsistent triangle data`);
+    brush.triangleMaterials.length !== count ||
+    brush.triangleSourceFaces.length !== count ||
+    brush.triangleNormals.length !== count ||
+    brush.triangleUvs.length !== count
+  )
+    throw new Error(
+      `compiled brush ${brush.entityIndex}:${brush.sourceBrushIndex} has inconsistent triangle data`,
+    );
 }

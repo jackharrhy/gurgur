@@ -6,12 +6,14 @@ type WorkerRequest =
   | { type: "input"; command: InputCommand }
   | { type: "snapshot"; snapshot: Snapshot };
 
-type WorkerResponse = {
-  type: "presentation";
-  body: BodySnapshot | null;
-  bodies: BodySnapshot[];
-  correctionMagnitude: number;
-} | { type: "world-ready"; worldEpoch: number };
+type WorkerResponse =
+  | {
+      type: "presentation";
+      body: BodySnapshot | null;
+      bodies: BodySnapshot[];
+      correctionMagnitude: number;
+    }
+  | { type: "world-ready"; worldEpoch: number };
 
 export type PredictionClient = {
   setLocalPlayer(id: RuntimeId): void;
@@ -22,7 +24,11 @@ export type PredictionClient = {
 };
 
 export function createPredictionClient(
-  onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[], correctionMagnitude: number) => void,
+  onPresentation: (
+    body: BodySnapshot | null,
+    bodies: BodySnapshot[],
+    correctionMagnitude: number,
+  ) => void,
 ): PredictionClient {
   const worker = new Worker("/prediction-worker.js", { type: "module", name: "gurgur-prediction" });
   const worldWaiters = new Map<number, Array<() => void>>();
@@ -35,7 +41,9 @@ export function createPredictionClient(
       worldWaiters.delete(event.data.worldEpoch);
     }
   });
-  worker.addEventListener("error", (event) => console.error("prediction worker failed", event.message));
+  worker.addEventListener("error", (event) =>
+    console.error("prediction worker failed", event.message),
+  );
 
   const post = (message: WorkerRequest): void => worker.postMessage(message);
   const setWorld = (message: WorldMessage): Promise<void> => {

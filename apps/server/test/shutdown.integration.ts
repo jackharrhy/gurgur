@@ -7,22 +7,61 @@ test("production entrypoint rejects invalid environment before binding a port", 
   const cases = [
     { PORT: "0", ADMIN_TOKEN: "valid-production-token", expected: "PORT must be" },
     { PORT: "3000", ADMIN_TOKEN: "short", expected: "ADMIN_TOKEN must" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", TURN_USERNAME: "user", expected: "configured together" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", PUBLIC_ORIGIN: "not a URL", expected: "ERR_INVALID_URL" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", EXTRA_DYNAMIC_BODIES: "513", expected: "EXTRA_DYNAMIC_BODIES" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", PLAYER_SPAWN: "0,nope,1", expected: "PLAYER_SPAWN" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", VOICE_RELAY_ONLY: "yes", expected: "VOICE_RELAY_ONLY" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", STUN_URL: "https://wrong.test", expected: "STUN_URL" },
-    { PORT: "3000", ADMIN_TOKEN: "valid-production-token", TURN_URL: "stun:wrong.test", expected: "TURN_URL" },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      TURN_USERNAME: "user",
+      expected: "configured together",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      PUBLIC_ORIGIN: "not a URL",
+      expected: "ERR_INVALID_URL",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      EXTRA_DYNAMIC_BODIES: "513",
+      expected: "EXTRA_DYNAMIC_BODIES",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      PLAYER_SPAWN: "0,nope,1",
+      expected: "PLAYER_SPAWN",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      VOICE_RELAY_ONLY: "yes",
+      expected: "VOICE_RELAY_ONLY",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      STUN_URL: "https://wrong.test",
+      expected: "STUN_URL",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      TURN_URL: "stun:wrong.test",
+      expected: "TURN_URL",
+    },
   ];
   for (const fixture of cases) {
     const child = Bun.spawn([process.execPath, "apps/server/src/index.ts"], {
       cwd: new URL("../../..", import.meta.url).pathname,
       env: {
-        ...Bun.env, NODE_ENV: "production", HOST: "127.0.0.1", DATABASE_PATH: ":memory:",
+        ...Bun.env,
+        NODE_ENV: "production",
+        HOST: "127.0.0.1",
+        DATABASE_PATH: ":memory:",
         ...fixture,
       },
-      stdout: "pipe", stderr: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
     });
     const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
     expect(exitCode).not.toBe(0);
@@ -54,16 +93,15 @@ test("SIGTERM closes the one-process server within the grace period", async () =
     while (performance.now() < deadline) {
       try {
         if ((await fetch(`http://127.0.0.1:${port}/readyz`)).ok) break;
-      } catch { /* process is still starting */ }
+      } catch {
+        /* process is still starting */
+      }
       await Bun.sleep(20);
     }
     expect((await fetch(`http://127.0.0.1:${port}/readyz`)).ok).toBe(true);
     const stoppedAt = performance.now();
     process.kill("SIGTERM");
-    const exitCode = await Promise.race([
-      process.exited,
-      Bun.sleep(3_000).then(() => -999),
-    ]);
+    const exitCode = await Promise.race([process.exited, Bun.sleep(3_000).then(() => -999)]);
     expect(exitCode).toBe(0);
     expect(performance.now() - stoppedAt).toBeLessThan(3_000);
     expect(await Bun.file(join(directory, "world.sqlite")).exists()).toBe(true);

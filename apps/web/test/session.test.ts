@@ -7,11 +7,13 @@ test("retains a bounded pre-world snapshot history instead of overwriting the in
   const state = (tick: number, bodyIndex: number): Snapshot => ({
     worldEpoch: 1,
     serverTick: tick,
-    bodies: [{
-      id: { index: bodyIndex, generation: 1 },
-      position: { x: 0, y: 0, z: 0 },
-      rotation: { x: 0, y: 0, z: 0, w: 1 },
-    }],
+    bodies: [
+      {
+        id: { index: bodyIndex, generation: 1 },
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    ],
     players: [],
   });
 

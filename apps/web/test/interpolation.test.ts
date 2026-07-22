@@ -6,14 +6,16 @@ function snapshot(tick: number, y: number, epoch = 1, velocityY = 0, flags = 0):
   return {
     worldEpoch: epoch,
     serverTick: tick,
-    bodies: [{
-      id: { index: 1, generation: 1 },
-      position: { x: 0, y, z: 0 },
-      rotation: { x: 0, y: 0, z: 0, w: 1 },
-      linearVelocity: { x: 0, y: velocityY, z: 0 },
-      angularVelocity: { x: 0, y: 0, z: 0 },
-      flags,
-    }],
+    bodies: [
+      {
+        id: { index: 1, generation: 1 },
+        position: { x: 0, y, z: 0 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+        linearVelocity: { x: 0, y: velocityY, z: 0 },
+        angularVelocity: { x: 0, y: 0, z: 0 },
+        flags,
+      },
+    ],
     players: [],
   };
 }
@@ -78,17 +80,19 @@ describe("snapshot timeline", () => {
         position: { x, y: 0, z: 0 },
         linearVelocity: { x: 0, y: 0, z: 0 },
       };
-      state.players = [{
-        id: { index: 1, generation: 1 },
-        position: { x, y: 0, z: 0 },
-        yaw: 0,
-        verticalVelocity: 0,
-        grounded: true,
-        lastProcessedInputSequence: tick,
-        lastJumpCounter: 0,
-        stepCooldown: 0,
-        crouched: false,
-      }];
+      state.players = [
+        {
+          id: { index: 1, generation: 1 },
+          position: { x, y: 0, z: 0 },
+          yaw: 0,
+          verticalVelocity: 0,
+          grounded: true,
+          lastProcessedInputSequence: tick,
+          lastJumpCounter: 0,
+          stepCooldown: 0,
+          crouched: false,
+        },
+      ];
       return state;
     };
     history.push(playerSnapshot(10, 0));

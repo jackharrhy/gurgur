@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { PLAYER_CAPSULE_RADIUS } from "@gurgur/physics";
 import { compileWorld } from "@gurgur/world-compiler";
-import { PHYSICS_DT, PROTOCOL_VERSION, SNAPSHOT_INTERVAL_TICKS, type InputCommand, type Snapshot } from "@gurgur/shared";
+import {
+  PHYSICS_DT,
+  PROTOCOL_VERSION,
+  SNAPSHOT_INTERVAL_TICKS,
+  type InputCommand,
+  type Snapshot,
+} from "@gurgur/shared";
 import { PlayerPredictor } from "../../web/src/prediction";
 import { AuthoritativeGame } from "../src/game";
 import { WorldStore } from "../src/store";
@@ -12,12 +18,19 @@ describe("authoritative and predicted dynamic-body simulation", () => {
   test("stays aligned while the player pushes an authored dynamic cube across delayed snapshots", async () => {
     const bundle = compileWorld(await Bun.file(fixturePath).text(), "network-boxes.map");
     const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(store, () => {}, () => {}, { worldBundle: bundle });
+    const game = await AuthoritativeGame.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
     const predictor = new PlayerPredictor(() => {});
     try {
       game.advance(PHYSICS_DT * 60);
       const playerId = game.connectPlayer("prediction-fixture");
-      const box = game.worldMessage().runtimeEntities.find((entity) => entity.authoredId === "fixture.push")!;
+      const box = game
+        .worldMessage()
+        .runtimeEntities.find((entity) => entity.authoredId === "fixture.push")!;
       const boxEntity = bundle.entities.find((entity) => entity.authoredId === "fixture.push")!;
       const boxBrush = bundle.brushes[boxEntity.brushIndices[0]!]!;
       const boxHalfX = Math.max(...boxBrush.localVertices.map((vertex) => Math.abs(vertex.x)));
@@ -35,7 +48,10 @@ describe("authoritative and predicted dynamic-body simulation", () => {
         predictor.pushInput(input);
         game.advance(PHYSICS_DT);
         if (game.serverTick % SNAPSHOT_INTERVAL_TICKS === 0) {
-          delayed.push({ deliverAtTick: game.serverTick + 6, snapshot: game.snapshot({ full: false }) });
+          delayed.push({
+            deliverAtTick: game.serverTick + 6,
+            snapshot: game.snapshot({ full: false }),
+          });
         }
         while (delayed[0] && delayed[0].deliverAtTick <= game.serverTick) {
           predictor.reconcile(delayed.shift()!.snapshot);
@@ -47,8 +63,14 @@ describe("authoritative and predicted dynamic-body simulation", () => {
         const authorityBox = authority.bodies.find((body) => sameId(body.id, box.id))!;
         const predictedPlayer = predictor.predictedPosition!;
         const predictedBox = predictor.predictedBody(box.id)!;
-        maximumPlayerError = Math.max(maximumPlayerError, distance(predictedPlayer, authorityPlayer.position));
-        maximumBoxError = Math.max(maximumBoxError, distance(predictedBox.position, authorityBox.position));
+        maximumPlayerError = Math.max(
+          maximumPlayerError,
+          distance(predictedPlayer, authorityPlayer.position),
+        );
+        maximumBoxError = Math.max(
+          maximumBoxError,
+          distance(predictedBox.position, authorityBox.position),
+        );
         maximumVisualPenetration = Math.max(
           maximumVisualPenetration,
           PLAYER_CAPSULE_RADIUS + boxHalfX - Math.abs(predictedBox.position.x - predictedPlayer.x),
@@ -67,19 +89,32 @@ describe("authoritative and predicted dynamic-body simulation", () => {
 
   test("keeps stack support and jump state aligned across delayed sparse snapshots", async () => {
     const bundle = compileWorld(await Bun.file(fixturePath).text(), "network-boxes.map");
-    const upperEntity = bundle.entities.find((entity) => entity.authoredId === "fixture.stack.upper")!;
+    const upperEntity = bundle.entities.find(
+      (entity) => entity.authoredId === "fixture.stack.upper",
+    )!;
     const upperBrush = bundle.brushes[upperEntity.brushIndices[0]!]!;
     const localTop = Math.max(...upperBrush.localVertices.map((vertex) => vertex.y));
     const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(store, () => {}, () => {}, {
-      worldBundle: bundle,
-      playerSpawn: { x: upperBrush.center.x, y: upperBrush.center.y + localTop + 2.5, z: upperBrush.center.z },
-    });
+    const game = await AuthoritativeGame.create(
+      store,
+      () => {},
+      () => {},
+      {
+        worldBundle: bundle,
+        playerSpawn: {
+          x: upperBrush.center.x,
+          y: upperBrush.center.y + localTop + 2.5,
+          z: upperBrush.center.z,
+        },
+      },
+    );
     const predictor = new PlayerPredictor(() => {});
     try {
       game.advance(PHYSICS_DT * 60);
       const playerId = game.connectPlayer("stack-fixture");
-      const upper = game.worldMessage().runtimeEntities.find((entity) => entity.authoredId === "fixture.stack.upper")!;
+      const upper = game
+        .worldMessage()
+        .runtimeEntities.find((entity) => entity.authoredId === "fixture.stack.upper")!;
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(game.worldMessage());
       predictor.reconcile(game.snapshot());
@@ -101,7 +136,10 @@ describe("authoritative and predicted dynamic-body simulation", () => {
         predictor.pushInput(input);
         game.advance(PHYSICS_DT);
         if (game.serverTick % SNAPSHOT_INTERVAL_TICKS === 0) {
-          delayed.push({ deliverAtTick: game.serverTick + 6, snapshot: game.snapshot({ full: false }) });
+          delayed.push({
+            deliverAtTick: game.serverTick + 6,
+            snapshot: game.snapshot({ full: false }),
+          });
         }
         while (delayed[0] && delayed[0].deliverAtTick <= game.serverTick) {
           predictor.reconcile(delayed.shift()!.snapshot);
@@ -113,8 +151,14 @@ describe("authoritative and predicted dynamic-body simulation", () => {
         const predictedPlayer = predictor.predictedPosition!;
         const predictedUpper = predictor.predictedBody(upper.id)!;
         if (sequence >= 30) {
-          maximumPlayerError = Math.max(maximumPlayerError, distance(predictedPlayer, authorityPlayer.position));
-          maximumUpperBoxError = Math.max(maximumUpperBoxError, distance(predictedUpper.position, authorityUpper.position));
+          maximumPlayerError = Math.max(
+            maximumPlayerError,
+            distance(predictedPlayer, authorityPlayer.position),
+          );
+          maximumUpperBoxError = Math.max(
+            maximumUpperBoxError,
+            distance(predictedUpper.position, authorityUpper.position),
+          );
           maximumVerticalPenetration = Math.max(
             maximumVerticalPenetration,
             predictedUpper.position.y + localTop + 0.88 - predictedPlayer.y,
@@ -164,10 +208,16 @@ function command(
   };
 }
 
-function sameId(a: { index: number; generation: number }, b: { index: number; generation: number }): boolean {
+function sameId(
+  a: { index: number; generation: number },
+  b: { index: number; generation: number },
+): boolean {
   return a.index === b.index && a.generation === b.generation;
 }
 
-function distance(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+function distance(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }

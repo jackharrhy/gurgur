@@ -90,24 +90,30 @@ type Client = {
   nextRenderAtMs: number;
 };
 
-export async function runRealNetworkHarness(options: {
-  clientCount?: number;
-  durationMs?: number;
-  seed?: number;
-  profiles?: NetworkProfile[];
-  dynamicBodyCount?: number;
-  scenarioName?: string;
-  outage?: { clientIds: number[]; startMs: number; endMs: number };
-  receiverPause?: { clientIds: number[]; untilMs: number };
-  resetAtMs?: number;
-} = {}): Promise<HarnessReport> {
+export async function runRealNetworkHarness(
+  options: {
+    clientCount?: number;
+    durationMs?: number;
+    seed?: number;
+    profiles?: NetworkProfile[];
+    dynamicBodyCount?: number;
+    scenarioName?: string;
+    outage?: { clientIds: number[]; startMs: number; endMs: number };
+    receiverPause?: { clientIds: number[]; untilMs: number };
+    resetAtMs?: number;
+  } = {},
+): Promise<HarnessReport> {
   const clientCount = options.clientCount ?? 16;
   const durationMs = options.durationMs ?? 5_000;
   const seed = options.seed ?? 0x67757267;
   const profiles = options.profiles ?? [
-    NETWORK_PROFILES.local, NETWORK_PROFILES.typical, NETWORK_PROFILES.adverse, NETWORK_PROFILES.constrained,
+    NETWORK_PROFILES.local,
+    NETWORK_PROFILES.typical,
+    NETWORK_PROFILES.adverse,
+    NETWORK_PROFILES.constrained,
   ];
-  if (!Number.isInteger(clientCount) || clientCount < 1 || clientCount > 64) throw new Error("clientCount must be between 1 and 64");
+  if (!Number.isInteger(clientCount) || clientCount < 1 || clientCount > 64)
+    throw new Error("clientCount must be between 1 and 64");
   const directory = await mkdtemp(join(tmpdir(), "gurgur-harness-"));
   const dynamicBodyCount = options.dynamicBodyCount ?? 128;
   if (!Number.isInteger(dynamicBodyCount) || dynamicBodyCount < 6 || dynamicBodyCount > 518) {
@@ -119,7 +125,15 @@ export async function runRealNetworkHarness(options: {
   const clients: Client[] = [];
   try {
     for (let clientId = 0; clientId < clientCount; clientId += 1) {
-      clients.push(await createClient(clientId, profiles[clientId % profiles.length]!, seed, server.port, startedAt));
+      clients.push(
+        await createClient(
+          clientId,
+          profiles[clientId % profiles.length]!,
+          seed,
+          server.port,
+          startedAt,
+        ),
+      );
     }
     for (const clientId of options.outage?.clientIds ?? []) {
       clients[clientId]?.inbound.addOutage(options.outage!.startMs, options.outage!.endMs);
@@ -135,29 +149,50 @@ export async function runRealNetworkHarness(options: {
       if (!resetSent && options.resetAtMs !== undefined && now >= options.resetAtMs) {
         resetSent = true;
         const response = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
-          method: "POST", headers: { authorization: `Bearer ${adminToken}` },
+          method: "POST",
+          headers: { authorization: `Bearer ${adminToken}` },
         });
         if (!response.ok) throw new Error(`harness reset failed with ${response.status}`);
       }
       for (const client of clients) advanceClient(client, now);
       await Bun.sleep(2);
     }
-    const serverMetrics = await (await fetch(`http://127.0.0.1:${server.port}/metrics`)).json() as ServerMetrics;
+    const serverMetrics = (await (
+      await fetch(`http://127.0.0.1:${server.port}/metrics`)
+    ).json()) as ServerMetrics;
     const allPrediction = clients.flatMap((client) => client.metrics.predictionErrorsMetres);
     const allInputLatency = clients.flatMap((client) => client.metrics.inputLatencyMs);
     const allSnapshotAge = clients.flatMap((client) => client.metrics.snapshotAgeMs);
     const renderSamples = clients.reduce((sum, client) => sum + client.metrics.renderSamples, 0);
-    const extrapolated = clients.reduce((sum, client) => sum + client.metrics.extrapolatedSamples, 0);
+    const extrapolated = clients.reduce(
+      (sum, client) => sum + client.metrics.extrapolatedSamples,
+      0,
+    );
     const recoveryStart = durationMs - 1_000;
-    const recoveryClientIds = new Set(options.outage?.clientIds ?? options.receiverPause?.clientIds ?? clients.map((client) => client.metrics.clientId));
-    const recoveryClients = clients.filter((client) => recoveryClientIds.has(client.metrics.clientId));
-    const recoveryPrediction = recoveryClients.flatMap((client) => client.predictionTimed
-      .filter((sample) => sample.atMs >= recoveryStart).map((sample) => sample.value));
-    const recoveryAge = recoveryClients.flatMap((client) => client.snapshotAgeTimed
-      .filter((sample) => sample.atMs >= recoveryStart).map((sample) => sample.value));
-    for (const client of clients) if (client.latestSnapshot?.worldEpoch !== serverMetrics.worldEpoch) {
-      client.metrics.errors.push(`client ended on epoch ${client.latestSnapshot?.worldEpoch ?? "none"}, server is ${serverMetrics.worldEpoch}`);
-    }
+    const recoveryClientIds = new Set(
+      options.outage?.clientIds ??
+        options.receiverPause?.clientIds ??
+        clients.map((client) => client.metrics.clientId),
+    );
+    const recoveryClients = clients.filter((client) =>
+      recoveryClientIds.has(client.metrics.clientId),
+    );
+    const recoveryPrediction = recoveryClients.flatMap((client) =>
+      client.predictionTimed
+        .filter((sample) => sample.atMs >= recoveryStart)
+        .map((sample) => sample.value),
+    );
+    const recoveryAge = recoveryClients.flatMap((client) =>
+      client.snapshotAgeTimed
+        .filter((sample) => sample.atMs >= recoveryStart)
+        .map((sample) => sample.value),
+    );
+    for (const client of clients)
+      if (client.latestSnapshot?.worldEpoch !== serverMetrics.worldEpoch) {
+        client.metrics.errors.push(
+          `client ended on epoch ${client.latestSnapshot?.worldEpoch ?? "none"}, server is ${serverMetrics.worldEpoch}`,
+        );
+      }
     return {
       reportVersion: 2,
       seed,
@@ -174,31 +209,50 @@ export async function runRealNetworkHarness(options: {
         predictionErrorMaxMetres: Math.max(0, ...allPrediction),
         inputLatencyP95Ms: percentile(allInputLatency, 0.95),
         snapshotAgeP95Ms: percentile(allSnapshotAge, 0.95),
-        extrapolatedPercent: renderSamples ? extrapolated / renderSamples * 100 : 0,
+        extrapolatedPercent: renderSamples ? (extrapolated / renderSamples) * 100 : 0,
         correctnessErrors: clients.reduce((sum, client) => sum + client.metrics.errors.length, 0),
       },
-      profiles: Object.fromEntries([...new Set(clients.map((client) => client.metrics.profile))].map((profile) => {
-        const selected = clients.filter((client) => client.metrics.profile === profile);
-        const prediction = selected.flatMap((client) => client.metrics.predictionErrorsMetres);
-        const inputLatency = selected.flatMap((client) => client.metrics.inputLatencyMs);
-        const snapshotAge = selected.flatMap((client) => client.metrics.snapshotAgeMs);
-        const selectedRenderSamples = selected.reduce((sum, client) => sum + client.metrics.renderSamples, 0);
-        const selectedExtrapolated = selected.reduce((sum, client) => sum + client.metrics.extrapolatedSamples, 0);
-        return [profile, {
-          predictionErrorP95Metres: percentile(prediction, 0.95),
-          predictionErrorP99Metres: percentile(prediction, 0.99),
-          predictionErrorMaxMetres: Math.max(0, ...prediction),
-          inputLatencyP95Ms: percentile(inputLatency, 0.95),
-          snapshotAgeP95Ms: percentile(snapshotAge, 0.95),
-          extrapolatedPercent: selectedRenderSamples ? selectedExtrapolated / selectedRenderSamples * 100 : 0,
-          correctnessErrors: selected.reduce((sum, client) => sum + client.metrics.errors.length, 0),
-        }];
-      })),
+      profiles: Object.fromEntries(
+        [...new Set(clients.map((client) => client.metrics.profile))].map((profile) => {
+          const selected = clients.filter((client) => client.metrics.profile === profile);
+          const prediction = selected.flatMap((client) => client.metrics.predictionErrorsMetres);
+          const inputLatency = selected.flatMap((client) => client.metrics.inputLatencyMs);
+          const snapshotAge = selected.flatMap((client) => client.metrics.snapshotAgeMs);
+          const selectedRenderSamples = selected.reduce(
+            (sum, client) => sum + client.metrics.renderSamples,
+            0,
+          );
+          const selectedExtrapolated = selected.reduce(
+            (sum, client) => sum + client.metrics.extrapolatedSamples,
+            0,
+          );
+          return [
+            profile,
+            {
+              predictionErrorP95Metres: percentile(prediction, 0.95),
+              predictionErrorP99Metres: percentile(prediction, 0.99),
+              predictionErrorMaxMetres: Math.max(0, ...prediction),
+              inputLatencyP95Ms: percentile(inputLatency, 0.95),
+              snapshotAgeP95Ms: percentile(snapshotAge, 0.95),
+              extrapolatedPercent: selectedRenderSamples
+                ? (selectedExtrapolated / selectedRenderSamples) * 100
+                : 0,
+              correctnessErrors: selected.reduce(
+                (sum, client) => sum + client.metrics.errors.length,
+                0,
+              ),
+            },
+          ];
+        }),
+      ),
       clients: clients.map((client) => ({
         ...client.metrics,
         inboundRetransmissions: client.inbound.metrics.retransmissions,
         outboundRetransmissions: client.outbound.metrics.retransmissions,
-        queueHighWaterBytes: Math.max(client.inbound.metrics.queueHighWaterBytes, client.outbound.metrics.queueHighWaterBytes),
+        queueHighWaterBytes: Math.max(
+          client.inbound.metrics.queueHighWaterBytes,
+          client.outbound.metrics.queueHighWaterBytes,
+        ),
       })),
       scenario: {
         name: options.scenarioName ?? "mixed-baseline",
@@ -219,7 +273,11 @@ export async function runRealNetworkHarness(options: {
   }
 }
 
-async function launchServer(directory: string, extraDynamicBodies: number, adminToken: string): Promise<{
+async function launchServer(
+  directory: string,
+  extraDynamicBodies: number,
+  adminToken: string,
+): Promise<{
   port: number;
   process: ReturnType<typeof Bun.spawn>;
 }> {
@@ -230,18 +288,26 @@ async function launchServer(directory: string, extraDynamicBodies: number, admin
     cwd: new URL("../../..", import.meta.url).pathname,
     env: {
       ...Bun.env,
-      NODE_ENV: "production", HOST: "127.0.0.1", PORT: String(port),
-      DATABASE_PATH: join(directory, "world.sqlite"), ADMIN_TOKEN: adminToken,
-      EXTRA_DYNAMIC_BODIES: String(extraDynamicBodies), PLAYER_SPAWN: "0,0.9,8",
+      NODE_ENV: "production",
+      HOST: "127.0.0.1",
+      PORT: String(port),
+      DATABASE_PATH: join(directory, "world.sqlite"),
+      ADMIN_TOKEN: adminToken,
+      EXTRA_DYNAMIC_BODIES: String(extraDynamicBodies),
+      PLAYER_SPAWN: "0,0.9,8",
     },
-    stdout: "pipe", stderr: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
   });
   const deadline = performance.now() + 8_000;
   while (performance.now() < deadline) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/readyz`)).ok) return { port, process };
-    } catch { /* child is still loading */ }
-    if (process.exitCode !== null) throw new Error(`harness server exited during startup with ${process.exitCode}`);
+    } catch {
+      /* child is still loading */
+    }
+    if (process.exitCode !== null)
+      throw new Error(`harness server exited during startup with ${process.exitCode}`);
     await Bun.sleep(20);
   }
   process.kill("SIGKILL");
@@ -261,7 +327,9 @@ async function createClient(
     socket,
     inbound: new ReliableOrderedLink(profile, seed + clientId * 2),
     outbound: new ReliableOrderedLink(profile, seed + clientId * 2 + 1),
-    predictor: new PlayerPredictor((body) => { client.predictedPosition = body?.position ?? null; }),
+    predictor: new PlayerPredictor((body) => {
+      client.predictedPosition = body?.position ?? null;
+    }),
     history: createSnapshotTimeline(),
     welcome: null,
     latestSnapshot: null,
@@ -270,10 +338,18 @@ async function createClient(
     nextInputAtMs: 0,
     inputTimes: new Map(),
     metrics: {
-      clientId, profile: profile.name, snapshots: 0,
-      predictionErrorsMetres: [], inputLatencyMs: [], snapshotAgeMs: [],
-      extrapolatedSamples: 0, renderSamples: 0,
-      inboundRetransmissions: 0, outboundRetransmissions: 0, queueHighWaterBytes: 0, errors: [],
+      clientId,
+      profile: profile.name,
+      snapshots: 0,
+      predictionErrorsMetres: [],
+      inputLatencyMs: [],
+      snapshotAgeMs: [],
+      extrapolatedSamples: 0,
+      renderSamples: 0,
+      inboundRetransmissions: 0,
+      outboundRetransmissions: 0,
+      queueHighWaterBytes: 0,
+      errors: [],
     },
     baseUrl: `http://127.0.0.1:${port}`,
     startedAt,
@@ -282,20 +358,34 @@ async function createClient(
     nextRenderAtMs: 0,
   };
   socket.addEventListener("message", (event) => {
-    const payload = typeof event.data === "string" ? event.data : event.data as ArrayBuffer;
+    const payload = typeof event.data === "string" ? event.data : (event.data as ArrayBuffer);
     client.outbound.send(performance.now() - startedAt, wireLength(payload), payload);
   });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`client ${clientId} open timeout`)), 3_000);
-    socket.addEventListener("open", () => {
-      clearTimeout(timeout);
-      socket.send(JSON.stringify({
-        type: "hello", protocolVersion: PROTOCOL_VERSION, mapRevision: null, worldEpoch: null,
-        sessionToken: null, socketGeneration: 0,
-      }));
-      resolve();
-    }, { once: true });
-    socket.addEventListener("error", () => reject(new Error(`client ${clientId} websocket error`)), { once: true });
+    socket.addEventListener(
+      "open",
+      () => {
+        clearTimeout(timeout);
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            protocolVersion: PROTOCOL_VERSION,
+            mapRevision: null,
+            worldEpoch: null,
+            sessionToken: null,
+            socketGeneration: 0,
+          }),
+        );
+        resolve();
+      },
+      { once: true },
+    );
+    socket.addEventListener(
+      "error",
+      () => reject(new Error(`client ${clientId} websocket error`)),
+      { once: true },
+    );
   });
   return client;
 }
@@ -303,7 +393,10 @@ async function createClient(
 function advanceClient(client: Client, nowMs: number, generateInput = true): void {
   const snapshots: Array<{ payload: ArrayBuffer; deliveryAtMs: number; tick: number }> = [];
   for (const packet of client.outbound.advance(nowMs)) {
-    if (typeof packet.payload !== "string" && new DataView(packet.payload).getUint8(0) !== LIFECYCLE_TAG) {
+    if (
+      typeof packet.payload !== "string" &&
+      new DataView(packet.payload).getUint8(0) !== LIFECYCLE_TAG
+    ) {
       const tick = new DataView(packet.payload).getUint32(7, true);
       snapshots.push({ payload: packet.payload, deliveryAtMs: packet.deliveryAtMs, tick });
     } else {
@@ -312,7 +405,12 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
   }
   const retainedSnapshots = snapshots.slice(-SNAPSHOT_HISTORY_PACKETS);
   for (const [index, snapshot] of retainedSnapshots.entries()) {
-    handleOutbound(client, snapshot.payload, snapshot.deliveryAtMs, index === retainedSnapshots.length - 1);
+    handleOutbound(
+      client,
+      snapshot.payload,
+      snapshot.deliveryAtMs,
+      index === retainedSnapshots.length - 1,
+    );
   }
   if (client.welcome && generateInput) {
     while (client.nextInputAtMs <= nowMs) {
@@ -346,7 +444,12 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
   }
 }
 
-function handleOutbound(client: Client, payload: WirePayload, nowMs: number, reconcile = true): void {
+function handleOutbound(
+  client: Client,
+  payload: WirePayload,
+  nowMs: number,
+  reconcile = true,
+): void {
   if (typeof payload === "string") {
     const message = decodeServerControl(payload);
     if (message.type === "welcome") {
@@ -391,7 +494,10 @@ function handleOutbound(client: Client, payload: WirePayload, nowMs: number, rec
   for (const sequence of client.inputTimes.keys()) {
     if (sequence <= authority.lastProcessedInputSequence) client.inputTimes.delete(sequence);
   }
-  const snapshotAge = Math.max(0, (client.history.serverTickAt(nowMs) - snapshot.serverTick) * 1_000 * PHYSICS_DT);
+  const snapshotAge = Math.max(
+    0,
+    (client.history.serverTickAt(nowMs) - snapshot.serverTick) * 1_000 * PHYSICS_DT,
+  );
   client.metrics.snapshotAgeMs.push(snapshotAge);
   client.snapshotAgeTimed.push({ atMs: nowMs, value: snapshotAge });
 }
@@ -400,7 +506,8 @@ async function loadClientWorld(client: Client, message: WorldManifestMessage): P
   try {
     const response = await fetch(`${client.baseUrl}${message.bundleUrl}`);
     const bundle = decodeWorldBundle(await response.arrayBuffer());
-    if (bundle.mapRevision !== message.mapRevision) throw new Error("harness world revision mismatch");
+    if (bundle.mapRevision !== message.mapRevision)
+      throw new Error("harness world revision mismatch");
     const world: WorldMessage = { ...message, bundle };
     await client.predictor.setWorld(world);
     client.nextInputAtMs = performance.now() - client.startedAt;
@@ -415,24 +522,39 @@ function inputCommand(client: Client, nowMs: number): InputCommand {
   const moveX = direction === 0 ? 1 : direction === 2 ? -1 : 0;
   const moveZ = direction === 1 ? 1 : direction === 3 ? -1 : 0;
   return {
-    type: "input", protocolVersion: PROTOCOL_VERSION, worldEpoch: client.welcome!.worldEpoch,
-    sequence, clientTick: sequence,
-    moveX, moveZ, lookYaw: 0, lookPitch: 0,
-    buttons: 0, jumpCounter: 0, interactCounter: 0, interactTarget: null, primaryCounter: 0,
+    type: "input",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch: client.welcome!.worldEpoch,
+    sequence,
+    clientTick: sequence,
+    moveX,
+    moveZ,
+    lookYaw: 0,
+    lookPitch: 0,
+    buttons: 0,
+    jumpCounter: 0,
+    interactCounter: 0,
+    interactTarget: null,
+    primaryCounter: 0,
   };
 }
 
 function percentile(values: number[], amount: number): number {
   if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
+  const sorted = [...values].toSorted((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * amount))]!;
 }
 
 function wireLength(payload: WirePayload): number {
-  return typeof payload === "string" ? new TextEncoder().encode(payload).byteLength : payload.byteLength;
+  return typeof payload === "string"
+    ? new TextEncoder().encode(payload).byteLength
+    : payload.byteLength;
 }
 
-function sameId(a: { index: number; generation: number }, b: { index: number; generation: number }): boolean {
+function sameId(
+  a: { index: number; generation: number },
+  b: { index: number; generation: number },
+): boolean {
   return a.index === b.index && a.generation === b.generation;
 }
 

@@ -1,27 +1,33 @@
 import { entityDefinitions, type PropertyDefinition } from "@gurgur/entity-schema";
 
-const fgdType = (property: PropertyDefinition): string => ({
-  string: "string",
-  number: "float",
-  boolean: "choices",
-  vector: "vector",
-  target: "target_destination",
-  targetname: "target_source",
-})[property.type];
+const fgdType = (property: PropertyDefinition): string =>
+  ({
+    string: "string",
+    number: "float",
+    boolean: "choices",
+    vector: "vector",
+    target: "target_destination",
+    targetname: "target_source",
+  })[property.type];
 
 const quote = (value: string | number | boolean): string => ` : "${String(value)}"`;
 const lines = ["// Generated from @gurgur/entity-schema. Do not edit by hand.", ""];
 for (const [classname, definition] of Object.entries(entityDefinitions)) {
   const kind = definition.kind === "solid" ? "SolidClass" : "PointClass";
-  const size = "size" in definition && definition.size
-    ? ` size(${definition.size.slice(0, 3).join(" ")}, ${definition.size.slice(3).join(" ")})`
-    : "";
-  lines.push(`@${kind} color(${definition.color.join(" ")})${size} = ${classname} : "${definition.description}"`);
+  const size =
+    "size" in definition && definition.size
+      ? ` size(${definition.size.slice(0, 3).join(" ")}, ${definition.size.slice(3).join(" ")})`
+      : "";
+  lines.push(
+    `@${kind} color(${definition.color.join(" ")})${size} = ${classname} : "${definition.description}"`,
+  );
   lines.push("[");
   lines.push('  classname(string) : "Entity class" : "' + classname + '"');
   for (const [name, property] of Object.entries(definition.properties)) {
     if (property.type === "boolean") {
-      lines.push(`  ${name}(choices) : "${property.description}" : ${property.default ? 1 : 0} = [ 0 : "No" 1 : "Yes" ]`);
+      lines.push(
+        `  ${name}(choices) : "${property.description}" : ${property.default ? 1 : 0} = [ 0 : "No" 1 : "Yes" ]`,
+      );
     } else {
       const defaultValue = property.default === undefined ? "" : quote(property.default);
       lines.push(`  ${name}(${fgdType(property)}) : "${property.description}"${defaultValue}`);
@@ -48,12 +54,18 @@ const gameConfig = {
     defaultcolor: "0.6 0.7 0.65 1.0",
   },
   tags: {
-    brush: [{ name: "Trigger", attribs: ["transparent"], match: "classname", pattern: "trigger_*" }],
+    brush: [
+      { name: "Trigger", attribs: ["transparent"], match: "classname", pattern: "trigger_*" },
+    ],
     brushface: [],
   },
   faceattribs: { defaults: { scale: [0.25, 0.25] }, surfaceflags: [], contentflags: [] },
   softMapBounds: "-4096 -4096 -4096 4096 4096 4096",
-  compilationTools: [{ name: "gurgur-compile-map", description: "Gurgur deterministic Valve 220 compiler" }],
+  compilationTools: [
+    { name: "gurgur-compile-map", description: "Gurgur deterministic Valve 220 compiler" },
+  ],
 };
 await Bun.write("content/trenchbroom/GameConfig.cfg", `${JSON.stringify(gameConfig, null, 2)}\n`);
-console.log(`generated TrenchBroom FGD/game config (${Object.keys(entityDefinitions).length} classes)`);
+console.log(
+  `generated TrenchBroom FGD/game config (${Object.keys(entityDefinitions).length} classes)`,
+);

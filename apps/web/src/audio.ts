@@ -39,7 +39,9 @@ export class VoiceChat {
     this.#status = status;
   }
 
-  get enabled(): boolean { return this.#enabled; }
+  get enabled(): boolean {
+    return this.#enabled;
+  }
 
   configure(welcome: WelcomeMessage): void {
     if (this.#welcome?.worldEpoch !== welcome.worldEpoch) this.#closePeers();
@@ -60,9 +62,14 @@ export class VoiceChat {
       const destination = this.#context.createMediaStreamDestination();
       this.#microphoneSource.connect(this.#microphoneGain).connect(destination);
       this.#outboundStream = destination.stream;
-      for (const track of stream.getTracks()) track.addEventListener("ended", () => {
-        if (this.#stream === stream) this.disable("device lost");
-      }, { once: true });
+      for (const track of stream.getTracks())
+        track.addEventListener(
+          "ended",
+          () => {
+            if (this.#stream === stream) this.disable("device lost");
+          },
+          { once: true },
+        );
       this.#enabled = true;
       this.#sendReady(true);
       this.#status("voice on");
@@ -95,8 +102,11 @@ export class VoiceChat {
   block(peerId: string, blocked: boolean): void {
     if (!this.#welcome) return;
     this.#send({
-      type: "voice-block", protocolVersion: PROTOCOL_VERSION, worldEpoch: this.#welcome.worldEpoch,
-      peerId, blocked,
+      type: "voice-block",
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: this.#welcome.worldEpoch,
+      peerId,
+      blocked,
     });
     if (blocked) this.#removePeer(peerId);
   }
@@ -109,12 +119,15 @@ export class VoiceChat {
 
   async handleSignal(message: VoiceSignalForwardMessage): Promise<void> {
     if (!this.#enabled || !this.#desiredPeers.has(message.fromPeerId)) return;
-    const peer = this.#peers.get(message.fromPeerId) ?? this.#addPeer(this.#desiredPeers.get(message.fromPeerId)!);
+    const peer =
+      this.#peers.get(message.fromPeerId) ??
+      this.#addPeer(this.#desiredPeers.get(message.fromPeerId)!);
     try {
       if (message.signal.description) {
         const description = message.signal.description as RTCSessionDescriptionInit;
-        const collision = description.type === "offer"
-          && (peer.makingOffer || peer.connection.signalingState !== "stable");
+        const collision =
+          description.type === "offer" &&
+          (peer.makingOffer || peer.connection.signalingState !== "stable");
         peer.ignoreOffer = !peer.polite && collision;
         if (peer.ignoreOffer) return;
         await peer.connection.setRemoteDescription(description);
@@ -123,7 +136,9 @@ export class VoiceChat {
           this.#sendSignal(peer.id, { description: peer.connection.localDescription!.toJSON() });
         }
       } else if (message.signal.candidate) {
-        try { await peer.connection.addIceCandidate(message.signal.candidate); } catch (error) {
+        try {
+          await peer.connection.addIceCandidate(message.signal.candidate);
+        } catch (error) {
           if (!peer.ignoreOffer) throw error;
         }
       }
@@ -141,16 +156,24 @@ export class VoiceChat {
 
   #sendReady(enabled: boolean): void {
     if (!this.#welcome) return;
-    this.#send({ type: "voice-ready", protocolVersion: PROTOCOL_VERSION, worldEpoch: this.#welcome.worldEpoch, enabled });
+    this.#send({
+      type: "voice-ready",
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: this.#welcome.worldEpoch,
+      enabled,
+    });
   }
 
   #syncPeers(): void {
-    for (const id of this.#peers.keys()) if (!this.#enabled || !this.#desiredPeers.has(id)) this.#removePeer(id);
+    for (const id of this.#peers.keys())
+      if (!this.#enabled || !this.#desiredPeers.has(id)) this.#removePeer(id);
     if (!this.#enabled) return;
     for (const desired of this.#desiredPeers.values()) {
       const peer = this.#peers.get(desired.peerId) ?? this.#addPeer(desired);
       peer.polite = desired.polite;
-      if (peer.gain) peer.gain.gain.value = desired.distance <= 3 ? 1 : Math.max(0, (20 - desired.distance) / 17);
+      if (peer.gain)
+        peer.gain.gain.value =
+          desired.distance <= 3 ? 1 : Math.max(0, (20 - desired.distance) / 17);
       if (peer.panner) {
         peer.panner.positionX.value = desired.relative.x;
         peer.panner.positionY.value = desired.relative.y;
@@ -158,31 +181,45 @@ export class VoiceChat {
       }
     }
     const mediaPeers = [...this.#peers.values()].filter((peer) => peer.gain !== null).length;
-    this.#status(`voice on · ${this.#peers.size} peer${this.#peers.size === 1 ? "" : "s"} · ${mediaPeers} media`);
+    this.#status(
+      `voice on · ${this.#peers.size} peer${this.#peers.size === 1 ? "" : "s"} · ${mediaPeers} media`,
+    );
   }
 
   #addPeer(desired: VoicePeersMessage["peers"][number]): Peer {
-    if (!this.#welcome || !this.#outboundStream || !this.#context) throw new Error("voice is not configured");
+    if (!this.#welcome || !this.#outboundStream || !this.#context)
+      throw new Error("voice is not configured");
     const connection = new RTCPeerConnection({
       iceServers: this.#welcome.voiceConfig.iceServers,
       iceTransportPolicy: this.#welcome.voiceConfig.iceTransportPolicy,
     });
     const peer: Peer = {
-      id: desired.peerId, connection, polite: desired.polite,
-      makingOffer: false, ignoreOffer: false, gain: null, panner: null,
+      id: desired.peerId,
+      connection,
+      polite: desired.polite,
+      makingOffer: false,
+      ignoreOffer: false,
+      gain: null,
+      panner: null,
     };
     this.#peers.set(peer.id, peer);
-    for (const track of this.#outboundStream.getTracks()) connection.addTrack(track, this.#outboundStream);
+    for (const track of this.#outboundStream.getTracks())
+      connection.addTrack(track, this.#outboundStream);
     connection.addEventListener("icecandidate", (event) => {
-      if (event.candidate) this.#sendSignal(peer.id, { candidate: {
-        candidate: event.candidate.candidate,
-        sdpMid: event.candidate.sdpMid,
-        sdpMLineIndex: event.candidate.sdpMLineIndex,
-        usernameFragment: event.candidate.usernameFragment,
-      } });
+      if (event.candidate)
+        this.#sendSignal(peer.id, {
+          candidate: {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            usernameFragment: event.candidate.usernameFragment,
+          },
+        });
     });
     connection.addEventListener("track", (event) => {
-      const source = this.#context!.createMediaStreamSource(event.streams[0] ?? new MediaStream([event.track]));
+      const source = this.#context!.createMediaStreamSource(
+        event.streams[0] ?? new MediaStream([event.track]),
+      );
       const panner = this.#context!.createPanner();
       panner.panningModel = "HRTF";
       panner.distanceModel = "linear";
@@ -196,7 +233,9 @@ export class VoiceChat {
       this.#syncPeers();
     });
     connection.addEventListener("connectionstatechange", () => {
-      this.#status(`voice ${connection.connectionState} · ${this.#peers.size} peer${this.#peers.size === 1 ? "" : "s"}`);
+      this.#status(
+        `voice ${connection.connectionState} · ${this.#peers.size} peer${this.#peers.size === 1 ? "" : "s"}`,
+      );
       if (["failed", "closed"].includes(connection.connectionState)) this.#removePeer(peer.id);
     });
     if (!peer.polite) void this.#offer(peer);
@@ -216,8 +255,11 @@ export class VoiceChat {
   #sendSignal(toPeerId: string, signal: VoiceSignalMessage["signal"]): void {
     if (!this.#welcome) return;
     this.#send({
-      type: "voice-signal", protocolVersion: PROTOCOL_VERSION, worldEpoch: this.#welcome.worldEpoch,
-      toPeerId, signal,
+      type: "voice-signal",
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: this.#welcome.worldEpoch,
+      toPeerId,
+      signal,
     });
   }
 
@@ -231,6 +273,6 @@ export class VoiceChat {
   }
 
   #closePeers(): void {
-    for (const id of [...this.#peers.keys()]) this.#removePeer(id);
+    for (const id of this.#peers.keys()) this.#removePeer(id);
   }
 }

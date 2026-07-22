@@ -60,8 +60,10 @@ export class ReliableOrderedLink<T> {
   };
 
   constructor(profile: NetworkProfile, seed: number) {
-    if (profile.roundTripLatencyMs < 0 || profile.jitterMs < 0) throw new Error("latency and jitter must be non-negative");
-    if (profile.lossRate < 0 || profile.lossRate > 1) throw new Error("lossRate must be between zero and one");
+    if (profile.roundTripLatencyMs < 0 || profile.jitterMs < 0)
+      throw new Error("latency and jitter must be non-negative");
+    if (profile.lossRate < 0 || profile.lossRate > 1)
+      throw new Error("lossRate must be between zero and one");
     if (profile.retransmitDelayMs < 0) throw new Error("retransmitDelayMs must be non-negative");
     if (profile.bandwidthBitsPerSecond !== null && profile.bandwidthBitsPerSecond <= 0) {
       throw new Error("bandwidth must be positive or null");
@@ -88,24 +90,27 @@ export class ReliableOrderedLink<T> {
   }
 
   send(sentAtMs: number, byteLength: number, payload: T) {
-    if (sentAtMs < 0 || !Number.isFinite(sentAtMs)) throw new Error("sentAtMs must be finite and non-negative");
-    if (!Number.isInteger(byteLength) || byteLength < 0) throw new Error("byteLength must be a non-negative integer");
+    if (sentAtMs < 0 || !Number.isFinite(sentAtMs))
+      throw new Error("sentAtMs must be finite and non-negative");
+    if (!Number.isInteger(byteLength) || byteLength < 0)
+      throw new Error("byteLength must be a non-negative integer");
 
     const transmissionStart = Math.max(sentAtMs, this.#transmitterAvailableAtMs);
-    const serializationMs = this.profile.bandwidthBitsPerSecond === null
-      ? 0
-      : (byteLength * 8 * 1000) / this.profile.bandwidthBitsPerSecond;
+    const serializationMs =
+      this.profile.bandwidthBitsPerSecond === null
+        ? 0
+        : (byteLength * 8 * 1000) / this.profile.bandwidthBitsPerSecond;
     const transmissionEnd = transmissionStart + serializationMs;
     this.#transmitterAvailableAtMs = transmissionEnd;
 
-    const jitter = this.profile.jitterMs === 0
-      ? 0
-      : (this.#random() * 2 - 1) * this.profile.jitterMs;
+    const jitter =
+      this.profile.jitterMs === 0 ? 0 : (this.#random() * 2 - 1) * this.profile.jitterMs;
     const retransmitted = this.#random() < this.profile.lossRate;
-    let deliveryAtMs = transmissionEnd
-      + this.profile.roundTripLatencyMs / 2
-      + jitter
-      + (retransmitted ? this.profile.retransmitDelayMs : 0);
+    let deliveryAtMs =
+      transmissionEnd +
+      this.profile.roundTripLatencyMs / 2 +
+      jitter +
+      (retransmitted ? this.profile.retransmitDelayMs : 0);
     deliveryAtMs = Math.max(transmissionEnd, deliveryAtMs);
 
     for (const outage of this.#outages) {
@@ -131,15 +136,22 @@ export class ReliableOrderedLink<T> {
     this.#metrics.sentPackets += 1;
     this.#metrics.sentBytes += byteLength;
     this.#metrics.queuedBytes += byteLength;
-    this.#metrics.queueHighWaterBytes = Math.max(this.#metrics.queueHighWaterBytes, this.#metrics.queuedBytes);
+    this.#metrics.queueHighWaterBytes = Math.max(
+      this.#metrics.queueHighWaterBytes,
+      this.#metrics.queuedBytes,
+    );
     if (retransmitted) this.#metrics.retransmissions += 1;
     return packet.sequence;
   }
 
   advance(nowMs: number) {
-    if (nowMs < 0 || !Number.isFinite(nowMs)) throw new Error("nowMs must be finite and non-negative");
+    if (nowMs < 0 || !Number.isFinite(nowMs))
+      throw new Error("nowMs must be finite and non-negative");
     let deliveredCount = 0;
-    while (deliveredCount < this.#pending.length && this.#pending[deliveredCount]!.deliveryAtMs <= nowMs) {
+    while (
+      deliveredCount < this.#pending.length &&
+      this.#pending[deliveredCount]!.deliveryAtMs <= nowMs
+    ) {
       deliveredCount += 1;
     }
     const delivered = this.#pending.splice(0, deliveredCount);

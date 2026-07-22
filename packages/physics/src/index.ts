@@ -21,7 +21,12 @@ type BodySlot = {
   compounds: b3CompoundData[];
   heightFields: b3HeightFieldData[];
 };
-type ConstraintSlot = { generation: number; joint: b3JointId | null; bodyA: RuntimeId; bodyB: RuntimeId };
+type ConstraintSlot = {
+  generation: number;
+  joint: b3JointId | null;
+  bodyA: RuntimeId;
+  bodyB: RuntimeId;
+};
 export type ConstraintId = { index: number; generation: number };
 
 export type BodyKind = "static" | "kinematic" | "dynamic";
@@ -43,7 +48,13 @@ export type PhysicsStepEvents = {
   sensorEnd: Array<{ sensor: RuntimeId; visitor: RuntimeId }>;
   contactBegin: Array<{ a: RuntimeId; b: RuntimeId }>;
   contactEnd: Array<{ a: RuntimeId; b: RuntimeId }>;
-  contactHit: Array<{ a: RuntimeId; b: RuntimeId; point: Vec3; normal: Vec3; approachSpeed: number }>;
+  contactHit: Array<{
+    a: RuntimeId;
+    b: RuntimeId;
+    point: Vec3;
+    normal: Vec3;
+    approachSpeed: number;
+  }>;
   moved: Array<{ body: RuntimeId; position: Vec3; rotation: Quat; fellAsleep: boolean }>;
 };
 
@@ -61,7 +72,12 @@ export class PhysicsWorld {
   readonly #contactHitEvent: ContactHitEvent;
   readonly #bodyMoveEvent: BodyMoveEvent;
   readonly #stepEvents: PhysicsStepEvents = {
-    sensorBegin: [], sensorEnd: [], contactBegin: [], contactEnd: [], contactHit: [], moved: [],
+    sensorBegin: [],
+    sensorEnd: [],
+    contactBegin: [],
+    contactEnd: [],
+    contactHit: [],
+    moved: [],
   };
   #stepping = false;
   #disposed = false;
@@ -126,7 +142,8 @@ export class PhysicsWorld {
     restitution?: number;
   }): RuntimeId {
     this.#assertLive();
-    if (options.vertices.length < 4) throw new Error("a convex hull requires at least four vertices");
+    if (options.vertices.length < 4)
+      throw new Error("a convex hull requires at least four vertices");
     const definition = this.#box3d.b3DefaultBodyDef();
     definition.type = this.#bodyType(options.type);
     definition.position = options.position;
@@ -137,7 +154,9 @@ export class PhysicsWorld {
       };
     }
     const body = this.#box3d.b3CreateBody(this.#world, definition);
-    const hull = this.#box3d.b3CreateHull(options.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]));
+    const hull = this.#box3d.b3CreateHull(
+      options.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]),
+    );
     if (!hull) {
       this.#box3d.b3DestroyBody(body);
       throw new Error("Box3D rejected the convex hull");
@@ -172,14 +191,17 @@ export class PhysicsWorld {
     const definition = this.#box3d.b3DefaultBodyDef();
     definition.type = this.#bodyType(options.type);
     definition.position = options.position;
-    if (options.rotation) definition.rotation = {
-      v: { x: options.rotation.x, y: options.rotation.y, z: options.rotation.z },
-      s: options.rotation.w,
-    };
+    if (options.rotation)
+      definition.rotation = {
+        v: { x: options.rotation.x, y: options.rotation.y, z: options.rotation.z },
+        s: options.rotation.w,
+      };
     const body = this.#box3d.b3CreateBody(this.#world, definition);
     try {
       for (const source of options.hulls) {
-        const hull = this.#box3d.b3CreateHull(source.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]));
+        const hull = this.#box3d.b3CreateHull(
+          source.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]),
+        );
         if (!hull) throw new Error("Box3D rejected a compound convex hull");
         try {
           const shape = this.#box3d.b3DefaultShapeDef();
@@ -222,16 +244,20 @@ export class PhysicsWorld {
 
   createSensorHull(options: { position: Vec3; vertices: Vec3[]; rotation?: Quat }): RuntimeId {
     this.#assertLive();
-    if (options.vertices.length < 4) throw new Error("a sensor hull requires at least four vertices");
+    if (options.vertices.length < 4)
+      throw new Error("a sensor hull requires at least four vertices");
     const definition = this.#box3d.b3DefaultBodyDef();
     definition.type = this.#bodyType("static");
     definition.position = options.position;
-    if (options.rotation) definition.rotation = {
-      v: { x: options.rotation.x, y: options.rotation.y, z: options.rotation.z },
-      s: options.rotation.w,
-    };
+    if (options.rotation)
+      definition.rotation = {
+        v: { x: options.rotation.x, y: options.rotation.y, z: options.rotation.z },
+        s: options.rotation.w,
+      };
     const body = this.#box3d.b3CreateBody(this.#world, definition);
-    const hull = this.#box3d.b3CreateHull(options.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]));
+    const hull = this.#box3d.b3CreateHull(
+      options.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]),
+    );
     if (!hull) {
       this.#box3d.b3DestroyBody(body);
       throw new Error("Box3D rejected the sensor hull");
@@ -249,11 +275,19 @@ export class PhysicsWorld {
     return this.#track(body);
   }
 
-  createStaticMesh(options: { vertices: Vec3[]; triangles: Array<[number, number, number]> }): RuntimeId {
+  createStaticMesh(options: {
+    vertices: Vec3[];
+    triangles: Array<[number, number, number]>;
+  }): RuntimeId {
     this.#assertLive();
-    if (options.vertices.length < 3 || options.triangles.length < 1) throw new Error("a static mesh requires vertices and triangles");
+    if (options.vertices.length < 3 || options.triangles.length < 1)
+      throw new Error("a static mesh requires vertices and triangles");
     for (const triangle of options.triangles) {
-      if (triangle.some((index) => !Number.isInteger(index) || index < 0 || index >= options.vertices.length)) {
+      if (
+        triangle.some(
+          (index) => !Number.isInteger(index) || index < 0 || index >= options.vertices.length,
+        )
+      ) {
         throw new Error("static mesh triangle index is out of bounds");
       }
     }
@@ -269,12 +303,11 @@ export class PhysicsWorld {
       throw new Error("Box3D rejected the static indexed mesh");
     }
     try {
-      this.#box3d.b3CreateMeshShape(
-        body,
-        this.#box3d.b3DefaultShapeDef(),
-        mesh,
-        { x: 1, y: 1, z: 1 },
-      );
+      this.#box3d.b3CreateMeshShape(body, this.#box3d.b3DefaultShapeDef(), mesh, {
+        x: 1,
+        y: 1,
+        z: 1,
+      });
     } catch (error) {
       this.#box3d.b3DestroyBody(body);
       this.#box3d.b3DestroyMesh(mesh);
@@ -287,18 +320,31 @@ export class PhysicsWorld {
     boxes: Array<{ position: Vec3; halfExtents: Vec3; rotation?: Quat }>;
   }): RuntimeId {
     this.#assertLive();
-    if (options.boxes.length === 0) throw new Error("a static compound requires at least one child");
+    if (options.boxes.length === 0)
+      throw new Error("a static compound requires at least one child");
     for (const box of options.boxes) {
-      if (![box.halfExtents.x, box.halfExtents.y, box.halfExtents.z].every((value) => Number.isFinite(value) && value > 0)) {
+      if (
+        ![box.halfExtents.x, box.halfExtents.y, box.halfExtents.z].every(
+          (value) => Number.isFinite(value) && value > 0,
+        )
+      ) {
         throw new Error("static compound half extents must be finite and positive");
       }
     }
     const body = this.#box3d.b3CreateBody(this.#world, this.#box3d.b3DefaultBodyDef());
-    const childHulls = options.boxes.map((box) => this.#box3d.b3CreateHull(
-      [-1, 1].flatMap((x) => [-1, 1].flatMap((y) => [-1, 1].flatMap((z) => [
-        x * box.halfExtents.x, y * box.halfExtents.y, z * box.halfExtents.z,
-      ]))),
-    ));
+    const childHulls = options.boxes.map((box) =>
+      this.#box3d.b3CreateHull(
+        [-1, 1].flatMap((x) =>
+          [-1, 1].flatMap((y) =>
+            [-1, 1].flatMap((z) => [
+              x * box.halfExtents.x,
+              y * box.halfExtents.y,
+              z * box.halfExtents.z,
+            ]),
+          ),
+        ),
+      ),
+    );
     if (childHulls.some((hull) => !hull)) {
       for (const hull of childHulls) if (hull) this.#box3d.b3DestroyHull(hull);
       this.#box3d.b3DestroyBody(body);
@@ -337,15 +383,26 @@ export class PhysicsWorld {
     scale: Vec3;
   }): RuntimeId {
     this.#assertLive();
-    if (!Number.isInteger(options.countX) || !Number.isInteger(options.countZ) || options.countX < 2 || options.countZ < 2) {
+    if (
+      !Number.isInteger(options.countX) ||
+      !Number.isInteger(options.countZ) ||
+      options.countX < 2 ||
+      options.countZ < 2
+    ) {
       throw new Error("height field dimensions must be integers of at least two");
     }
-    if (options.heights.length !== options.countX * options.countZ || options.heights.some((value) => !Number.isFinite(value))) {
+    if (
+      options.heights.length !== options.countX * options.countZ ||
+      options.heights.some((value) => !Number.isFinite(value))
+    ) {
       throw new Error("height field requires one finite sample per grid point");
     }
     const body = this.#box3d.b3CreateBody(this.#world, this.#box3d.b3DefaultBodyDef());
     const heightField = this.#box3d.b3CreateHeightField(
-      new Float32Array(options.heights), options.countX, options.countZ, options.scale,
+      new Float32Array(options.heights),
+      options.countX,
+      options.countZ,
+      options.scale,
     );
     if (!heightField) {
       this.#box3d.b3DestroyBody(body);
@@ -419,7 +476,8 @@ export class PhysicsWorld {
       slot.generation += 1;
     }
     this.#freeConstraintSlots.length = 0;
-    for (let index = this.#constraintSlots.length - 1; index >= 0; index -= 1) this.#freeConstraintSlots.push(index);
+    for (let index = this.#constraintSlots.length - 1; index >= 0; index -= 1)
+      this.#freeConstraintSlots.push(index);
     this.#freeSlots.length = 0;
     for (let index = this.#slots.length - 1; index >= 0; index -= 1) this.#freeSlots.push(index);
     this.#pendingDestroy.clear();
@@ -508,7 +566,10 @@ export class PhysicsWorld {
     const index = this.#freeConstraintSlots.pop() ?? this.#constraintSlots.length;
     const generation = this.#constraintSlots[index]?.generation ?? 1;
     this.#constraintSlots[index] = {
-      generation, joint, bodyA: { ...options.bodyA }, bodyB: { ...options.bodyB },
+      generation,
+      joint,
+      bodyA: { ...options.bodyA },
+      bodyB: { ...options.bodyB },
     };
     return { index, generation };
   }
@@ -663,12 +724,7 @@ export class PhysicsWorld {
     this.#assertLive();
     const filter = this.#box3d.b3DefaultQueryFilter();
     if (!options.includePlayerProxies) filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
-    const result = this.#box3d.b3World_CastRayClosest(
-      this.#world,
-      origin,
-      translation,
-      filter,
-    );
+    const result = this.#box3d.b3World_CastRayClosest(this.#world, origin, translation, filter);
     return result.hit
       ? {
           point: { ...result.point },
@@ -734,16 +790,20 @@ export class PhysicsWorld {
     for (let index = 0; index < this.#slots.length; index += 1) {
       const slot = this.#slots[index];
       if (
-        slot?.body
-        && slot.body.index1 === body.index1
-        && slot.body.world0 === body.world0
-        && slot.body.generation === body.generation
-      ) return { index, generation: slot.generation };
+        slot?.body &&
+        slot.body.index1 === body.index1 &&
+        slot.body.world0 === body.world0 &&
+        slot.body.generation === body.generation
+      )
+        return { index, generation: slot.generation };
     }
     throw new Error("Box3D event referenced an untracked body");
   }
 
-  #readSensorEvents(begin: boolean, events: Array<{ sensor: RuntimeId; visitor: RuntimeId }>): void {
+  #readSensorEvents(
+    begin: boolean,
+    events: Array<{ sensor: RuntimeId; visitor: RuntimeId }>,
+  ): void {
     const count = begin
       ? this.#box3d.getNumSensorBeginEvents(this.#events)
       : this.#box3d.getNumSensorEndEvents(this.#events);
@@ -751,8 +811,12 @@ export class PhysicsWorld {
       if (begin) this.#box3d.getSensorBeginEventAt(this.#sensorEvent, this.#events, index);
       else this.#box3d.getSensorEndEventAt(this.#sensorEvent, this.#events, index);
       events.push({
-        sensor: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#sensorEvent.sensorShapeId)),
-        visitor: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#sensorEvent.visitorShapeId)),
+        sensor: this.#runtimeIdForBody(
+          this.#box3d.b3Shape_GetBody(this.#sensorEvent.sensorShapeId),
+        ),
+        visitor: this.#runtimeIdForBody(
+          this.#box3d.b3Shape_GetBody(this.#sensorEvent.visitorShapeId),
+        ),
       });
     }
   }
@@ -777,7 +841,8 @@ export class PhysicsWorld {
       this.#stepEvents.contactHit.push({
         a: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdA)),
         b: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdB)),
-        point: { ...this.#contactHitEvent.point }, normal: { ...this.#contactHitEvent.normal },
+        point: { ...this.#contactHitEvent.point },
+        normal: { ...this.#contactHitEvent.normal },
         approachSpeed: this.#contactHitEvent.approachSpeed,
       });
     }
@@ -788,7 +853,8 @@ export class PhysicsWorld {
       this.#box3d.getBodyMoveEventAt(this.#bodyMoveEvent, this.#events, index);
       this.#stepEvents.moved.push({
         body: this.#runtimeIdForBody(this.#bodyMoveEvent.bodyId),
-        position: { ...this.#bodyMoveEvent.position }, rotation: { ...this.#bodyMoveEvent.rotation },
+        position: { ...this.#bodyMoveEvent.position },
+        rotation: { ...this.#bodyMoveEvent.rotation },
         fellAsleep: this.#bodyMoveEvent.fellAsleep,
       });
     }
@@ -822,7 +888,11 @@ export class PhysicsWorld {
     const slot = this.#slots[index];
     if (!slot?.body) return;
     const id = { index, generation: slot.generation };
-    for (let constraintIndex = 0; constraintIndex < this.#constraintSlots.length; constraintIndex += 1) {
+    for (
+      let constraintIndex = 0;
+      constraintIndex < this.#constraintSlots.length;
+      constraintIndex += 1
+    ) {
       const constraint = this.#constraintSlots[constraintIndex];
       if (!constraint?.joint) continue;
       if (sameId(constraint.bodyA, id) || sameId(constraint.bodyB, id)) {
