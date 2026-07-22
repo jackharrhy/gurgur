@@ -12,7 +12,9 @@ world lifecycle, fixed stepping, movement events, and contacts through both
 single-threaded artifacts in Bun 1.3.14 and Chrome; both variants produced the
 same rounded state.
 
-Evidence: [`../../experiments/physics-runtime/`](../../experiments/physics-runtime/).
+The selection test exercised repeated world lifecycle, fixed stepping, movement
+events, and contacts in Bun and Chrome with matching rounded state. Production
+adapter tests now preserve those invariants.
 
 Multithreaded Wasm adds cross-origin isolation without a demonstrated need.
 Inline Wasm prevents independent browser caching. A custom binding would duplicate

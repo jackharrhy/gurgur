@@ -32,8 +32,17 @@ export type PlayerControllerState = {
   crouched: boolean;
 };
 
+export type PlayerControllerWorld = Pick<PhysicsWorld,
+  | "applyLinearImpulse"
+  | "capsuleFits"
+  | "castCapsule"
+  | "moveCapsule"
+  | "pointVelocity"
+  | "raycastClosest"
+>;
+
 export function stepPlayerController(
-  world: PhysicsWorld,
+  world: PlayerControllerWorld,
   state: PlayerControllerState,
   input: PlayerControllerInput,
   seconds: number,

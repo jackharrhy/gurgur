@@ -198,11 +198,14 @@ describe("authoritative server", () => {
         iceTransportPolicy: "relay",
         iceServers: [{ urls: "turn:relay.test", username: "user", credential: "secret" }],
       });
-      for (const connection of connections) connection.socket.send(JSON.stringify({
-        type: "voice-ready", protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: connection.welcome.worldEpoch, enabled: true,
-      }));
-      await Bun.sleep(10);
+      for (const connection of connections) {
+        const acknowledged = waitForJson(connection.socket, "voice-peers");
+        connection.socket.send(JSON.stringify({
+          type: "voice-ready", protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: connection.welcome.worldEpoch, enabled: true,
+        }));
+        await acknowledged;
+      }
       const peerUpdates = connections.map((connection) => waitForJson(connection.socket, "voice-peers", (message) =>
         Array.isArray(message.peers) && message.peers.length >= 1,
       ));

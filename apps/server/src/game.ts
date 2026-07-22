@@ -1,9 +1,7 @@
-import { createHash } from "node:crypto";
 import {
   PLAYER_HALF_HEIGHT,
   PhysicsWorld,
   stepPlayerController,
-  type BodyKind,
   type ConstraintId,
   type PhysicsStepEvents,
   type PlayerControllerState,
@@ -19,29 +17,19 @@ import {
   SNAPSHOT_FLAG_SLEEP,
   SNAPSHOT_FLAG_TELEPORT,
   SNAPSHOT_FLAG_WAKE,
-  decodeWorldBundle,
-  encodeWorldBundle,
   type InputCommand,
-  type RuntimeEntity,
   type RuntimeId,
   type Snapshot,
   type Vec3,
   type WorldMessage,
 } from "@gurgur/shared";
+import { createMechanismRuntime, type MechanismRuntime } from "./mechanisms";
+import { createRuntimeBodies, type RuntimeBody } from "./runtime-bodies";
 import type { PersistedWorld, WorldStore } from "./store";
+import { WORLD_BUNDLE } from "./world";
 
 const SAVE_INTERVAL_TICKS = 5 / PHYSICS_DT;
-const worldBundleFile = Bun.file(new URL("../../../content/generated/systems-garden.bin", import.meta.url));
-if (!await worldBundleFile.exists()) throw new Error("compiled Systems Garden bundle is missing; run bun run compile:map");
-const WORLD_BUNDLE = decodeWorldBundle(await worldBundleFile.arrayBuffer());
-const computedRevision = createHash("sha256").update(encodeWorldBundle({
-  ...WORLD_BUNDLE,
-  mapRevision: "0".repeat(64),
-})).digest("hex");
-if (computedRevision !== WORLD_BUNDLE.mapRevision) throw new Error("compiled Systems Garden bundle revision mismatch");
 const PLAYER_INDEX_BASE = 0x8000_0000;
-type PhysicalRuntimeEntity = Extract<RuntimeEntity, { brushIndex: number }>;
-type RuntimeBody = PhysicalRuntimeEntity & { handle: RuntimeId };
 type Player = {
   id: RuntimeId;
   persistentId: string;
@@ -57,42 +45,13 @@ type Player = {
   grab: { constraint: ConstraintId; target: RuntimeId; length: number } | null;
 };
 type PlayerSlot = { generation: number; player: Player | null };
-type Trigger = {
-  handle: RuntimeId;
-  authoredId: string;
-  classname: "trigger_once" | "trigger_multiple";
-  target: string;
-  waitTicks: number;
-  readyAtTick: number;
-  consumed: boolean;
-};
-type Mechanism = {
-  handle: RuntimeId;
-  authoredId: string;
-  classname: "func_door" | "func_platform";
-  targetname: string;
-  start: Vec3;
-  end: Vec3;
-  speed: number;
-  waitTicks: number;
-  progress: number;
-  direction: -1 | 0 | 1;
-  resumeAtTick: number;
-};
-type Relay = { authoredId: string; targetname: string; target: string; delayTicks: number; once: boolean; fired: boolean };
-type Button = { handle: RuntimeId; authoredId: string; target: string; waitTicks: number; readyAtTick: number };
-
 export class AuthoritativeGame {
   readonly #physics: PhysicsWorld;
   readonly #store: WorldStore;
   readonly #onSnapshot: (snapshot: Snapshot) => void;
   readonly #onWorld: (world: WorldMessage) => void;
   #runtimeBodies: RuntimeBody[] = [];
-  #triggers: Trigger[] = [];
-  #mechanisms: Mechanism[] = [];
-  #relays: Relay[] = [];
-  #buttons: Button[] = [];
-  #delayedSignals: Array<{ target: string; dueTick: number }> = [];
+  #mechanismRuntime!: MechanismRuntime;
   #saveRequested = false;
   readonly #replicationState = new Map<string, { position: Vec3; awake: boolean }>();
   readonly #dirtyBodies = new Set<string>();
@@ -148,10 +107,10 @@ export class AuthoritativeGame {
       restored?.serverTick ?? 0,
       options.playerSpawn ? { ...options.playerSpawn } : null,
     );
-    game.#spawnRuntimeBodies(restored);
     game.#extraDynamicBodyCount = options.extraDynamicBodies ?? 0;
-    game.#spawnExtraDynamicBodies(restored, game.#extraDynamicBodyCount);
-    game.#spawnMechanismsAndTriggers(restored);
+    game.#runtimeBodies = createRuntimeBodies(physics, restored, game.#extraDynamicBodyCount);
+    for (const body of game.#runtimeBodies) game.#dirtyBodies.add(key(body.handle));
+    game.#mechanismRuntime = game.#createMechanismRuntime(restored);
     for (const player of restored?.players ?? []) game.#dormantPlayers.set(player.persistentId, structuredClone(player));
     return game;
   }
@@ -252,7 +211,7 @@ export class AuthoritativeGame {
     let steps = 0;
     while (this.#accumulator >= PHYSICS_DT && steps < MAX_CATCH_UP_TICKS) {
       const tickStartedAt = performance.now();
-      this.#stepMechanisms();
+      this.#mechanismRuntime.step();
       this.#stepPlayers();
       const events = this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       this.#processPostPhysics(events);
@@ -328,11 +287,6 @@ export class AuthoritativeGame {
       triangles: WORLD_BUNDLE.staticCollision.triangles,
     });
     this.#runtimeBodies = [];
-    this.#triggers = [];
-    this.#mechanisms = [];
-    this.#relays = [];
-    this.#buttons = [];
-    this.#delayedSignals = [];
     this.#dormantPlayers.clear();
     this.#saveRequested = false;
     this.#replicationState.clear();
@@ -340,9 +294,9 @@ export class AuthoritativeGame {
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
-    this.#spawnRuntimeBodies(null);
-    this.#spawnExtraDynamicBodies(null, this.#extraDynamicBodyCount);
-    this.#spawnMechanismsAndTriggers(null);
+    this.#runtimeBodies = createRuntimeBodies(this.#physics, null, this.#extraDynamicBodyCount);
+    for (const body of this.#runtimeBodies) this.#dirtyBodies.add(key(body.handle));
+    this.#mechanismRuntime = this.#createMechanismRuntime(null);
     for (const player of this.#players()) {
       const replacement = this.#newPlayer(player.id, player.persistentId);
       player.proxy = replacement.proxy;
@@ -371,33 +325,33 @@ export class AuthoritativeGame {
         authoredId: body.authoredId,
         ...this.#physics.state(body.handle),
       })),
-      mechanisms: this.#mechanisms.map((mechanism) => ({
+      mechanisms: this.#mechanismRuntime.mechanisms.map((mechanism) => ({
         authoredId: mechanism.authoredId,
         progress: mechanism.progress,
         direction: mechanism.direction,
         resumeAtTick: mechanism.resumeAtTick,
       })),
       signals: [
-        ...this.#triggers.map((trigger) => ({
+        ...this.#mechanismRuntime.triggers.map((trigger) => ({
           authoredId: trigger.authoredId,
           kind: "trigger" as const,
           readyAtTick: trigger.readyAtTick,
           latched: trigger.consumed,
         })),
-        ...this.#relays.map((relay) => ({
+        ...this.#mechanismRuntime.relays.map((relay) => ({
           authoredId: relay.authoredId,
           kind: "relay" as const,
           readyAtTick: 0,
           latched: relay.fired,
         })),
-        ...this.#buttons.map((button) => ({
+        ...this.#mechanismRuntime.buttons.map((button) => ({
           authoredId: button.authoredId,
           kind: "button" as const,
           readyAtTick: button.readyAtTick,
           latched: false,
         })),
       ],
-      delayedSignals: this.#delayedSignals.map((signal) => ({ ...signal })),
+      delayedSignals: this.#mechanismRuntime.delayedSignals.map((signal) => ({ ...signal })),
       players: [
         ...this.#players().map((player) => this.#persistPlayer(player)),
         ...this.#dormantPlayers.values(),
@@ -412,241 +366,20 @@ export class AuthoritativeGame {
     this.#physics.dispose();
   }
 
-  #spawnRuntimeBodies(restored: PersistedWorld | null): void {
-    const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
-    for (const [entityIndex, entity] of WORLD_BUNDLE.entities.entries()) {
-      if (
-        entity.classname !== "func_physics"
-        && entity.classname !== "func_door"
-        && entity.classname !== "func_platform"
-        && entity.classname !== "func_button"
-      ) continue;
-      if (!entity.authoredId || entity.brushIndices.length === 0) {
-        throw new Error(`physical map entity ${entityIndex} must have at least one brush and an authoredId`);
-      }
-      const brushIndex = entity.brushIndices[0]!;
-      const brush = WORLD_BUNDLE.brushes[brushIndex]!;
-      const type: BodyKind = entity.classname === "func_physics"
-        ? "dynamic"
-        : entity.classname === "func_button" ? "static" : "kinematic";
-      const material = {
-        density: Number(entity.runtimeProperties.density ?? 1),
-        friction: Number(entity.runtimeProperties.friction ?? 0.6),
-        restitution: Number(entity.runtimeProperties.restitution ?? 0),
-      };
-      const saved = restoredById.get(entity.authoredId);
-      const hulls = entity.brushIndices.map((index) => ({
-        vertices: WORLD_BUNDLE.brushes[index]!.worldVertices.map((vertex) => ({
-          x: vertex.x - brush.center.x, y: vertex.y - brush.center.y, z: vertex.z - brush.center.z,
-        })),
-      }));
-      const handle = entity.brushIndices.length === 1
-        ? saved
-          ? this.#physics.restoreHull({ type, vertices: brush.localVertices, ...material, ...saved })
-          : this.#physics.createHull({ type, position: brush.center, vertices: brush.localVertices, ...material })
-        : this.#physics.createCompoundHulls({
-          type, position: saved?.position ?? brush.center, rotation: saved?.rotation, hulls, ...material,
-        });
-      if (saved && entity.brushIndices.length > 1) {
-        this.#physics.setBodyVelocity(handle, saved.linearVelocity, saved.angularVelocity);
-        this.#physics.setBodyAwake(handle, saved.awake);
-      }
-      this.#runtimeBodies.push({
-        handle,
-        id: handle,
-        authoredId: entity.authoredId,
-        classname: entity.classname,
-        brushIndex,
-        ...(entity.brushIndices.length > 1 ? { brushIndices: [...entity.brushIndices] } : {}),
-      });
-      this.#dirtyBodies.add(key(handle));
-    }
-  }
-
-  #spawnExtraDynamicBodies(restored: PersistedWorld | null, count: number): void {
-    if (!Number.isInteger(count) || count < 0 || count > 512) throw new Error("extra dynamic body count must be between 0 and 512");
-    if (count === 0) return;
-    const templateEntity = WORLD_BUNDLE.entities.find((entity) => entity.authoredId === "physics.stack.01");
-    const brushIndex = templateEntity?.brushIndices[0];
-    const brush = brushIndex === undefined ? null : WORLD_BUNDLE.brushes[brushIndex];
-    if (!templateEntity || brushIndex === undefined || !brush) throw new Error("dynamic stress-body template is missing");
-    const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
-    for (let index = 0; index < count; index += 1) {
-      const authoredId = `stress.dynamic.${index.toString().padStart(3, "0")}`;
-      const saved = restoredById.get(authoredId);
-      const position = {
-        x: 2 + (index % 8) * 3,
-        y: 1 + Math.floor(index / 32) * 1.3,
-        z: -18 + (Math.floor(index / 8) % 4) * 3,
-      };
-      const handle = saved
-        ? this.#physics.restoreHull({ type: "dynamic", vertices: brush.localVertices, density: 1, ...saved })
-        : this.#physics.createHull({ type: "dynamic", position, vertices: brush.localVertices, density: 1 });
-      this.#runtimeBodies.push({
-        id: handle, handle, authoredId, classname: "func_physics", brushIndex,
-      });
-      this.#dirtyBodies.add(key(handle));
-    }
-  }
-
-  #spawnMechanismsAndTriggers(restored: PersistedWorld | null): void {
-    const bodyByAuthoredId = new Map(this.#runtimeBodies.map((body) => [body.authoredId, body]));
-    const restoredMechanisms = new Map(restored?.mechanisms.map((state) => [state.authoredId, state]));
-    const restoredSignals = new Map(restored?.signals.map((state) => [state.authoredId, state]));
-    this.#delayedSignals = restored?.delayedSignals.map((signal) => ({ ...signal })) ?? [];
-    this.#delayedSignals.sort((a, b) => a.dueTick - b.dueTick);
-    for (const entity of WORLD_BUNDLE.entities) {
-      if (entity.classname === "trigger_once" || entity.classname === "trigger_multiple") {
-        if (!entity.authoredId) throw new Error(`${entity.classname} requires an authoredId`);
-        const brush = WORLD_BUNDLE.brushes[entity.brushIndices[0]!]!;
-        const saved = restoredSignals.get(entity.authoredId);
-        this.#triggers.push({
-          handle: this.#physics.createSensorHull({ position: { x: 0, y: 0, z: 0 }, vertices: brush.worldVertices }),
-          authoredId: entity.authoredId,
-          classname: entity.classname,
-          target: String(entity.runtimeProperties.target),
-          waitTicks: Math.max(1, Math.ceil(Number(entity.runtimeProperties.wait ?? 0) / PHYSICS_DT)),
-          readyAtTick: saved?.kind === "trigger" ? saved.readyAtTick : 0,
-          consumed: saved?.kind === "trigger" ? saved.latched : false,
-        });
-      } else if (entity.classname === "logic_relay") {
-        if (!entity.authoredId) throw new Error("logic_relay requires an authoredId");
-        const saved = restoredSignals.get(entity.authoredId);
-        this.#relays.push({
-          authoredId: entity.authoredId,
-          targetname: String(entity.runtimeProperties.targetname),
-          target: String(entity.runtimeProperties.target),
-          delayTicks: Math.max(0, Math.ceil(Number(entity.runtimeProperties.delay) / PHYSICS_DT)),
-          once: Boolean(entity.runtimeProperties.once),
-          fired: saved?.kind === "relay" ? saved.latched : false,
-        });
-      } else if (entity.classname === "func_button") {
-        const body = bodyByAuthoredId.get(entity.authoredId!);
-        if (!body) throw new Error(`button body ${entity.authoredId} is missing`);
-        this.#buttons.push({
-          handle: body.handle,
-          authoredId: entity.authoredId!,
-          target: String(entity.runtimeProperties.target),
-          waitTicks: Math.max(1, Math.ceil(Number(entity.runtimeProperties.wait) / PHYSICS_DT)),
-          readyAtTick: restoredSignals.get(entity.authoredId!)?.kind === "button"
-            ? restoredSignals.get(entity.authoredId!)!.readyAtTick
-            : 0,
-        });
-      } else if (entity.classname === "func_door" || entity.classname === "func_platform") {
-        const body = bodyByAuthoredId.get(entity.authoredId!);
-        if (!body) throw new Error(`mechanism body ${entity.authoredId} is missing`);
-        const start = { ...WORLD_BUNDLE.brushes[entity.brushIndices[0]!]!.center };
-        const direction = entity.runtimeProperties.moveDirection as Vec3;
-        const distance = Number(entity.runtimeProperties.distance);
-        const end = {
-          x: start.x + direction.x * distance,
-          y: start.y + direction.y * distance,
-          z: start.z + direction.z * distance,
-        };
-        const startOpen = Boolean(entity.runtimeProperties.startOpen);
-        const saved = restoredMechanisms.get(entity.authoredId!);
-        const mechanism: Mechanism = {
-          handle: body.handle,
-          authoredId: entity.authoredId!,
-          classname: entity.classname,
-          targetname: String(entity.runtimeProperties.targetname),
-          start,
-          end,
-          speed: Number(entity.runtimeProperties.speed),
-          waitTicks: Math.max(0, Math.ceil(Number(entity.runtimeProperties.wait) / PHYSICS_DT)),
-          progress: saved?.progress ?? (startOpen ? 1 : 0),
-          direction: saved?.direction ?? 0,
-          resumeAtTick: saved?.resumeAtTick ?? 0,
-        };
-        this.#mechanisms.push(mechanism);
-        this.#setMechanismTransform(mechanism, true);
-      }
-    }
-  }
-
-  #stepMechanisms(): void {
-    while (this.#delayedSignals[0] && this.#delayedSignals[0].dueTick <= this.#serverTick) {
-      const signal = this.#delayedSignals.shift()!;
-      this.#saveRequested = true;
-      this.#emitTarget(signal.target);
-    }
-    for (const mechanism of this.#mechanisms) {
-      if (mechanism.direction === 0 && mechanism.resumeAtTick > 0 && mechanism.resumeAtTick <= this.#serverTick) {
-        mechanism.direction = mechanism.progress >= 1 ? -1 : 1;
-        mechanism.resumeAtTick = 0;
-      }
-      if (mechanism.direction === 0) {
-        this.#physics.setBodyVelocity(mechanism.handle, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
-        continue;
-      }
-      const distance = Math.hypot(
-        mechanism.end.x - mechanism.start.x,
-        mechanism.end.y - mechanism.start.y,
-        mechanism.end.z - mechanism.start.z,
-      );
-      if (distance <= Number.EPSILON || mechanism.speed <= 0) {
-        mechanism.direction = 0;
-        continue;
-      }
-      mechanism.progress = clamp(mechanism.progress + mechanism.direction * mechanism.speed * PHYSICS_DT / distance, 0, 1);
-      this.#setMechanismTransform(mechanism);
-      if (mechanism.progress === 0 || mechanism.progress === 1) {
-        const reachedOpen = mechanism.progress === 1;
-        mechanism.direction = 0;
-        if (mechanism.classname === "func_platform" || reachedOpen) {
-          mechanism.resumeAtTick = this.#serverTick + mechanism.waitTicks;
-        }
-        this.#saveRequested = true;
-      }
-    }
-  }
-
-  #setMechanismTransform(mechanism: Mechanism, teleport = false): void {
-    const position = {
-      x: mechanism.start.x + (mechanism.end.x - mechanism.start.x) * mechanism.progress,
-      y: mechanism.start.y + (mechanism.end.y - mechanism.start.y) * mechanism.progress,
-      z: mechanism.start.z + (mechanism.end.z - mechanism.start.z) * mechanism.progress,
-    };
-    if (teleport) {
-      this.#physics.setBodyTransform(mechanism.handle, position, { x: 0, y: 0, z: 0, w: 1 });
-      this.#physics.setBodyVelocity(mechanism.handle, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
-      return;
-    }
-    const current = this.#physics.state(mechanism.handle).position;
-    this.#physics.setBodyVelocity(mechanism.handle, {
-      x: (position.x - current.x) / PHYSICS_DT,
-      y: (position.y - current.y) / PHYSICS_DT,
-      z: (position.z - current.z) / PHYSICS_DT,
-    }, { x: 0, y: 0, z: 0 });
+  #createMechanismRuntime(restored: PersistedWorld | null): MechanismRuntime {
+    return createMechanismRuntime({
+      physics: this.#physics,
+      bodies: this.#runtimeBodies,
+      restored,
+      currentTick: () => this.#serverTick,
+      playerProxies: () => this.#players().map((player) => player.proxy),
+      requestSave: () => { this.#saveRequested = true; },
+    });
   }
 
   #processPostPhysics(events: PhysicsStepEvents): void {
     for (const event of events.moved) this.#dirtyBodies.add(key(event.body));
-    const playerProxyKeys = new Set(this.#players().map((player) => key(player.proxy)));
-    for (const event of events.sensorBegin) {
-      if (!playerProxyKeys.has(key(event.visitor))) continue;
-      const trigger = this.#triggers.find((candidate) => key(candidate.handle) === key(event.sensor));
-      if (!trigger || trigger.consumed || trigger.readyAtTick > this.#serverTick) continue;
-      this.#emitTarget(trigger.target);
-      if (trigger.classname === "trigger_once") trigger.consumed = true;
-      else trigger.readyAtTick = this.#serverTick + trigger.waitTicks;
-      this.#saveRequested = true;
-    }
-  }
-
-  #emitTarget(targetname: string): void {
-    for (const relay of this.#relays.filter((candidate) => candidate.targetname === targetname)) {
-      if (relay.once && relay.fired) continue;
-      relay.fired = true;
-      this.#delayedSignals.push({ target: relay.target, dueTick: this.#serverTick + relay.delayTicks });
-      this.#delayedSignals.sort((a, b) => a.dueTick - b.dueTick);
-      this.#saveRequested = true;
-    }
-    for (const mechanism of this.#mechanisms.filter((candidate) => candidate.targetname === targetname)) {
-      mechanism.direction = mechanism.progress >= 1 ? -1 : 1;
-      mechanism.resumeAtTick = 0;
-      this.#saveRequested = true;
-    }
+    this.#mechanismRuntime.processSensorBegins(events.sensorBegin);
   }
 
   #stepPlayers(): void {
@@ -696,7 +429,7 @@ export class AuthoritativeGame {
 
   #tryInteract(player: Player, target: RuntimeId | null): void {
     if (!target) return;
-    const button = this.#buttons.find((candidate) => key(candidate.handle) === key(target));
+    const button = this.#mechanismRuntime.buttons.find((candidate) => key(candidate.handle) === key(target));
     if (!button || button.readyAtTick > this.#serverTick) return;
     const horizontal = Math.cos(player.input.lookPitch);
     const direction = {
@@ -711,7 +444,7 @@ export class AuthoritativeGame {
     if (!hit || key(hit.body) !== key(button.handle)) return;
     button.readyAtTick = this.#serverTick + button.waitTicks;
     this.#saveRequested = true;
-    this.#emitTarget(button.target);
+    this.#mechanismRuntime.emitTarget(button.target);
   }
 
   #tryGrab(player: Player, target: RuntimeId | null): void {

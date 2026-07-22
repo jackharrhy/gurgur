@@ -4,7 +4,6 @@ WORKDIR /app
 COPY package.json bun.lock tsconfig.json ./
 COPY apps ./apps
 COPY content ./content
-COPY experiments ./experiments
 COPY packages ./packages
 COPY tools ./tools
 COPY scripts ./scripts

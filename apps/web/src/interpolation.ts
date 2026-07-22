@@ -32,52 +32,58 @@ function interpolate(a: BodySnapshot, b: BodySnapshot, amount: number): BodySnap
   };
 }
 
-export class SnapshotHistory {
-  #worldEpoch: number | null = null;
-  #snapshots: Snapshot[] = [];
-  #clockTick: number | null = null;
-  #clockAtMs = 0;
+export type SnapshotTimeline = {
+  readonly latestTick: number | null;
+  push(snapshot: Snapshot, receivedAtMs?: number, oneWayDelayMs?: number): void;
+  observeServerTick(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
+  serverTickAt(nowMs: number): number;
+  sample(targetTick: number): BodySnapshot[];
+};
 
-  get latestTick(): number | null {
-    return this.#snapshots.at(-1)?.serverTick ?? null;
-  }
+export function createSnapshotTimeline(): SnapshotTimeline {
+  let worldEpoch: number | null = null;
+  let snapshots: Snapshot[] = [];
+  let clockTick: number | null = null;
+  let clockAtMs = 0;
 
-  push(snapshot: Snapshot, receivedAtMs = performance.now(), oneWayDelayMs = 0): void {
-    if (snapshot.worldEpoch !== this.#worldEpoch) {
-      this.#worldEpoch = snapshot.worldEpoch;
-      this.#snapshots = [];
-      this.#clockTick = null;
-    }
-    const latest = this.#snapshots.at(-1);
-    if (latest && snapshot.serverTick <= latest.serverTick) return;
-    this.#snapshots.push(snapshot);
-    if (this.#snapshots.length > HISTORY_LENGTH) this.#snapshots.shift();
-    this.observeServerTick(snapshot.serverTick, receivedAtMs, oneWayDelayMs);
-  }
+  const latestTick = (): number | null => snapshots.at(-1)?.serverTick ?? null;
 
-  observeServerTick(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void {
+  const serverTickAt = (nowMs: number): number => {
+    if (clockTick === null) return latestTick() ?? 0;
+    return clockTick + Math.max(0, nowMs - clockAtMs) * PHYSICS_HZ / 1_000;
+  };
+
+  const observeServerTick = (serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void => {
     const candidate = serverTick + oneWayDelayMs * PHYSICS_HZ / 1_000;
-    const current = this.serverTickAt(receivedAtMs);
-    if (this.#clockTick === null || candidate >= current - 1) {
-      this.#clockTick = candidate;
-      this.#clockAtMs = receivedAtMs;
+    const current = serverTickAt(receivedAtMs);
+    if (clockTick === null || candidate >= current - 1) {
+      clockTick = candidate;
+      clockAtMs = receivedAtMs;
     }
-  }
+  };
 
-  serverTickAt(nowMs: number): number {
-    if (this.#clockTick === null) return this.latestTick ?? 0;
-    return this.#clockTick + Math.max(0, nowMs - this.#clockAtMs) * PHYSICS_HZ / 1_000;
-  }
+  const push = (snapshot: Snapshot, receivedAtMs = performance.now(), oneWayDelayMs = 0): void => {
+    if (snapshot.worldEpoch !== worldEpoch) {
+      worldEpoch = snapshot.worldEpoch;
+      snapshots = [];
+      clockTick = null;
+    }
+    const latest = snapshots.at(-1);
+    if (latest && snapshot.serverTick <= latest.serverTick) return;
+    snapshots.push(snapshot);
+    if (snapshots.length > HISTORY_LENGTH) snapshots.shift();
+    observeServerTick(snapshot.serverTick, receivedAtMs, oneWayDelayMs);
+  };
 
-  sample(targetTick: number): BodySnapshot[] {
-    if (this.#snapshots.length === 0) return [];
-    let older = this.#snapshots[0]!;
-    let newer = this.#snapshots.at(-1)!;
-    for (let index = 1; index < this.#snapshots.length; index += 1) {
-      const candidate = this.#snapshots[index]!;
+  const sample = (targetTick: number): BodySnapshot[] => {
+    if (snapshots.length === 0) return [];
+    let older = snapshots[0]!;
+    let newer = snapshots.at(-1)!;
+    for (let index = 1; index < snapshots.length; index += 1) {
+      const candidate = snapshots[index]!;
       if (candidate.serverTick >= targetTick) {
         newer = candidate;
-        older = this.#snapshots[index - 1]!;
+        older = snapshots[index - 1]!;
         break;
       }
     }
@@ -97,7 +103,15 @@ export class SnapshotHistory {
       const next = newBodies.get(key(body));
       return next ? (next.flags ? body : interpolate(body, next, amount)) : body;
     });
-  }
+  };
+
+  return {
+    get latestTick() { return latestTick(); },
+    push,
+    observeServerTick,
+    serverTickAt,
+    sample,
+  };
 }
 
 function extrapolate(body: BodySnapshot, seconds: number): BodySnapshot {

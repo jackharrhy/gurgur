@@ -12,41 +12,51 @@ type WorkerResponse = {
   correctionMagnitude: number;
 } | { type: "world-ready"; worldEpoch: number };
 
-export class PredictionClient {
-  readonly #worker = new Worker("/prediction-worker.js", { type: "module", name: "gurgur-prediction" });
-  readonly #worldWaiters = new Map<number, Array<() => void>>();
+export type PredictionClient = {
+  setLocalPlayer(id: RuntimeId): void;
+  setWorld(message: WorldMessage): Promise<void>;
+  pushInput(command: InputCommand): void;
+  reconcile(snapshot: Snapshot): void;
+  dispose(): void;
+};
 
-  constructor(onPresentation: (body: BodySnapshot | null, correctionMagnitude: number) => void) {
-    this.#worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
-      if (event.data.type === "presentation") {
-        onPresentation(event.data.body, event.data.correctionMagnitude);
-      } else {
-        for (const resolve of this.#worldWaiters.get(event.data.worldEpoch) ?? []) resolve();
-        this.#worldWaiters.delete(event.data.worldEpoch);
-      }
-    });
-    this.#worker.addEventListener("error", (event) => {
-      console.error("prediction worker failed", event.message);
-    });
-  }
+export function createPredictionClient(
+  onPresentation: (body: BodySnapshot | null, correctionMagnitude: number) => void,
+): PredictionClient {
+  const worker = new Worker("/prediction-worker.js", { type: "module", name: "gurgur-prediction" });
+  const worldWaiters = new Map<number, Array<() => void>>();
 
-  setLocalPlayer(id: RuntimeId): void { this.#post({ type: "local-player", id }); }
-  setWorld(message: WorldMessage): Promise<void> {
+  worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
+    if (event.data.type === "presentation") {
+      onPresentation(event.data.body, event.data.correctionMagnitude);
+    } else {
+      for (const resolve of worldWaiters.get(event.data.worldEpoch) ?? []) resolve();
+      worldWaiters.delete(event.data.worldEpoch);
+    }
+  });
+  worker.addEventListener("error", (event) => console.error("prediction worker failed", event.message));
+
+  const post = (message: WorkerRequest): void => worker.postMessage(message);
+  const setWorld = (message: WorldMessage): Promise<void> => {
     const promise = new Promise<void>((resolve) => {
-      const waiters = this.#worldWaiters.get(message.worldEpoch) ?? [];
+      const waiters = worldWaiters.get(message.worldEpoch) ?? [];
       waiters.push(resolve);
-      this.#worldWaiters.set(message.worldEpoch, waiters);
+      worldWaiters.set(message.worldEpoch, waiters);
     });
-    this.#post({ type: "world", message });
+    post({ type: "world", message });
     return promise;
-  }
-  pushInput(command: InputCommand): void { this.#post({ type: "input", command }); }
-  reconcile(snapshot: Snapshot): void { this.#post({ type: "snapshot", snapshot }); }
-  dispose(): void {
-    this.#worker.terminate();
-    for (const waiters of this.#worldWaiters.values()) for (const resolve of waiters) resolve();
-    this.#worldWaiters.clear();
-  }
+  };
+  const dispose = (): void => {
+    worker.terminate();
+    for (const waiters of worldWaiters.values()) for (const resolve of waiters) resolve();
+    worldWaiters.clear();
+  };
 
-  #post(message: WorkerRequest): void { this.#worker.postMessage(message); }
+  return {
+    setLocalPlayer: (id) => post({ type: "local-player", id }),
+    setWorld,
+    pushInput: (command) => post({ type: "input", command }),
+    reconcile: (snapshot) => post({ type: "snapshot", snapshot }),
+    dispose,
+  };
 }

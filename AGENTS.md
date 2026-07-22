@@ -10,8 +10,7 @@ Route work through the authoritative document for the subsystem:
 - Browser shell, Three.js, assets, and deployment: [`docs/web.md`](docs/web.md)
 - Test harnesses, network profiles, and quality budgets: [`docs/testing.md`](docs/testing.md)
 - Selected technology rationale: [`docs/decisions/README.md`](docs/decisions/README.md)
-- Active work, experiments, and status: [`docs/work.md`](docs/work.md)
-- Pinned source material: [`docs/references.md`](docs/references.md)
+- Active work and status: [`docs/work.md`](docs/work.md)
 
 Keep these invariants:
 
@@ -23,9 +22,9 @@ Keep these invariants:
 - Gameplay networking and realtime voice are separate data and media planes.
 
 Canonical design documents state selected behavior. Put TODOs, sequencing, and
-completion status only in `docs/work.md`. Put decision tests under `experiments/`;
-after a result changes architecture, add a decision record and update the owning
-canonical document.
+completion status only in `docs/work.md`. Preserve durable decision evidence in
+a decision record and focused production tests; do not retain one-off experiment
+implementations after a direction is selected.
 
 Prefer a complete vertical slice and direct code over speculative frameworks.
 Build production systems with their harnesses. For behavior changes, add focused

@@ -9,7 +9,9 @@ The local experiment proved native versioned handshake, per-connection state,
 stale epoch and duplicate-sequence rejection, binary broadcast, protocol mismatch
 closure, payload limits, and numeric send/backpressure results with two clients.
 
-Evidence: [`../../experiments/realtime-transport/`](../../experiments/realtime-transport/).
+The selection test covered handshake versioning, stale epoch and duplicate input
+rejection, binary broadcast, payload limits, and backpressure. Protocol and real
+server tests now preserve those invariants.
 
 This path has the smallest deployment and runtime surface. geckos.io introduces a
 native WebRTC server dependency and ICE/UDP operations, while WebTransport adds a

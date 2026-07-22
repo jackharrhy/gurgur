@@ -1,8 +1,8 @@
-import { SnapshotHistory } from "./interpolation";
+import { createSnapshotTimeline } from "./interpolation";
 import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { PlayerInput } from "./input";
-import { PredictionClient } from "./prediction-client";
+import { createPredictionClient } from "./prediction-client";
 import { VoiceChat } from "./audio";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
@@ -13,13 +13,13 @@ const tick = document.querySelector<HTMLElement>("#tick");
 const voiceButton = document.querySelector<HTMLButtonElement>("#voice");
 if (!canvas || !connection || !light || !epoch || !tick || !voiceButton) throw new Error("game shell is incomplete");
 
-const history = new SnapshotHistory();
+const history = createSnapshotTimeline();
 const renderer = new WorldRenderer(canvas, history, (body) => {
   document.body.dataset.renderedX = String(body.position.x);
   document.body.dataset.renderedY = String(body.position.y);
   document.body.dataset.renderedZ = String(body.position.z);
 });
-const predictor = new PredictionClient((body, correctionMagnitude) => {
+const predictor = createPredictionClient((body, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
   document.body.dataset.predictionReady = body ? "true" : "false";
   if (body) {

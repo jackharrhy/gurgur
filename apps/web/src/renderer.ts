@@ -8,8 +8,8 @@ import {
   type RuntimeId,
   type WorldMessage,
 } from "@gurgur/shared";
-import type { SnapshotHistory } from "./interpolation";
-import { PredictedPoseBuffer } from "./presentation";
+import type { SnapshotTimeline } from "./interpolation";
+import { createPredictedPoseTimeline } from "./presentation";
 import {
   createRetroRenderPipeline,
   createSpriteNodeMaterial,
@@ -24,13 +24,13 @@ export class WorldRenderer {
   readonly #pipeline: RetroRenderPipeline;
   readonly #scene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
-  readonly #history: SnapshotHistory;
+  readonly #history: SnapshotTimeline;
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
   #worldRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
-  readonly #predictedLocal = new PredictedPoseBuffer();
+  readonly #predictedLocal = createPredictedPoseTimeline();
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
   #viewYaw = 0;
   #viewPitch = -0.18;
@@ -38,7 +38,7 @@ export class WorldRenderer {
 
   constructor(
     canvas: HTMLCanvasElement,
-    history: SnapshotHistory,
+    history: SnapshotTimeline,
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
   ) {
     this.#history = history;

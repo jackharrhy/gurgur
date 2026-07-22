@@ -3,36 +3,44 @@ import { PHYSICS_DT, type BodySnapshot, type Quat, type Vec3 } from "@gurgur/sha
 const FRAME_MILLISECONDS = PHYSICS_DT * 1_000;
 const TELEPORT_METRES = 0.75;
 
-export class PredictedPoseBuffer {
-  #previous: BodySnapshot | null = null;
-  #current: BodySnapshot | null = null;
-  #receivedAt = 0;
+export type PredictedPoseTimeline = {
+  push(body: BodySnapshot, now: number): void;
+  sample(now: number): BodySnapshot | null;
+  clear(): void;
+};
 
-  push(body: BodySnapshot, now: number): void {
-    const presented = this.sample(now);
+export function createPredictedPoseTimeline(): PredictedPoseTimeline {
+  let previous: BodySnapshot | null = null;
+  let current: BodySnapshot | null = null;
+  let receivedAt = 0;
+
+  const sample = (now: number): BodySnapshot | null => {
+    if (!previous || !current) return null;
+    const amount = clamp((now - receivedAt) / FRAME_MILLISECONDS, 0, 1);
+    return {
+      ...current,
+      position: mixVec3(previous.position, current.position, amount),
+      rotation: mixQuat(previous.rotation, current.rotation, amount),
+    };
+  };
+
+  const push = (body: BodySnapshot, now: number): void => {
+    const presented = sample(now);
     const teleport = !presented
       || key(presented) !== key(body)
       || distance(presented.position, body.position) >= TELEPORT_METRES;
-    this.#previous = teleport ? clone(body) : presented;
-    this.#current = clone(body);
-    this.#receivedAt = now;
-  }
+    previous = teleport ? clone(body) : presented;
+    current = clone(body);
+    receivedAt = now;
+  };
 
-  sample(now: number): BodySnapshot | null {
-    if (!this.#previous || !this.#current) return null;
-    const amount = clamp((now - this.#receivedAt) / FRAME_MILLISECONDS, 0, 1);
-    return {
-      ...this.#current,
-      position: mixVec3(this.#previous.position, this.#current.position, amount),
-      rotation: mixQuat(this.#previous.rotation, this.#current.rotation, amount),
-    };
-  }
+  const clear = (): void => {
+    previous = null;
+    current = null;
+    receivedAt = 0;
+  };
 
-  clear(): void {
-    this.#previous = null;
-    this.#current = null;
-    this.#receivedAt = 0;
-  }
+  return { push, sample, clear };
 }
 
 function clone(body: BodySnapshot): BodySnapshot {

@@ -19,7 +19,7 @@ import {
 } from "@gurgur/shared";
 import type { ServerMetrics } from "../../../apps/server/src/server";
 import { PlayerPredictor } from "../../../apps/web/src/prediction";
-import { SnapshotHistory } from "../../../apps/web/src/interpolation";
+import { createSnapshotTimeline, type SnapshotTimeline } from "../../../apps/web/src/interpolation";
 import { NETWORK_PROFILES } from "./profiles";
 import { ReliableOrderedLink, type NetworkProfile } from "./reliable-ordered-link";
 
@@ -74,7 +74,7 @@ type Client = {
   inbound: ReliableOrderedLink<ArrayBuffer>;
   outbound: ReliableOrderedLink<WirePayload>;
   predictor: PlayerPredictor;
-  history: SnapshotHistory;
+  history: SnapshotTimeline;
   welcome: WelcomeMessage | null;
   latestSnapshot: Snapshot | null;
   predictedPosition: { x: number; y: number; z: number } | null;
@@ -261,7 +261,7 @@ async function createClient(
     inbound: new ReliableOrderedLink(profile, seed + clientId * 2),
     outbound: new ReliableOrderedLink(profile, seed + clientId * 2 + 1),
     predictor: new PlayerPredictor((body) => { client.predictedPosition = body?.position ?? null; }),
-    history: new SnapshotHistory(),
+    history: createSnapshotTimeline(),
     welcome: null,
     latestSnapshot: null,
     predictedPosition: null,

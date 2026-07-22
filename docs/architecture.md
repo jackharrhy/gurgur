@@ -25,6 +25,12 @@ live physical state; application registries own stable identity and gameplay
 state. Voice uses browser WebRTC media connections and never enters the Bun
 simulation tick.
 
+Persistent external resources have explicit lifecycle owners, but other modules
+depend on small structural capability interfaces rather than concrete classes.
+Pure transforms and short-lived registries use functions and plain data. The
+server game loop composes world loading, runtime-body construction, mechanisms,
+players, replication, and persistence; it does not implement every subsystem.
+
 ## Source boundaries
 
 ```text
@@ -47,7 +53,6 @@ content/
 
 Browser, DOM, Three.js, and Web Audio code stay out of shared packages. SQLite,
 filesystem, administration, and server sockets stay out of client packages.
-Experiments are isolated evidence and are never imported by production code.
 The network harness is production-adjacent tooling: it imports the real shared
 codecs and drives the real server and client simulation boundaries.
 

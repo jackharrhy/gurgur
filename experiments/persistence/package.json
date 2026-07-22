@@ -1,8 +1,0 @@
-{
-  "name": "@gurgur-experiment/persistence",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "check": "bun run test.ts"
-  }
-}

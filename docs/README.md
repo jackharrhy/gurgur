@@ -1,7 +1,7 @@
 # Gurgur documentation
 
 Canonical documents describe the selected system. They do not track project
-status, implementation order, experiments, or competing designs.
+status, implementation order, or competing designs.
 
 | Change | Authority |
 | --- | --- |
@@ -13,12 +13,11 @@ status, implementation order, experiments, or competing designs.
 | Vanilla browser shell, Three.js, and single-container deployment | [`web.md`](web.md) |
 | Test layers, multiplayer harness, network profiles, budgets | [`testing.md`](testing.md) |
 | Why a technology was selected or rejected | [`decisions/`](decisions/) |
-| Current tasks, experiment criteria, completion state | [`work.md`](work.md) |
-| Primary sources and inspected revisions | [`references.md`](references.md) |
+| Current tasks and completion state | [`work.md`](work.md) |
 
-The original planning notes are retained in [`archive/`](archive/) for
-provenance. They are not instructions.
+Accepted technology choices and compact evidence summaries live in
+[`decisions/`](decisions/). Superseded plans and one-off experiments are removed
+once their durable conclusions have been recorded.
 
 When evidence changes a decision, update its decision record and the canonical
-document in the same change. A task is not architecture, and an experiment is not
-production code.
+document in the same change. A task is not architecture.

@@ -11,7 +11,9 @@ The local experiment reconstructed a Valve 220 cube from plane triplets, retaine
 source-face identity, generated eight vertices and twelve triangles, verified the
 world extents and six-foot/72-unit scale, and produced a stable SHA-256 result.
 
-Evidence: [`../../experiments/map-geometry/`](../../experiments/map-geometry/).
+The selection test reconstructed a Valve 220 cube, retained source-face identity,
+verified the selected unit conversion, and produced a stable content hash. Parser,
+compiler, and production-map tests now preserve those invariants.
 
 Owning the focused parser preserves source diagnostics and avoids adopting a
 general map/compiler framework. The inch scale matches established Quake-family

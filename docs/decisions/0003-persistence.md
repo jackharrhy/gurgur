@@ -9,4 +9,6 @@ The local experiment atomically replaced typed snapshot rows, restored them in
 stable authored-ID order, rejected an incompatible `mapRevision`, and represented
 global reset by incrementing `worldEpoch` while clearing runtime body state.
 
-Evidence: [`../../experiments/persistence/`](../../experiments/persistence/).
+The selection test covered transactional replacement, stable authored-ID restore,
+revision rejection, and epoch reset. Store and server lifecycle tests now preserve
+those invariants.
