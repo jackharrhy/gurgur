@@ -13,6 +13,7 @@ specification tentative.
 - [`0007-production-harnesses.md`](0007-production-harnesses.md)
 - [`0008-web-and-deployment.md`](0008-web-and-deployment.md)
 - [`0009-local-contact-prediction.md`](0009-local-contact-prediction.md)
+- [`0010-network-quality-buffering.md`](0010-network-quality-buffering.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

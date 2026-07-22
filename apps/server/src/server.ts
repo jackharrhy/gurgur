@@ -111,10 +111,15 @@ export async function createGurgurServer(options: {
 
   const broadcast = (snapshot: Snapshot): void => {
     const packet = encodeSnapshot(snapshot);
+    let completeReplacement: ArrayBuffer | null = null;
+    const replacement = (): ArrayBuffer => completeReplacement ??= encodeSnapshot(game.snapshot({
+      full: true,
+      discontinuity: true,
+    }));
     for (const socket of clients) {
       if (!socket.data.playerId) continue;
       if (socket.data.backpressured) {
-        socket.data.pendingSnapshot = packet;
+        socket.data.pendingSnapshot = replacement();
         socket.data.pendingSnapshotAtMs = performance.now();
         socket.data.snapshotAgeMs = 0;
         socket.data.queuedBytes = socket.getBufferedAmount();
@@ -126,7 +131,7 @@ export async function createGurgurServer(options: {
       const acceptedBytes = socket.send(packet);
       if (acceptedBytes < 0) {
         socket.data.backpressured = true;
-        socket.data.pendingSnapshot = packet;
+        socket.data.pendingSnapshot = replacement();
         socket.data.backpressureSinceMs = performance.now();
         socket.data.pendingSnapshotAtMs = performance.now();
         socket.data.queuedBytes = socket.getBufferedAmount();

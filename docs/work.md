@@ -17,7 +17,7 @@ The production foundation exists end to end but is not release-complete:
 - protocol v6 has bounded exact JSON control unions and explicit binary input,
   snapshot, and lifecycle codecs, including multi-brush lifecycle identity;
 - local player and nearby dynamic-body prediction/replay, collision-clamped
-  display correction, 150 ms unrelated-remote interpolation, movement-event
+  display correction, 250 ms unrelated-remote interpolation, movement-event
   dirty replication, generation-safe reconnect, and epoch reset run through the
   real browser/server path;
 - doors, platforms, buttons, triggers, relays, delayed signals, grabs, player
@@ -34,7 +34,7 @@ The production foundation exists end to end but is not release-complete:
 
 ## Executable evidence
 
-`bun run check` covers 84 fast/contract tests plus eight real-server integration
+`bun run check` covers 93 fast/contract tests plus eight real-server integration
 and shutdown/configuration tests. The browser commands cover ordinary movement,
 300 ms RTT prediction, dynamic-body landing, grab, touch, gamepad, stale-session
 recovery, and six-page voice. Failures retain browser state and screenshots.
@@ -45,14 +45,23 @@ five-second outage, receiver stall, connected reset, per-profile metrics, and
 canonical budget gates. Reports are generated under ignored `reports/` paths and
 retained only while diagnosing a regression.
 
-The 2026-07-22 local-contact prediction slice completed a mixed-profile 16-client
-run with zero correctness errors and 1.79 ms server-tick p95. Limiting speculative
-dynamics to the five-metre local region restored headless-client cost close to the
-cleanup baseline. It is still not a movement-quality pass: aggregate prediction
-error was 0.50 m p95, 1.92 m p99, and 7.51 m maximum, with 35.3% extrapolated
-presentation samples. Those network-stall and recovery numbers remain active
-work; the new authored push/stack regressions separately pass their sub-centimetre
-local-contact gates.
+The 2026-07-22 network-quality slice passes the complete deterministic matrix with
+zero correctness errors. The final gated 16-client run measured server ticks at
+1.68 ms p95 and 2.43 ms p99. Typical measured effectively zero prediction error
+at p95, 0.25 m p99/max, 71.9 ms snapshot age p95, 243.9 ms acknowledgement p95,
+and 0.46% extrapolation. Adverse measured 0.83/1.08/1.33 m prediction p95/p99/max,
+136.7 ms snapshot age, and 415.7 ms acknowledgement. Five-second outage and
+receiver-stall clients recovered to effectively zero prediction error with
+1.0 ms and 79.5 ms snapshot age, respectively, inside the one-second recovery
+window.
+
+The mixed aggregate remains intentionally diagnostic rather than a quality gate:
+its large prediction and snapshot-age tail is dominated by continuously saturated
+Constrained clients. Harness terminal summaries now separate Local/Typical/Adverse
+quality profiles from that 256 Kbit/s saturation profile. Unrelated dirty bodies
+replicate at a staggered 10 Hz while players and five-metre prediction state remain
+20 Hz; the remote presentation buffer is 250 ms. The authored push/stack and
+browser presentation regressions continue to own the local-contact gates.
 
 Scheduled soaks are first-class commands:
 
@@ -72,12 +81,6 @@ tests.
 - Extend the local-contact region from a distance-bounded set to an explicit
   contact-connected island if authored mechanisms create cases where five metres
   includes too much unrelated dynamic work or excludes a coupled body.
-- Diagnose the remaining mixed-profile prediction spikes, snapshot age, and
-  extrapolation as ordered-link/recovery behavior; do not loosen the canonical
-  budgets to make the current matrix pass.
-- Finish the mixed-profile multiplayer gates for correction recovery, receiver
-  stalls, reconnect, and epoch reset. Keep the deterministic link model and real
-  server/client harness; do not rebuild these as mocks.
 - Continue decomposing lifecycle owners only where a smaller capability boundary
   appears. The cleanup split map verification, runtime-body construction, and
   mechanism/signal state out of the authoritative coordinator, and replaced

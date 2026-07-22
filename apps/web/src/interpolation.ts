@@ -1,6 +1,13 @@
-import { PHYSICS_HZ, type BodySnapshot, type Quat, type Snapshot, type Vec3 } from "@gurgur/shared";
+import {
+  PHYSICS_HZ,
+  SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_HISTORY_PACKETS,
+  type BodySnapshot,
+  type Quat,
+  type Snapshot,
+  type Vec3,
+} from "@gurgur/shared";
 
-const HISTORY_LENGTH = 11;
 const MAX_EXTRAPOLATION_TICKS = PHYSICS_HZ * 0.05;
 
 function key(body: BodySnapshot): string {
@@ -38,6 +45,12 @@ export type SnapshotTimeline = {
   observeServerTick(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   serverTickAt(nowMs: number): number;
   sample(targetTick: number): BodySnapshot[];
+  sampleWithMetadata(targetTick: number): TimelineSample;
+};
+
+export type TimelineSample = {
+  bodies: BodySnapshot[];
+  extrapolatedBodyIds: BodySnapshot["id"][];
 };
 
 export function createSnapshotTimeline(): SnapshotTimeline {
@@ -71,39 +84,60 @@ export function createSnapshotTimeline(): SnapshotTimeline {
     const latest = snapshots.at(-1);
     if (latest && snapshot.serverTick <= latest.serverTick) return;
     snapshots.push(snapshot);
-    if (snapshots.length > HISTORY_LENGTH) snapshots.shift();
+    if (snapshots.length > SNAPSHOT_HISTORY_PACKETS) snapshots.shift();
     observeServerTick(snapshot.serverTick, receivedAtMs, oneWayDelayMs);
   };
 
-  const sample = (targetTick: number): BodySnapshot[] => {
-    if (snapshots.length === 0) return [];
-    let older = snapshots[0]!;
-    let newer = snapshots.at(-1)!;
-    for (let index = 1; index < snapshots.length; index += 1) {
-      const candidate = snapshots[index]!;
-      if (candidate.serverTick >= targetTick) {
-        newer = candidate;
-        older = snapshots[index - 1]!;
-        break;
+  const sampleWithMetadata = (targetTick: number): TimelineSample => {
+    if (snapshots.length === 0) return { bodies: [], extrapolatedBodyIds: [] };
+    if (targetTick <= snapshots[0]!.serverTick) {
+      return { bodies: snapshots[0]!.bodies, extrapolatedBodyIds: [] };
+    }
+
+    const tracks = new Map<string, Array<{ tick: number; body: BodySnapshot }>>();
+    const playerIds = new Set<string>();
+    for (const snapshot of snapshots) {
+      for (const player of snapshot.players) playerIds.add(`${player.id.index}:${player.id.generation}`);
+      for (const body of snapshot.bodies) {
+        const identity = key(body);
+        const track = tracks.get(identity) ?? [];
+        track.push({ tick: snapshot.serverTick, body });
+        tracks.set(identity, track);
       }
     }
-    if (targetTick <= older.serverTick) return older.bodies;
-    if (older === newer) {
-      const seconds = Math.min(targetTick - newer.serverTick, MAX_EXTRAPOLATION_TICKS) / PHYSICS_HZ;
-      return newer.bodies.map((body) => extrapolate(body, seconds));
+
+    const bodies: BodySnapshot[] = [];
+    const extrapolatedBodyIds: BodySnapshot["id"][] = [];
+    for (const track of tracks.values()) {
+      let older: (typeof track)[number] | null = null;
+      let newer: (typeof track)[number] | null = null;
+      for (const state of track) {
+        if (state.tick <= targetTick) older = state;
+        if (state.tick >= targetTick) {
+          newer = state;
+          break;
+        }
+      }
+      if (!older) continue;
+      if (!newer) {
+        const seconds = Math.min(targetTick - older.tick, MAX_EXTRAPOLATION_TICKS) / PHYSICS_HZ;
+        const extrapolationState = playerIds.has(key(older.body))
+          ? withInferredPlayerVelocity(track)
+          : older.body;
+        bodies.push(extrapolate(extrapolationState, seconds));
+        if (targetTick > older.tick && moving(extrapolationState)) {
+          extrapolatedBodyIds.push(older.body.id);
+        }
+        continue;
+      }
+      if (older.tick === newer.tick || targetTick === newer.tick) bodies.push(newer.body);
+      else if (newer.body.flags) bodies.push(older.body);
+      else bodies.push(interpolate(older.body, newer.body, (targetTick - older.tick) / (newer.tick - older.tick)));
     }
-    if (targetTick > newer.serverTick) {
-      const seconds = Math.min(targetTick - newer.serverTick, MAX_EXTRAPOLATION_TICKS) / PHYSICS_HZ;
-      return newer.bodies.map((body) => extrapolate(body, seconds));
-    }
-    if (targetTick === newer.serverTick) return newer.bodies;
-    const amount = (targetTick - older.serverTick) / (newer.serverTick - older.serverTick);
-    const newBodies = new Map(newer.bodies.map((body) => [key(body), body]));
-    return older.bodies.map((body) => {
-      const next = newBodies.get(key(body));
-      return next ? (next.flags ? body : interpolate(body, next, amount)) : body;
-    });
+    return { bodies, extrapolatedBodyIds };
   };
+
+  const sample = (targetTick: number): BodySnapshot[] => sampleWithMetadata(targetTick).bodies;
 
   return {
     get latestTick() { return latestTick(); },
@@ -111,7 +145,35 @@ export function createSnapshotTimeline(): SnapshotTimeline {
     observeServerTick,
     serverTickAt,
     sample,
+    sampleWithMetadata,
   };
+}
+
+function withInferredPlayerVelocity(track: Array<{ tick: number; body: BodySnapshot }>): BodySnapshot {
+  const current = track.at(-1)!;
+  const previous = track.at(-2);
+  if (!previous || current.tick <= previous.tick) return current.body;
+  const seconds = (current.tick - previous.tick) / PHYSICS_HZ;
+  const explicit = current.body.linearVelocity;
+  const derivedX = (current.body.position.x - previous.body.position.x) / seconds;
+  const derivedZ = (current.body.position.z - previous.body.position.z) / seconds;
+  return {
+    ...current.body,
+    linearVelocity: {
+      x: Math.abs(explicit?.x ?? 0) > 0.0001 ? explicit!.x : derivedX,
+      y: explicit?.y
+        ?? (current.body.position.y - previous.body.position.y) / seconds,
+      z: Math.abs(explicit?.z ?? 0) > 0.0001 ? explicit!.z : derivedZ,
+    },
+  };
+}
+
+function moving(body: BodySnapshot): boolean {
+  if (((body.flags ?? 0) & SNAPSHOT_FLAG_SLEEP) !== 0) return false;
+  const linear = body.linearVelocity;
+  const angular = body.angularVelocity;
+  return Math.hypot(linear?.x ?? 0, linear?.y ?? 0, linear?.z ?? 0) > 0.0001
+    || Math.hypot(angular?.x ?? 0, angular?.y ?? 0, angular?.z ?? 0) > 0.0001;
 }
 
 function extrapolate(body: BodySnapshot, seconds: number): BodySnapshot {

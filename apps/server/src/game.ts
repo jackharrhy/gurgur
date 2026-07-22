@@ -31,6 +31,7 @@ import type { PersistedWorld, WorldStore } from "./store";
 import { WORLD_BUNDLE } from "./world";
 
 const SAVE_INTERVAL_TICKS = 5 / PHYSICS_DT;
+const UNRELATED_BODY_SNAPSHOT_STRIDE = 2;
 const PLAYER_INDEX_BASE = 0x8000_0000;
 type Player = {
   id: RuntimeId;
@@ -236,17 +237,25 @@ export class AuthoritativeGame {
     }
   }
 
-  snapshot(options: { full?: boolean } = { full: true }): Snapshot {
+  snapshot(options: { full?: boolean; discontinuity?: boolean } = { full: true }): Snapshot {
     const full = options.full !== false;
+    const discontinuity = options.discontinuity === true;
     const players = this.#players();
+    const snapshotIndex = Math.floor(this.#serverTick / SNAPSHOT_INTERVAL_TICKS);
     const bodies = this.#runtimeBodies.flatMap(({ handle }) => {
       const identity = key(handle);
       const { awake, ...state } = this.#physics.state(handle);
       const predictionRelevant = players.some((player) => distance(player.state.position, state.position) <= LOCAL_PHYSICS_RADIUS_METRES);
-      if (!full && !this.#dirtyBodies.has(identity) && !predictionRelevant) return [];
-      return [{ ...state, flags: this.#snapshotFlags(handle, state.position, awake) }];
+      const remoteBodyDue = (snapshotIndex + handle.index) % UNRELATED_BODY_SNAPSHOT_STRIDE === 0;
+      if (!full && !predictionRelevant && (!this.#dirtyBodies.has(identity) || !remoteBodyDue)) return [];
+      if (!full) this.#dirtyBodies.delete(identity);
+      return [{
+        ...state,
+        flags: discontinuity
+          ? SNAPSHOT_FLAG_TELEPORT
+          : this.#snapshotFlags(handle, state.position, awake),
+      }];
     });
-    if (!full) this.#dirtyBodies.clear();
     return {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick,
@@ -256,7 +265,9 @@ export class AuthoritativeGame {
         rotation: yawRotation(player.state.yaw),
         linearVelocity: { x: 0, y: player.state.verticalVelocity, z: 0 },
         angularVelocity: { x: 0, y: 0, z: 0 },
-        flags: this.#snapshotFlags(player.id, player.state.position, true),
+        flags: discontinuity
+          ? SNAPSHOT_FLAG_TELEPORT
+          : this.#snapshotFlags(player.id, player.state.position, true),
       }))),
       players: players.map((player) => ({
         id: player.id,

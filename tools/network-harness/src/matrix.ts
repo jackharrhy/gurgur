@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { runRealNetworkHarness, type HarnessReport } from "./real-harness";
 import { NETWORK_PROFILES } from "./profiles";
+import { summarizeHarnessReport } from "./reporting";
 
 const seed = Number(process.env.HARNESS_SEED ?? 0x67757267);
 const quick = process.env.HARNESS_QUICK === "1";
@@ -43,7 +44,7 @@ for (const run of runs) {
   const report = await runRealNetworkHarness(run.options);
   reports.push(report);
   await Bun.write(`reports/network/${run.name}-${seed}.json`, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(JSON.stringify({ scenario: run.name, clients: report.clientCount, aggregate: report.aggregate, recovery: report.scenario }));
+  console.log(JSON.stringify(summarizeHarnessReport(report)));
 }
 
 const correctnessErrors = reports.reduce((sum, report) => sum + report.aggregate.correctnessErrors, 0);

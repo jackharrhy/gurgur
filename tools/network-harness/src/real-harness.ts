@@ -6,6 +6,7 @@ import {
   INTERPOLATION_DELAY_TICKS,
   PHYSICS_DT,
   PROTOCOL_VERSION,
+  SNAPSHOT_HISTORY_PACKETS,
   decodeLifecycle,
   decodeServerControl,
   decodeSnapshot,
@@ -300,18 +301,19 @@ async function createClient(
 }
 
 function advanceClient(client: Client, nowMs: number, generateInput = true): void {
-  let latestSnapshot: { payload: ArrayBuffer; deliveryAtMs: number; tick: number } | null = null;
+  const snapshots: Array<{ payload: ArrayBuffer; deliveryAtMs: number; tick: number }> = [];
   for (const packet of client.outbound.advance(nowMs)) {
     if (typeof packet.payload !== "string" && new DataView(packet.payload).getUint8(0) !== LIFECYCLE_TAG) {
       const tick = new DataView(packet.payload).getUint32(7, true);
-      if (!latestSnapshot || tick > latestSnapshot.tick) {
-        latestSnapshot = { payload: packet.payload, deliveryAtMs: packet.deliveryAtMs, tick };
-      }
+      snapshots.push({ payload: packet.payload, deliveryAtMs: packet.deliveryAtMs, tick });
     } else {
       handleOutbound(client, packet.payload, packet.deliveryAtMs);
     }
   }
-  if (latestSnapshot) handleOutbound(client, latestSnapshot.payload, latestSnapshot.deliveryAtMs);
+  const retainedSnapshots = snapshots.slice(-SNAPSHOT_HISTORY_PACKETS);
+  for (const [index, snapshot] of retainedSnapshots.entries()) {
+    handleOutbound(client, snapshot.payload, snapshot.deliveryAtMs, index === retainedSnapshots.length - 1);
+  }
   if (client.welcome && generateInput) {
     while (client.nextInputAtMs <= nowMs) {
       const command = inputCommand(client, client.nextInputAtMs);
@@ -326,18 +328,25 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
     if (client.socket.readyState === WebSocket.OPEN) client.socket.send(packet.payload);
   }
   while (client.latestSnapshot && client.nextRenderAtMs <= nowMs) {
-    const latestTick = client.history.latestTick ?? 0;
     const target = client.history.serverTickAt(client.nextRenderAtMs) - INTERPOLATION_DELAY_TICKS;
     if (client.nextRenderAtMs >= 500) {
+      const sample = client.history.sampleWithMetadata(target);
+      const locallyPresented = new Set([
+        ...(client.welcome ? [idKey(client.welcome.playerId)] : []),
+        ...client.predictor.predictedBodies.map((body) => idKey(body.id)),
+      ]);
       client.metrics.renderSamples += 1;
-      if (target > latestTick) client.metrics.extrapolatedSamples += 1;
+      if (sample.extrapolatedBodyIds.some((id) => !locallyPresented.has(idKey(id)))) {
+        client.metrics.extrapolatedSamples += 1;
+      }
+    } else {
+      client.history.sample(target);
     }
-    client.history.sample(target);
     client.nextRenderAtMs += 1_000 / 60;
   }
 }
 
-function handleOutbound(client: Client, payload: WirePayload, nowMs: number): void {
+function handleOutbound(client: Client, payload: WirePayload, nowMs: number, reconcile = true): void {
   if (typeof payload === "string") {
     const message = decodeServerControl(payload);
     if (message.type === "welcome") {
@@ -364,7 +373,8 @@ function handleOutbound(client: Client, payload: WirePayload, nowMs: number): vo
   if (previousTick !== null && snapshot.serverTick <= previousTick) return;
   client.latestSnapshot = snapshot;
   client.metrics.snapshots += 1;
-  client.history.push(snapshot, nowMs);
+  client.history.push(snapshot, nowMs, client.outbound.profile.roundTripLatencyMs / 2);
+  if (!reconcile) return;
   client.predictor.reconcile(snapshot);
   if (!client.welcome) return;
   const authority = snapshot.players.find((player) => sameId(player.id, client.welcome!.playerId));
@@ -424,4 +434,8 @@ function wireLength(payload: WirePayload): number {
 
 function sameId(a: { index: number; generation: number }, b: { index: number; generation: number }): boolean {
   return a.index === b.index && a.generation === b.generation;
+}
+
+function idKey(id: { index: number; generation: number }): string {
+  return `${id.index}:${id.generation}`;
 }

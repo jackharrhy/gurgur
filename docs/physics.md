@@ -52,7 +52,8 @@ player. A body entering that region is restored from the latest authoritative
 same-tick state and promoted to dynamic; a body leaving it returns to a
 non-simulated proxy. This bounds client physics cost while allowing controller
 reaction impulses, stacked support, and nearby rigid-body contacts to replay in
-the same order as the authority.
+the same order as the authority. Those nearby states replicate at 20 Hz;
+unrelated dirty dynamics replicate at 10 Hz and remain presentation-only.
 
 ## Coordinates and scale
 

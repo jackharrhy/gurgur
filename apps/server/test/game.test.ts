@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { INPUT_INTENT_TIMEOUT_TICKS, PHYSICS_DT, PROTOCOL_VERSION, SNAPSHOT_FLAG_SLEEP, type Snapshot, type WorldMessage } from "@gurgur/shared";
+import {
+  INPUT_INTENT_TIMEOUT_TICKS,
+  PHYSICS_DT,
+  PROTOCOL_VERSION,
+  SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_FLAG_TELEPORT,
+  type Snapshot,
+  type WorldMessage,
+} from "@gurgur/shared";
 import { AuthoritativeGame } from "../src/game";
 import { WorldStore } from "../src/store";
 
@@ -341,6 +349,44 @@ describe("map-authored authoritative world", () => {
       expect(sleep).toBeDefined();
       expect(emitted.filter((snapshot) => snapshot.serverTick > sleep!.tick + 3)
         .every((snapshot) => snapshot.bodies.every((body) => key(body.id) !== key(cube.id)))).toBe(true);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("replicates nearby prediction bodies at 20 Hz and staggers unrelated dirty bodies at 10 Hz", async () => {
+    const store = new WorldStore(":memory:");
+    const emitted: Snapshot[] = [];
+    const game = await AuthoritativeGame.create(store, (snapshot) => emitted.push(snapshot), () => {}, {
+      extraDynamicBodies: 3,
+      playerSpawn: { x: 2, y: 0.9, z: -18 },
+    });
+    try {
+      game.connectPlayer("replication-cadence");
+      const runtime = game.worldMessage().runtimeEntities;
+      const nearby = runtime.find((entity) => entity.authoredId === "stress.dynamic.000")!;
+      const unrelated = runtime.find((entity) => entity.authoredId === "stress.dynamic.002")!;
+
+      for (let tick = 0; tick < 6; tick += 1) game.advance(PHYSICS_DT);
+
+      expect(emitted).toHaveLength(2);
+      expect(emitted.every((snapshot) => snapshot.bodies.some((body) => key(body.id) === key(nearby.id)))).toBe(true);
+      expect(emitted.filter((snapshot) => snapshot.bodies.some((body) => key(body.id) === key(unrelated.id)))).toHaveLength(1);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("builds a complete discontinuity snapshot for backpressure recovery", async () => {
+    const store = new WorldStore(":memory:");
+    const game = await AuthoritativeGame.create(store, () => {}, () => {}, { extraDynamicBodies: 3 });
+    try {
+      game.connectPlayer("backpressure-recovery");
+      const snapshot = game.snapshot({ full: true, discontinuity: true });
+      expect(snapshot.bodies).toHaveLength(game.worldMessage().runtimeEntities.length);
+      expect(snapshot.bodies.every((body) => ((body.flags ?? 0) & SNAPSHOT_FLAG_TELEPORT) !== 0)).toBe(true);
     } finally {
       game.stop();
       store.close();

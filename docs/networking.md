@@ -9,7 +9,11 @@ are predicted and reconciled. Remote players and unrelated bodies render from
 snapshot history.
 
 The server runs a fixed 60 Hz simulation with four Box3D substeps per tick.
-Clients sample and send input at 60 Hz. The server publishes snapshots at 20 Hz.
+Clients sample and send input at 60 Hz. The server publishes snapshot packets at
+20 Hz. Player state and dynamic bodies in a player's five-metre prediction region
+are present at that full rate. Dirty unrelated moving bodies are deterministically
+staggered across alternate packets, producing a 10 Hz body stream without changing
+their simulation rate or delaying a final sleep transition beyond one packet.
 Client time is metadata only and never determines server stepping or movement
 duration.
 
@@ -96,17 +100,24 @@ prediction and interpolation history.
 
 Snapshots are keyed by authoritative server tick, never packet-arrival time. The
 client estimates server time from ping/pong samples and renders remote entities
-and unrelated bodies 150 ms behind it. The local player and locally predicted
+and unrelated bodies 250 ms behind it. The local player and locally predicted
 dynamic bodies render near current predicted time instead. Snapshot history
-retains 500 ms. At the 20 Hz snapshot rate,
+retains 500 ms. At the 20 Hz packet and 10 Hz unrelated-body rates,
 this maintains:
 
 ```text
-50 ms snapshot interval < 150 ms render delay < 500 ms history
+100 ms unrelated-body interval < 250 ms render delay < 500 ms history
 ```
 
 Position uses linear interpolation and orientation uses shortest-path quaternion
-interpolation. When history runs dry, velocity extrapolation is capped at 50 ms.
+interpolation. Sparse packets are accumulated into per-body tracks, so staggered
+10 Hz body deltas interpolate across intervening 20 Hz packets instead of
+freezing. The browser retains the last eleven packets delivered in one display
+frame for history but reconciles prediction only against the newest. When a
+track runs dry, velocity extrapolation is capped at 50 ms. Player snapshots carry
+vertical controller velocity; presentation derives missing horizontal velocity
+from the preceding same-player sample rather than freezing an uncounted moving
+player.
 Spawn, teleport, wake discontinuity, and epoch changes snap. Sleeping bodies emit
 one final state and remain silent until changed.
 
@@ -118,10 +129,11 @@ shared package. Every packet carries `protocolVersion`, message tag, and
 control messages use bounded JSON. Fixed-rate input, lifecycle, and snapshot
 messages use explicit little-endian `DataView` codecs with a one-byte tag.
 
-State samples are disposable and replaceable by a newer sample. Commands and
-control events are reliable, bounded, epoch checked, and idempotent. Inputs,
-snapshots, and predicted state are never replayed across reconnect. Static map
-geometry is addressed by `mapRevision` and never replicated per tick.
+State samples are disposable by body identity. Bounded client history retains
+staggered deltas until a newer sample for that body arrives. Commands and control
+events are reliable, bounded, epoch checked, and idempotent. Inputs, snapshots,
+and predicted state are never replayed across reconnect. Static map geometry is
+addressed by `mapRevision` and never replicated per tick.
 
 After the welcome control message, the server sends one bounded world manifest
 containing the immutable bundle URL, its `mapRevision`, and the runtime-handle
@@ -129,7 +141,9 @@ binding for each moving authored brush. The browser verifies and decodes the
 binary bundle over HTTP, builds static Three.js geometry from it, and binds every
 local-space convex child of a moving entity to its handle. Reset sends a new
 manifest before the first snapshot of the new epoch; ordinary snapshots contain
-transforms only.
+transforms only. Snapshots arriving while the immutable bundle loads use the same
+bounded eleven-packet history, preserving the initial complete state when a later
+sparse packet arrives first at presentation.
 
 ## Gameplay transport
 
@@ -140,8 +154,10 @@ replication framework.
 WebSocket is ordered and reliable. The server records send results, queued bytes,
 backpressure duration, and pending-snapshot age. Clients and harnesses record RTT,
 jitter, acknowledgement latency, interpolation use, and correction error. When
-`ServerWebSocket.send` reports backpressure, the server stops producing snapshots
-for that peer and retains only the newest unsent state. Immutable map bulk uses a
+`ServerWebSocket.send` reports backpressure, the server stops producing sparse
+snapshots for that peer and retains a complete newest-state replacement. It is
+marked as a presentation discontinuity, so no staggered delta or final sleep
+transition can be lost while older queued bytes drain. Immutable map bulk uses a
 separately cacheable HTTP transfer. A connection whose queue makes no drain
 progress for five seconds is closed.
 

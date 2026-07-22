@@ -91,6 +91,13 @@ The 16-client suite mixes profiles in one world instead of assigning one global
 latency. Outage cases pause a selected link for five seconds and then restore it.
 Every profile is deterministic from its seed.
 
+Movement-quality gates are evaluated per profile. The mixed aggregate remains in
+the JSON report for capacity diagnosis, but is not a quality score: it includes
+the deliberately saturated Constrained clients and will therefore be dominated
+by their continuous 256 Kbit/s bottleneck. Concise terminal output labels Local,
+Typical, and Adverse as `qualityProfiles` and reports Constrained separately as
+`saturationProfile` so these two questions cannot be confused.
+
 ## Quality budgets
 
 Raw reconciliation error is measured before the 100 ms render-offset decay and
@@ -124,11 +131,13 @@ Additional gates are:
 - input acknowledgement stays below 200 ms Local, 350 ms Typical, and 1,100 ms
   Adverse at p95;
 - remote interpolation extrapolates fewer than 1% of rendered samples on Typical
-  with the selected 150 ms interpolation delay;
+  with the selected 250 ms interpolation delay; a frame counts as extrapolated
+  when any moving, remotely presented body track lacks a newer sample, even if a
+  later sparse packet exists for another body;
 - the real-browser held-input scenario at 300 ms RTT converges below 5 cm and
   does not repeat more than 25% of sampled display frames;
-- no application queue is unbounded, and state backpressure retains only the
-  newest unsent snapshot;
+- no application queue is unbounded, and state backpressure retains only one
+  complete newest-state replacement snapshot;
 - after a five-second impairment, snapshot age and prediction error return to
   the affected profile budget within one second;
 - reset/reconnect leaves no old-epoch command, interpolation sample, predicted

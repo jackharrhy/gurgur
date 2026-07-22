@@ -82,8 +82,9 @@ session = new GameSession({
   lifecycle(message) {
     renderer.applyLifecycle(message);
   },
-  snapshot(message) {
+  snapshot(message, latestInFrame) {
     history.push(message);
+    if (!latestInFrame) return;
     predictor.reconcile(message);
     epoch.textContent = String(message.worldEpoch);
     tick.textContent = String(message.serverTick);

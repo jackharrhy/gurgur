@@ -1,5 +1,6 @@
 import {
   PROTOCOL_VERSION,
+  SNAPSHOT_HISTORY_PACKETS,
   decodeSnapshot,
   decodeLifecycle,
   decodeWorldBundle,
@@ -26,7 +27,7 @@ export type SessionCallbacks = {
   welcome(message: WelcomeMessage): void;
   world(message: WorldMessage): void;
   lifecycle(message: LifecycleMessage): void;
-  snapshot(snapshot: Snapshot): void;
+  snapshot(snapshot: Snapshot, latestInFrame: boolean): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
   voicePeers?(message: VoicePeersMessage): void;
@@ -51,7 +52,7 @@ export class GameSession {
   #socketGeneration = 0;
   #worldLoadGeneration = 0;
   #loadedWorldEpoch: number | null = null;
-  #pendingSnapshot: Snapshot | null = null;
+  #snapshotQueue: Snapshot[] = [];
   #pendingLifecycles: LifecycleMessage[] = [];
   #snapshotFrame: number | null = null;
 
@@ -124,7 +125,9 @@ export class GameSession {
           if (message.protocolVersion !== PROTOCOL_VERSION || message.mapRevision !== this.#mapRevision) return;
           this.#worldEpoch = message.worldEpoch;
           this.#loadedWorldEpoch = null;
-          this.#pendingSnapshot = null;
+          if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
+          this.#snapshotFrame = null;
+          this.#snapshotQueue = [];
           this.#pendingLifecycles = [];
           void this.#loadWorld(message, socket);
         } else if (message.type === "pong") {
@@ -154,7 +157,7 @@ export class GameSession {
       } else {
         const snapshot = decodeSnapshot(data);
         if (snapshot.worldEpoch === this.#loadedWorldEpoch) this.#queueSnapshot(snapshot);
-        else if (snapshot.worldEpoch === this.#worldEpoch) this.#pendingSnapshot = snapshot;
+        else if (snapshot.worldEpoch === this.#worldEpoch) retainSnapshot(this.#snapshotQueue, snapshot);
       }
   }
 
@@ -230,23 +233,37 @@ export class GameSession {
       this.#loadedWorldEpoch = message.worldEpoch;
       for (const lifecycle of this.#pendingLifecycles) this.#callbacks.lifecycle(lifecycle);
       this.#pendingLifecycles = [];
-      if (this.#pendingSnapshot) this.#queueSnapshot(this.#pendingSnapshot);
-      this.#pendingSnapshot = null;
+      this.#scheduleSnapshotFrame();
     } catch (error) {
       if (generation === this.#worldLoadGeneration) socket.close(4011, "world load failed");
     }
   }
 
   #queueSnapshot(snapshot: Snapshot): void {
-    if (!this.#pendingSnapshot || snapshot.serverTick >= this.#pendingSnapshot.serverTick) this.#pendingSnapshot = snapshot;
-    if (this.#snapshotFrame !== null) return;
+    retainSnapshot(this.#snapshotQueue, snapshot);
+    this.#scheduleSnapshotFrame();
+  }
+
+  #scheduleSnapshotFrame(): void {
+    if (this.#snapshotFrame !== null || this.#snapshotQueue.length === 0) return;
     this.#snapshotFrame = requestAnimationFrame(() => {
       this.#snapshotFrame = null;
-      const latest = this.#pendingSnapshot;
-      this.#pendingSnapshot = null;
-      if (latest && latest.worldEpoch === this.#loadedWorldEpoch) this.#callbacks.snapshot(latest);
+      const queued = this.#snapshotQueue;
+      this.#snapshotQueue = [];
+      for (const [index, state] of queued.entries()) {
+        if (state.worldEpoch === this.#loadedWorldEpoch) {
+          this.#callbacks.snapshot(state, index === queued.length - 1);
+        }
+      }
     });
   }
+}
+
+export function retainSnapshot(queue: Snapshot[], snapshot: Snapshot): void {
+  const latest = queue.at(-1);
+  if (latest && snapshot.serverTick <= latest.serverTick) return;
+  queue.push(snapshot);
+  if (queue.length > SNAPSHOT_HISTORY_PACKETS) queue.shift();
 }
 
 function readSessionToken(): string | null {
