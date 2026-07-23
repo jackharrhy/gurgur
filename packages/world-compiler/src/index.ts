@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
-  ENTITY_SCHEMA_VERSION,
   entityDefinitions,
   type EntityClassname,
   type PropertyDefinition,
@@ -17,8 +16,56 @@ import {
 } from "@gurgur/shared";
 
 export const METRES_PER_MAP_UNIT = 0.0254;
-export const WORLD_COMPILER_VERSION = 2;
 const EPSILON = 1e-5;
+
+export type AddedAuthoredId = {
+  classname: EntityClassname;
+  authoredId: string;
+  line: number;
+};
+
+export function addMissingAuthoredIds(
+  source: string,
+  sourceName = "<map>",
+  createId: (classname: EntityClassname) => string = (classname) =>
+    `auto.${classname}.${randomUUID()}`,
+): { source: string; added: AddedAuthoredId[] } {
+  const map = parseValve220(source, sourceName);
+  const knownIds = new Set(
+    map.entities.flatMap((entity) =>
+      entity.properties.authoredId ? [entity.properties.authoredId] : [],
+    ),
+  );
+  const added: AddedAuthoredId[] = [];
+  for (const entity of map.entities) {
+    const classname = entity.properties.classname as EntityClassname;
+    const definition = entityDefinitions[classname];
+    if (!definition || !definition.persistent || entity.properties.authoredId) continue;
+    let authoredId = createId(classname);
+    while (!authoredId || knownIds.has(authoredId)) authoredId = createId(classname);
+    knownIds.add(authoredId);
+    added.push({ classname, authoredId, line: entity.line });
+  }
+  if (added.length === 0) return { source, added };
+
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  const trailingNewline = source.endsWith("\n");
+  const lines = source.split(/\r?\n/);
+  if (trailingNewline) lines.pop();
+  for (const addition of added.toSorted((left, right) => right.line - left.line)) {
+    const entityStart = addition.line - 1;
+    const classnameLine = lines.findIndex(
+      (line, index) =>
+        index > entityStart && /^\s*"classname"\s+"(?:\\.|[^"\\])*"\s*(?:\/\/.*)?$/.test(line),
+    );
+    if (classnameLine < 0) {
+      throw new Error(`${sourceName}:${addition.line}: cannot locate classname property`);
+    }
+    const indentation = lines[classnameLine]!.match(/^\s*/)?.[0] ?? "";
+    lines.splice(classnameLine + 1, 0, `${indentation}"authoredId" "${addition.authoredId}"`);
+  }
+  return { source: `${lines.join(newline)}${trailingNewline ? newline : ""}`, added };
+}
 
 type Plane = { normal: Vec3; distance: number; sourceFace: number };
 const add = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
@@ -77,9 +124,7 @@ function compileBrush(
   authoredId: string | undefined,
   sourceBrushIndex: number,
 ): CompiledBrush {
-  const facePoints = brush.faces.flatMap((face) => face.points);
-  const authoredCenter = scale(facePoints.reduce(add, { x: 0, y: 0, z: 0 }), 1 / facePoints.length);
-  const planes = brush.faces.map((face, sourceFace): Plane => {
+  const authoredPlanes = brush.faces.map((face, sourceFace): Plane => {
     const [a, b, c] = face.points;
     const edgeCross = cross(subtract(b, a), subtract(c, a));
     if (length(edgeCross) < 1e-9)
@@ -93,30 +138,50 @@ function compileBrush(
           face.faceIndex,
         ),
       );
-    let normal = normalize(edgeCross);
-    let distance = dot(normal, a);
-    if (dot(normal, authoredCenter) > distance) {
-      normal = scale(normal, -1);
-      distance *= -1;
-    }
+    const normal = normalize(edgeCross);
+    const distance = dot(normal, a);
     return { normal, distance, sourceFace };
   });
-  const candidates: Vec3[] = [];
-  for (let a = 0; a < planes.length - 2; a += 1) {
-    for (let b = a + 1; b < planes.length - 1; b += 1) {
-      for (let c = b + 1; c < planes.length; c += 1) {
-        const point = intersect(planes[a]!, planes[b]!, planes[c]!);
-        if (
-          point &&
-          planes.every((plane) => dot(plane.normal, point) <= plane.distance + EPSILON)
-        ) {
-          candidates.push(point);
+  const orientations = [
+    authoredPlanes,
+    authoredPlanes.map((plane) => ({
+      ...plane,
+      normal: scale(plane.normal, -1),
+      distance: -plane.distance,
+    })),
+  ];
+  let selected: { planes: Plane[]; mapVertices: Vec3[] } | null = null;
+  let incomplete: { planes: Plane[]; mapVertices: Vec3[] } | null = null;
+  for (const planes of orientations) {
+    const candidates: Vec3[] = [];
+    for (let a = 0; a < planes.length - 2; a += 1) {
+      for (let b = a + 1; b < planes.length - 1; b += 1) {
+        for (let c = b + 1; c < planes.length; c += 1) {
+          const point = intersect(planes[a]!, planes[b]!, planes[c]!);
+          if (
+            point &&
+            planes.every((plane) => dot(plane.normal, point) <= plane.distance + EPSILON)
+          ) {
+            candidates.push(point);
+          }
         }
       }
     }
+    const mapVertices = uniqueVertices(candidates);
+    if (mapVertices.length < 4) continue;
+    const complete = planes.every(
+      (plane) =>
+        mapVertices.filter(
+          (vertex) => Math.abs(dot(plane.normal, vertex) - plane.distance) < EPSILON,
+        ).length >= 3,
+    );
+    if (complete) {
+      selected = { planes, mapVertices };
+      break;
+    }
+    incomplete ??= { planes, mapVertices };
   }
-  const mapVertices = uniqueVertices(candidates);
-  if (mapVertices.length < 4)
+  if (!selected && !incomplete)
     throw new Error(
       geometryDiagnostic(
         brush.line,
@@ -126,6 +191,7 @@ function compileBrush(
         "no finite convex volume",
       ),
     );
+  const { planes, mapVertices } = selected ?? incomplete!;
   const triangles: Array<[number, number, number]> = [];
   const triangleMaterials: string[] = [];
   const triangleSourceFaces: number[] = [];
@@ -313,7 +379,7 @@ function compileRuntimeProperties(
       let value = Number(source);
       if (property.conversion === "map-distance" || property.conversion === "map-speed")
         value *= METRES_PER_MAP_UNIT;
-      if (property.conversion === "yaw-degrees") value = (-value * Math.PI) / 180;
+      if (property.conversion === "yaw-degrees") value = canonicalZero((-value * Math.PI) / 180);
       compiled[name] = value;
       continue;
     }
@@ -360,9 +426,7 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
   });
   const derived = deriveWorldBuffers(brushes);
   const bundle: WorldBundle = {
-    bundleVersion: 2,
-    compilerVersion: WORLD_COMPILER_VERSION,
-    schemaVersion: ENTITY_SCHEMA_VERSION,
+    bundleVersion: 1,
     mapRevision: "0".repeat(64),
     sourceName,
     entities,

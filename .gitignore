@@ -3,3 +3,7 @@ data/
 dist/
 node_modules/
 reports/
+__pycache__/
+content/generated/player-billboard/frames/
+*.blend[0-9]
+content/maps/autosave/

@@ -27,7 +27,6 @@ export function createPlayerInput(
   interactionTarget: () => InputCommand["interactTarget"] = () => null,
 ): PlayerInput {
   const keys = new Set<string>();
-  const touchButtons = [...document.querySelectorAll<HTMLElement>("[data-touch-action]")];
   let worldEpoch: number | null = null;
   let sequence = 0;
   let clientTick = 0;
@@ -40,8 +39,6 @@ export function createPlayerInput(
   let gamepadInteract = false;
   let gamepadPrimary = false;
   let gamepadCrouch = false;
-  let touchCrouch = false;
-  let touchPrimary = false;
   let moveTouch: (TouchState & { startX: number; startY: number }) | null = null;
   let lookTouch: TouchState | null = null;
 
@@ -108,20 +105,6 @@ export function createPlayerInput(
     if (moveTouch?.id === event.pointerId) moveTouch = null;
     if (lookTouch?.id === event.pointerId) lookTouch = null;
   };
-  const touchActionDown = (event: PointerEvent): void => {
-    event.preventDefault();
-    const action = (event.currentTarget as HTMLElement).dataset.touchAction;
-    if (action === "jump") jumpCounter += 1;
-    if (action === "use") interactCounter += 1;
-    if (action === "grab" && !touchPrimary) primaryCounter += 1;
-    if (action === "grab") touchPrimary = true;
-    if (action === "crouch") touchCrouch = true;
-  };
-  const touchActionUp = (event: PointerEvent): void => {
-    const action = (event.currentTarget as HTMLElement).dataset.touchAction;
-    if (action === "crouch") touchCrouch = false;
-    if (action === "grab") touchPrimary = false;
-  };
   const pollGamepad = (): { x: number; z: number } => {
     const gamepad = navigator.getGamepads?.().find((candidate) => candidate?.connected) ?? null;
     if (!gamepad) return { x: 0, z: 0 };
@@ -164,10 +147,7 @@ export function createPlayerInput(
       buttons:
         Number(keys.has("Space")) |
         (Number(keys.has("KeyE")) << 1) |
-        (Number(
-          keys.has("ControlLeft") || keys.has("ControlRight") || gamepadCrouch || touchCrouch,
-        ) <<
-          2),
+        (Number(keys.has("ControlLeft") || keys.has("ControlRight") || gamepadCrouch) << 2),
       jumpCounter,
       interactCounter,
       interactTarget: interactionTarget(),
@@ -186,11 +166,6 @@ export function createPlayerInput(
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
   canvas.addEventListener("pointercancel", pointerUp);
-  for (const button of touchButtons) {
-    button.addEventListener("pointerdown", touchActionDown);
-    button.addEventListener("pointerup", touchActionUp);
-    button.addEventListener("pointercancel", touchActionUp);
-  }
   const timer = window.setInterval(flush, 1_000 / PHYSICS_HZ);
 
   return {
@@ -220,11 +195,6 @@ export function createPlayerInput(
       canvas.removeEventListener("pointermove", pointerMove);
       canvas.removeEventListener("pointerup", pointerUp);
       canvas.removeEventListener("pointercancel", pointerUp);
-      for (const button of touchButtons) {
-        button.removeEventListener("pointerdown", touchActionDown);
-        button.removeEventListener("pointerup", touchActionUp);
-        button.removeEventListener("pointercancel", touchActionUp);
-      }
     },
   };
 }

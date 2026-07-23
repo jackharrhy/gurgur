@@ -14,11 +14,6 @@ import {
   type WelcomeMessage,
   type WorldMessage,
   type WorldManifestMessage,
-  type VoicePeersMessage,
-  type VoiceSignalForwardMessage,
-  type VoiceReadyMessage,
-  type VoiceBlockMessage,
-  type VoiceSignalMessage,
 } from "@gurgur/shared";
 
 export type SessionCallbacks = {
@@ -29,8 +24,6 @@ export type SessionCallbacks = {
   snapshot(snapshot: Snapshot, latestInFrame: boolean): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
-  voicePeers?(message: VoicePeersMessage): void;
-  voiceSignal?(message: VoiceSignalForwardMessage): void;
 };
 
 export class GameSession {
@@ -146,20 +139,6 @@ export class GameSession {
         this.#jitterMs += (Math.abs(sample - previous) - this.#jitterMs) * 0.25;
         this.#callbacks.clock?.(message.serverTick, now, sample / 2);
         this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
-      } else if (message.type === "voice-peers") {
-        if (
-          message.protocolVersion === PROTOCOL_VERSION &&
-          message.worldEpoch === this.#worldEpoch
-        ) {
-          this.#callbacks.voicePeers?.(message);
-        }
-      } else if (message.type === "voice-signal") {
-        if (
-          message.protocolVersion === PROTOCOL_VERSION &&
-          message.worldEpoch === this.#worldEpoch
-        ) {
-          this.#callbacks.voiceSignal?.(message);
-        }
       }
       return;
     }
@@ -191,11 +170,6 @@ export class GameSession {
     this.#defer(() => {
       if (this.#socket === socket && socket?.readyState === WebSocket.OPEN) socket.send(packet);
     });
-  }
-
-  sendControl(message: VoiceReadyMessage | VoiceBlockMessage | VoiceSignalMessage): void {
-    const socket = this.#socket;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
 
   #defer(callback: () => void): void {

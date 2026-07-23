@@ -103,8 +103,6 @@ type DelayedSignalRow = {
   due_tick: number;
 };
 
-const SCHEMA_VERSION = 5;
-
 export class WorldStore {
   readonly #database: Database;
 
@@ -116,7 +114,6 @@ export class WorldStore {
     this.#database.run(`
       CREATE TABLE IF NOT EXISTS world_snapshot (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        schema_version INTEGER NOT NULL,
         map_revision TEXT NOT NULL,
         world_epoch INTEGER NOT NULL,
         server_tick INTEGER NOT NULL,
@@ -133,14 +130,6 @@ export class WorldStore {
         awake INTEGER NOT NULL DEFAULT 1 CHECK (awake IN (0, 1))
       ) STRICT
     `);
-    const bodyColumns = this.#database
-      .query<{ name: string }, []>("PRAGMA table_info(body_state)")
-      .all();
-    if (!bodyColumns.some((column) => column.name === "awake")) {
-      this.#database.run(
-        "ALTER TABLE body_state ADD COLUMN awake INTEGER NOT NULL DEFAULT 1 CHECK (awake IN (0, 1))",
-      );
-    }
     this.#database.run(`
       CREATE TABLE IF NOT EXISTS mechanism_state (
         authored_id TEXT PRIMARY KEY,
@@ -178,24 +167,13 @@ export class WorldStore {
         due_tick INTEGER NOT NULL CHECK (due_tick >= 0)
       ) STRICT
     `);
-    const playerColumns = this.#database
-      .query<{ name: string }, []>("PRAGMA table_info(player_state)")
-      .all();
-    if (!playerColumns.some((column) => column.name === "grabbed_authored_id")) {
-      this.#database.run("ALTER TABLE player_state ADD COLUMN grabbed_authored_id TEXT");
-    }
-    if (!playerColumns.some((column) => column.name === "grab_length")) {
-      this.#database.run(
-        "ALTER TABLE player_state ADD COLUMN grab_length REAL NOT NULL DEFAULT 0 CHECK (grab_length >= 0)",
-      );
-    }
   }
 
   load(mapRevision: string): PersistedWorld | null {
     const world = this.#database
       .query<WorldRow, []>(`
       SELECT map_revision, world_epoch, server_tick
-      FROM world_snapshot WHERE singleton = 1 AND schema_version = ${SCHEMA_VERSION}
+      FROM world_snapshot WHERE singleton = 1
     `)
       .get();
     if (!world || world.map_revision !== mapRevision) return null;
@@ -277,17 +255,15 @@ export class WorldStore {
       this.#database
         .query(`
         INSERT INTO world_snapshot (
-          singleton, schema_version, map_revision, world_epoch, server_tick, saved_at_ms
-        ) VALUES (1, $schemaVersion, $mapRevision, $worldEpoch, $serverTick, $savedAtMs)
+          singleton, map_revision, world_epoch, server_tick, saved_at_ms
+        ) VALUES (1, $mapRevision, $worldEpoch, $serverTick, $savedAtMs)
         ON CONFLICT(singleton) DO UPDATE SET
-          schema_version = excluded.schema_version,
           map_revision = excluded.map_revision,
           world_epoch = excluded.world_epoch,
           server_tick = excluded.server_tick,
           saved_at_ms = excluded.saved_at_ms
       `)
         .run({
-          schemaVersion: SCHEMA_VERSION,
           mapRevision,
           worldEpoch: world.worldEpoch,
           serverTick: world.serverTick,

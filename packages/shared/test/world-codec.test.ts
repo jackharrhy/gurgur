@@ -2,9 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { decodeWorldBundle, encodeWorldBundle, type WorldBundle } from "../src";
 
 const bundle = (): WorldBundle => ({
-  bundleVersion: 2,
-  compilerVersion: 2,
-  schemaVersion: 1,
+  bundleVersion: 1,
   mapRevision: "a".repeat(64),
   sourceName: "fixture.map",
   entities: [
@@ -80,7 +78,7 @@ const bundle = (): WorldBundle => ({
   ],
 });
 
-describe("versioned binary world bundle", () => {
+describe("v1 binary world bundle", () => {
   test("round-trips deterministically with binary geometry sections", () => {
     const first = encodeWorldBundle(bundle());
     const second = encodeWorldBundle(bundle());
@@ -94,7 +92,7 @@ describe("versioned binary world bundle", () => {
     expect(() => decodeWorldBundle(version)).toThrow("unsupported");
     expect(() => decodeWorldBundle(new Uint8Array([1, 2, 3]))).toThrow("truncated");
     const bounds = encodeWorldBundle(bundle());
-    new DataView(bounds.buffer).setUint32(12, 0xffff_ffff, true);
+    new DataView(bounds.buffer).setUint32(10, 0xffff_ffff, true);
     expect(() => decodeWorldBundle(bounds)).toThrow("out of bounds");
   });
 });

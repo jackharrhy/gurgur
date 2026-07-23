@@ -16,13 +16,11 @@ import {
   type Vec3,
   type WelcomeMessage,
   type ClientControlMessage,
-  type VoicePeersMessage,
   type WorldMessage,
   type WorldManifestMessage,
 } from "@gurgur/shared";
 import { AuthoritativeGame } from "./game";
 import { WorldStore } from "./store";
-import { selectVoiceGraph } from "./voice-graph";
 
 type ClientData = {
   backpressured: boolean;
@@ -40,10 +38,6 @@ type SessionRecord = {
   socket: Bun.ServerWebSocket<ClientData> | null;
   socketGeneration: number;
   disconnectTimer: Timer | null;
-  peerId: string;
-  voiceEnabled: boolean;
-  blockedPeerIds: Set<string>;
-  voicePeers: Set<string>;
 };
 let sourcePredictionWorker: Promise<Blob> | null = null;
 
@@ -69,8 +63,6 @@ export async function createGurgurServer(
     databasePath?: string;
     adminToken?: string;
     playerSpawn?: Vec3;
-    voiceIceServers?: Array<{ urls: string | string[]; username?: string; credential?: string }>;
-    voiceRelayOnly?: boolean;
     publicOrigin?: string;
     extraDynamicBodies?: number;
   } = {},
@@ -94,14 +86,17 @@ export async function createGurgurServer(
   const predictionWorker = (await adjacentPredictionWorker.exists())
     ? adjacentPredictionWorker
     : await buildSourcePredictionWorker();
+  const playerBillboard = Bun.file(
+    new URL("../../../content/generated/player-billboard/player-billboard.png", import.meta.url),
+  );
+  if (!(await playerBillboard.exists()))
+    throw new Error("missing generated player billboard; run bun run render:player");
   const store = new WorldStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "./data/gurgur.sqlite",
   );
   const clients = new Set<Bun.ServerWebSocket<ClientData>>();
   const sessions = new Map<string, SessionRecord>();
-  const sessionsByPeerId = new Map<string, SessionRecord>();
   let shuttingDown = false;
-  let recomputeVoiceGraph = (): void => {};
   const metrics = (): ServerMetrics => {
     const active = [...clients].filter((socket) => socket.data.playerId);
     return {
@@ -148,7 +143,6 @@ export async function createGurgurServer(
         socket.data.queuedBytes = socket.getBufferedAmount();
       }
     }
-    if (snapshot.serverTick % 30 === 0) recomputeVoiceGraph();
   };
 
   const broadcastLifecycle = (
@@ -170,56 +164,6 @@ export async function createGurgurServer(
     extraDynamicBodies: options.extraDynamicBodies,
   });
   const worldBundleBytes = encodeWorldBundle(game.worldMessage().bundle);
-  const voiceConfig = {
-    iceServers: options.voiceIceServers ?? voiceIceServersFromEnvironment(),
-    iceTransportPolicy:
-      (options.voiceRelayOnly ?? process.env.VOICE_RELAY_ONLY === "true")
-        ? ("relay" as const)
-        : ("all" as const),
-  };
-  recomputeVoiceGraph = () => {
-    const active = [...sessions.values()].filter(
-      (session) => session.socket && session.voiceEnabled,
-    );
-    const positioned = active.flatMap((session) => {
-      const position = game.playerPosition(session.playerId);
-      return position ? [{ session, position }] : [];
-    });
-    const graph = selectVoiceGraph(
-      positioned.map(({ session, position }) => ({
-        peerId: session.peerId,
-        position,
-        blockedPeerIds: session.blockedPeerIds,
-        previousPeers: session.voicePeers,
-      })),
-    );
-    for (const session of active) {
-      const peers = [...graph.get(session.peerId)!].map((peerId) => {
-        const peer = sessionsByPeerId.get(peerId)!;
-        const selfPosition = game.playerPosition(session.playerId)!;
-        const peerPosition = game.playerPosition(peer.playerId)!;
-        const relative = {
-          x: peerPosition.x - selfPosition.x,
-          y: peerPosition.y - selfPosition.y,
-          z: peerPosition.z - selfPosition.z,
-        };
-        return {
-          peerId,
-          relative,
-          distance: Math.hypot(relative.x, relative.y, relative.z),
-          polite: session.peerId > peerId,
-        };
-      });
-      session.voicePeers = graph.get(session.peerId)!;
-      const message: VoicePeersMessage = {
-        type: "voice-peers",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: game.worldEpoch,
-        peers,
-      };
-      session.socket?.send(JSON.stringify(message));
-    }
-  };
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
   const server = Bun.serve<ClientData>({
     port: options.port ?? Number(process.env.PORT ?? 3000),
@@ -232,6 +176,12 @@ export async function createGurgurServer(
       "/box3d.wasm": new Response(box3dWasm, { headers: { "content-type": "application/wasm" } }),
       "/prediction-worker.js": new Response(predictionWorker, {
         headers: { "content-type": "text/javascript" },
+      }),
+      "/player-billboard.png": new Response(playerBillboard, {
+        headers: {
+          "content-type": "image/png",
+          "cache-control": "public, max-age=31536000, immutable",
+        },
       }),
       "/favicon.ico": new Response(null, { status: 204 }),
       "/world.bin": {
@@ -322,13 +272,8 @@ export async function createGurgurServer(
                 socket: null,
                 socketGeneration: -1,
                 disconnectTimer: null,
-                peerId: crypto.randomUUID(),
-                voiceEnabled: false,
-                blockedPeerIds: new Set(),
-                voicePeers: new Set(),
               };
               sessions.set(token, session);
-              sessionsByPeerId.set(session.peerId, session);
               createdPlayer = true;
             }
             if (!session) {
@@ -338,13 +283,8 @@ export async function createGurgurServer(
                 socket: null,
                 socketGeneration: -1,
                 disconnectTimer: null,
-                peerId: crypto.randomUUID(),
-                voiceEnabled: false,
-                blockedPeerIds: new Set(),
-                voicePeers: new Set(),
               };
               sessions.set(token, session);
-              sessionsByPeerId.set(session.peerId, session);
               createdPlayer = true;
             }
             if (control.socketGeneration <= session.socketGeneration) {
@@ -371,8 +311,6 @@ export async function createGurgurServer(
               snapshotHz: SNAPSHOT_HZ,
               sessionToken: token!,
               socketGeneration: control.socketGeneration,
-              peerId: session.peerId,
-              voiceConfig,
             };
             socket.send(JSON.stringify(welcome));
             socket.send(JSON.stringify(toManifest(game.worldMessage())));
@@ -397,59 +335,7 @@ export async function createGurgurServer(
                   socket,
                 );
             }
-            recomputeVoiceGraph();
             return;
-          }
-          const ownSession = socket.data.sessionToken
-            ? sessions.get(socket.data.sessionToken)
-            : null;
-          if (
-            control.type === "voice-ready" &&
-            ownSession &&
-            control.protocolVersion === PROTOCOL_VERSION &&
-            control.worldEpoch === game.worldEpoch &&
-            typeof control.enabled === "boolean"
-          ) {
-            ownSession.voiceEnabled = control.enabled;
-            if (!control.enabled) ownSession.voicePeers.clear();
-            recomputeVoiceGraph();
-            return;
-          }
-          if (
-            control.type === "voice-block" &&
-            ownSession &&
-            control.protocolVersion === PROTOCOL_VERSION &&
-            control.worldEpoch === game.worldEpoch &&
-            typeof control.peerId === "string" &&
-            control.peerId !== ownSession.peerId &&
-            typeof control.blocked === "boolean"
-          ) {
-            if (control.blocked) ownSession.blockedPeerIds.add(control.peerId);
-            else ownSession.blockedPeerIds.delete(control.peerId);
-            recomputeVoiceGraph();
-            return;
-          }
-          if (
-            control.type === "voice-signal" &&
-            ownSession &&
-            control.protocolVersion === PROTOCOL_VERSION &&
-            control.worldEpoch === game.worldEpoch &&
-            ownSession.voicePeers.has(control.toPeerId) &&
-            JSON.stringify(control.signal).length <= 16_384
-          ) {
-            const destination = sessionsByPeerId.get(control.toPeerId);
-            if (destination?.socket && destination.voicePeers.has(ownSession.peerId)) {
-              destination.socket.send(
-                JSON.stringify({
-                  type: "voice-signal",
-                  protocolVersion: PROTOCOL_VERSION,
-                  worldEpoch: game.worldEpoch,
-                  fromPeerId: ownSession.peerId,
-                  signal: control.signal,
-                }),
-              );
-              return;
-            }
           }
           if (
             control.type === "ping" &&
@@ -511,11 +397,9 @@ export async function createGurgurServer(
         const session = token ? sessions.get(token) : null;
         if (!session || session.socket !== socket) return;
         session.socket = null;
-        recomputeVoiceGraph();
         if (shuttingDown) return;
         session.disconnectTimer = setTimeout(() => {
           if (session.socket || !sessions.delete(token!)) return;
-          sessionsByPeerId.delete(session.peerId);
           if (game.disconnectPlayer(session.playerId))
             broadcastLifecycle({
               type: "lifecycle",
@@ -591,28 +475,6 @@ function validInputCommand(input: InputCommand): boolean {
   )
     return false;
   return true;
-}
-
-function voiceIceServersFromEnvironment(): Array<{
-  urls: string | string[];
-  username?: string;
-  credential?: string;
-}> {
-  const servers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [];
-  const stun = process.env.STUN_URL?.split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (stun?.length) servers.push({ urls: stun });
-  const turn = process.env.TURN_URL?.split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  if (turn?.length)
-    servers.push({
-      urls: turn,
-      ...(process.env.TURN_USERNAME ? { username: process.env.TURN_USERNAME } : {}),
-      ...(process.env.TURN_CREDENTIAL ? { credential: process.env.TURN_CREDENTIAL } : {}),
-    });
-  return servers;
 }
 
 function persistentIdForToken(token: string): string {

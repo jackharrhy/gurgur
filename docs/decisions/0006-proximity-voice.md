@@ -1,6 +1,7 @@
 # 0006: Proximity voice
 
-Status: accepted on 2026-07-21.
+Status: superseded on 2026-07-23 by
+[`0011-canvas-only-play-view.md`](0011-canvas-only-play-view.md).
 
 Use a server-signaled WebRTC Opus peer mesh whose authoritative symmetric
 proximity graph has maximum degree six and prioritizes the nearest permitted

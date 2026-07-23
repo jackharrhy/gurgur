@@ -47,6 +47,34 @@ describe("Valve geometry conformance fixtures", () => {
     );
   });
 
+  test("rejects a brush with one face wound against the others", () => {
+    const source = mapWithBrush((point) => point).replace(
+      "( -64 -64 -64 ) ( -64 -64 64 ) ( -64 64 64 )",
+      "( -64 -64 -64 ) ( -64 64 64 ) ( -64 -64 64 )",
+    );
+    expect(() => compileWorld(source, "mixed-winding.map")).toThrow(
+      /no finite convex volume|invalid face/,
+    );
+  });
+
+  test("compiles a reversed-winding box whose plane points lie outside its clipped faces", () => {
+    const source = `{
+"classname" "worldspawn"
+"mapversion" "220"
+{
+( -40 -24 96 ) ( -40 -23 96 ) ( -40 -24 97 ) FIXTURE [ 0 -1 0 0 ] [ 0 0 -1 0 ] 270 0.25 0.25
+( -56 -8 96 ) ( -56 -8 97 ) ( -55 -8 96 ) FIXTURE [ 1 0 0 0 ] [ 0 0 -1 0 ] 270 0.25 0.25
+( -56 -24 112 ) ( -55 -24 112 ) ( -56 -23 112 ) FIXTURE [ -1 0 0 0 ] [ 0 -1 0 0 ] 270 0.25 0.25
+( -24 8 128 ) ( -24 9 128 ) ( -23 8 128 ) FIXTURE [ 1 0 0 0 ] [ 0 -1 0 0 ] 270 0.25 0.25
+( -24 8 112 ) ( -23 8 112 ) ( -24 8 113 ) FIXTURE [ -1 0 0 0 ] [ 0 0 -1 0 ] 0 0.25 0.25
+( -24 8 112 ) ( -24 8 113 ) ( -24 9 112 ) FIXTURE [ 0 1 0 0 ] [ 0 0 -1 0 ] 0 0.25 0.25
+}
+}`;
+    const brush = compileWorld(source, "trenchbroom-box.map").brushes[0]!;
+    expect(brush.worldVertices).toHaveLength(8);
+    expect(brush.triangles).toHaveLength(12);
+  });
+
   test("keeps every convex child of a multi-brush moving entity", () => {
     const source = `${mapWithBrush(([x, y, z]) => [x - 512, y - 512, z - 128])}
 {

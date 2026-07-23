@@ -1,8 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { WorldStore } from "../src/store";
 
 describe("WorldStore", () => {
@@ -85,25 +81,6 @@ describe("WorldStore", () => {
       expect(store.load("map")).toEqual(baseline);
     } finally {
       store.close();
-    }
-  });
-
-  test("rejects an explicit schema-v2 fixture before reading its rows", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "gurgur-old-schema-"));
-    const path = join(directory, "world.sqlite");
-    const database = new Database(path, { create: true });
-    database.run(`CREATE TABLE world_snapshot (
-      singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, map_revision TEXT NOT NULL,
-      world_epoch INTEGER NOT NULL, server_tick INTEGER NOT NULL, saved_at_ms INTEGER NOT NULL
-    ) STRICT`);
-    database.run("INSERT INTO world_snapshot VALUES (1, 2, 'map', 4, 90, 0)");
-    database.close();
-    const store = new WorldStore(path);
-    try {
-      expect(store.load("map")).toBeNull();
-    } finally {
-      store.close();
-      await rm(directory, { recursive: true, force: true });
     }
   });
 });

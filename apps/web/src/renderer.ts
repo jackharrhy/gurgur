@@ -1,6 +1,8 @@
 import * as THREE from "three/webgpu";
 import {
   INTERPOLATION_DELAY_TICKS,
+  MATERIAL_TEXTURE_SIZE,
+  createMaterialTextureRgba,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
@@ -20,8 +22,21 @@ import {
   createWorldNodeMaterial,
   type RetroRenderPipeline,
 } from "./retro-rendering";
+import playerBillboardLayout from "../../../content/generated/player-billboard/player-billboard.json";
+import { playerBillboardAtlasOffset, playerBillboardView } from "./player-billboard";
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
+
+function disposeOwnedResources(object: THREE.Object3D): void {
+  if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
+  if (object instanceof THREE.Mesh) object.geometry.dispose();
+  if (object.userData.ownedMaterial) {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) material.dispose();
+  }
+  const texture = object.userData.ownedTexture;
+  if (texture instanceof THREE.Texture) texture.dispose();
+}
 
 export class WorldRenderer {
   readonly #renderer: THREE.WebGPURenderer;
@@ -71,15 +86,7 @@ export class WorldRenderer {
 
   setWorld(message: WorldMessage): void {
     this.#scene.remove(this.#worldRoot);
-    this.#worldRoot.traverse((object) => {
-      if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
-        if (object instanceof THREE.Mesh) object.geometry.dispose();
-        if (object.userData.ownedMaterial) {
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          for (const material of materials) material.dispose();
-        }
-      }
-    });
+    this.#worldRoot.traverse(disposeOwnedResources);
     this.#worldRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
     this.#meshes.clear();
@@ -128,12 +135,7 @@ export class WorldRenderer {
       this.#meshes.delete(idKey(id));
       this.#predictedBodies.delete(idKey(id));
       this.#worldRoot.remove(mesh);
-      mesh.traverse((object) => {
-        if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
-        if (object instanceof THREE.Mesh) object.geometry.dispose();
-        const materials = Array.isArray(object.material) ? object.material : [object.material];
-        for (const material of materials) material.dispose();
-      });
+      mesh.traverse(disposeOwnedResources);
     }
     for (const entity of message.created)
       if (entity.classname === "player") this.#addPlayer(entity);
@@ -217,15 +219,7 @@ export class WorldRenderer {
   dispose(): void {
     this.#renderer.setAnimationLoop(null);
     removeEventListener("resize", this.#resize);
-    this.#worldRoot.traverse((object) => {
-      if (object instanceof THREE.Mesh || object instanceof THREE.Sprite) {
-        if (object instanceof THREE.Mesh) object.geometry.dispose();
-        if (object.userData.ownedMaterial) {
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          for (const material of materials) material.dispose();
-        }
-      }
-    });
+    this.#worldRoot.traverse(disposeOwnedResources);
     for (const material of this.#materials.values()) material.dispose();
     for (const texture of this.#textures.values()) texture.dispose();
     this.#pipeline.dispose();
@@ -310,16 +304,31 @@ export class WorldRenderer {
   #addPlayer(player: Extract<LifecycleMessage["created"][number], { classname: "player" }>): void {
     if (this.#meshes.has(idKey(player.id))) return;
     const local = this.#localPlayer && idKey(player.id) === idKey(this.#localPlayer);
-    const material = createSpriteNodeMaterial(
-      this.#spriteTexture(local ? "player-local" : "player-remote"),
-      false,
-    );
+    const texture = new THREE.TextureLoader().load("/player-billboard.png");
+    texture.name = `player-billboard:${player.authoredId}`;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.repeat.set(1 / playerBillboardLayout.columns, 1 / playerBillboardLayout.rows);
+    const initialOffset = playerBillboardAtlasOffset(0, playerBillboardLayout);
+    texture.offset.set(initialOffset.x, initialOffset.y);
+    const material = createSpriteNodeMaterial(texture, false);
     material.alphaTest = 0.45;
+    if (local) material.color.set(0xfff2cc);
     const mesh = new THREE.Sprite(material);
-    mesh.center.set(0.5, 0.08);
-    mesh.scale.set(1.08, 1.78, 1);
+    mesh.center.set(playerBillboardLayout.quad.center.x, playerBillboardLayout.quad.center.y);
+    mesh.scale.set(
+      playerBillboardLayout.quad.widthMeters,
+      playerBillboardLayout.quad.heightMeters,
+      1,
+    );
     mesh.name = player.authoredId;
     mesh.userData.ownedMaterial = true;
+    mesh.userData.ownedTexture = texture;
+    mesh.userData.playerDirection = 0;
     mesh.userData.runtimeId = player.id;
     mesh.userData.interactionOccluder = false;
     this.#meshes.set(idKey(player.id), mesh);
@@ -340,72 +349,14 @@ export class WorldRenderer {
     const cached = this.#textures.get(name);
     if (cached) return cached;
     const canvas = document.createElement("canvas");
-    canvas.width = 32;
-    canvas.height = 32;
+    canvas.width = MATERIAL_TEXTURE_SIZE;
+    canvas.height = MATERIAL_TEXTURE_SIZE;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D canvas is unavailable for material textures");
     context.imageSmoothingEnabled = false;
-    const palette = this.#materialPalette(name);
-    context.fillStyle = palette[0];
-    context.fillRect(0, 0, 32, 32);
-    context.strokeStyle = palette[1];
-    context.fillStyle = palette[1];
-    if (name.includes("CONCRETE") || name.includes("STONE")) {
-      // Large horizontal surfaces turn regular line grids into severe moire at
-      // grazing angles. Irregular, deterministic aggregate keeps the chunky
-      // 32 px material language without introducing a dominant frequency.
-      let seed = name.includes("STONE") ? 0x5a17 : 0xc0c0;
-      for (let index = 0; index < 86; index += 1) {
-        seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
-        const x = seed & 31;
-        const y = (seed >>> 8) & 31;
-        context.fillStyle = index % 5 === 0 ? palette[2] : palette[1];
-        context.fillRect(x, y, index % 7 === 0 ? 2 : 1, index % 11 === 0 ? 2 : 1);
-      }
-    } else if (name.includes("WATER")) {
-      context.fillStyle = palette[1];
-      for (let y = 3; y < 32; y += 6) {
-        for (let x = -4; x < 32; x += 8) context.fillRect(x + (y % 4), y, 6, 2);
-      }
-      context.fillStyle = palette[2];
-      for (let y = 6; y < 32; y += 12) {
-        for (let x = 1; x < 32; x += 12) context.fillRect(x, y, 4, 1);
-      }
-    } else if (name.includes("CAUTION")) {
-      context.lineWidth = 6;
-      for (let offset = -32; offset < 64; offset += 12) {
-        context.beginPath();
-        context.moveTo(offset, 32);
-        context.lineTo(offset + 32, 0);
-        context.stroke();
-      }
-    } else if (name.includes("METAL") || name.includes("DOOR")) {
-      context.fillRect(0, 0, 32, 2);
-      context.fillRect(0, 15, 32, 2);
-      context.fillStyle = palette[2];
-      for (const x of [2, 14, 18, 30])
-        for (const y of [3, 13, 19, 29]) context.fillRect(x, y, 1, 1);
-    } else if (name.includes("WOOD")) {
-      for (let y = 5; y < 32; y += 8) context.fillRect(0, y, 32, 2);
-      context.fillStyle = palette[2];
-      for (let x = 4; x < 32; x += 10) context.fillRect(x, 0, 1, 32);
-    } else if (name.includes("DANGER")) {
-      for (let y = 0; y < 32; y += 8)
-        for (let x = 0; x < 32; x += 8) {
-          if (((x + y) / 8) % 2 === 0) context.fillRect(x, y, 8, 8);
-        }
-    } else {
-      for (let y = 0; y < 32; y += 8) context.fillRect(0, y, 32, 1);
-      context.fillStyle = palette[2];
-      for (const [x, y] of [
-        [3, 4],
-        [21, 6],
-        [13, 13],
-        [28, 21],
-        [7, 27],
-      ] as const)
-        context.fillRect(x, y, 2, 2);
-    }
+    const image = context.createImageData(MATERIAL_TEXTURE_SIZE, MATERIAL_TEXTURE_SIZE);
+    image.data.set(createMaterialTextureRgba(name));
+    context.putImageData(image, 0, 0);
     const texture = new THREE.CanvasTexture(canvas);
     texture.name = name;
     texture.wrapS = THREE.RepeatWrapping;
@@ -416,21 +367,6 @@ export class WorldRenderer {
     texture.colorSpace = THREE.SRGBColorSpace;
     this.#textures.set(name, texture);
     return texture;
-  }
-
-  #materialPalette(name: string): [string, string, string] {
-    if (name.includes("CONCRETE")) return ["#4f5655", "#34383f", "#8b806d"];
-    if (name.includes("STONE")) return ["#62536f", "#3c334d", "#9b6b68"];
-    if (name.includes("WOOD")) return ["#a55b3f", "#663744", "#d18a4f"];
-    if (name.includes("RUBBER")) return ["#71335f", "#452542", "#cb4c73"];
-    if (name.includes("CAUTION")) return ["#d9a92f", "#28253c", "#ffe18a"];
-    if (name.includes("DANGER")) return ["#a52b4c", "#292037", "#ff6b5b"];
-    if (name.includes("BUTTON")) return ["#d94b3e", "#732d46", "#ffb35c"];
-    if (name.includes("PLATFORM")) return ["#347e87", "#24485d", "#70c3a6"];
-    if (name.includes("RAMP")) return ["#687447", "#3c493d", "#a6a85b"];
-    if (name.includes("DOOR")) return ["#596878", "#303b50", "#a2b0ad"];
-    if (name.includes("WATER")) return ["#173a5c", "#197d88", "#6bd2b2"];
-    return ["#4a5868", "#2d3445", "#8396a0"];
   }
 
   #mapSprite(entity: WorldMessage["bundle"]["entities"][number]): THREE.Sprite {
@@ -518,6 +454,25 @@ export class WorldRenderer {
       if (!mesh) continue;
       mesh.position.set(body.position.x, body.position.y, body.position.z);
       mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
+      const texture = mesh.userData.ownedTexture;
+      if (mesh instanceof THREE.Sprite && texture instanceof THREE.Texture) {
+        const yaw = 2 * Math.atan2(body.rotation.y, body.rotation.w);
+        const direction = playerBillboardView(
+          yaw,
+          this.#camera.position.x,
+          this.#camera.position.y,
+          this.#camera.position.z,
+          body.position.x,
+          body.position.y,
+          body.position.z,
+          playerBillboardLayout.views,
+        );
+        if (mesh.userData.playerDirection !== direction) {
+          const offset = playerBillboardAtlasOffset(direction, playerBillboardLayout);
+          texture.offset.set(offset.x, offset.y);
+          mesh.userData.playerDirection = direction;
+        }
+      }
       this.#onBodyPresentation(body);
     }
   }

@@ -3,16 +3,9 @@ import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createPredictionClient } from "./prediction-client";
-import { VoiceChat } from "./audio";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
-const connection = document.querySelector<HTMLElement>("#connection");
-const light = document.querySelector<HTMLElement>("#light");
-const epoch = document.querySelector<HTMLElement>("#epoch");
-const tick = document.querySelector<HTMLElement>("#tick");
-const voiceButton = document.querySelector<HTMLButtonElement>("#voice");
-if (!canvas || !connection || !light || !epoch || !tick || !voiceButton)
-  throw new Error("game shell is incomplete");
+if (!canvas) throw new Error("game canvas is missing");
 
 const history = createSnapshotTimeline();
 let heavyCube: { key: string; localTop: number } | null = null;
@@ -44,7 +37,6 @@ const predictor = createPredictionClient((body, bodies, correctionMagnitude) => 
 });
 let localPlayerKey: string | null = null;
 let session: GameSession;
-let voice: VoiceChat;
 const input = createPlayerInput(
   canvas,
   (command) => {
@@ -61,17 +53,13 @@ const input = createPlayerInput(
 session = new GameSession(
   {
     status(status) {
-      connection.textContent = status;
-      light.classList.toggle("online", status === "connected");
+      document.body.dataset.connection = status;
       document.body.dataset.ready = status === "connected" ? "true" : "false";
     },
     welcome(message) {
-      epoch.textContent = String(message.worldEpoch);
       localPlayerKey = `${message.playerId.index}:${message.playerId.generation}`;
       renderer.setLocalPlayer(message.playerId);
       predictor.setLocalPlayer(message.playerId);
-      voice.configure(message);
-      document.body.dataset.voiceConfigured = "true";
     },
     world(message) {
       renderer.setWorld(message);
@@ -97,8 +85,8 @@ session = new GameSession(
       history.push(message);
       if (!latestInFrame) return;
       predictor.reconcile(message);
-      epoch.textContent = String(message.worldEpoch);
-      tick.textContent = String(message.serverTick);
+      document.body.dataset.worldEpoch = String(message.worldEpoch);
+      document.body.dataset.serverTick = String(message.serverTick);
       const player = message.bodies.find(
         (body) => `${body.id.index}:${body.id.generation}` === localPlayerKey,
       );
@@ -127,29 +115,11 @@ session = new GameSession(
       document.body.dataset.rttMs = rttMs.toFixed(1);
       document.body.dataset.jitterMs = jitterMs.toFixed(1);
     },
-    voicePeers(message) {
-      voice.updatePeers(message);
-    },
-    voiceSignal(message) {
-      void voice.handleSignal(message);
-    },
   },
   {
     simulatedLatencyMs: Number(new URLSearchParams(location.search).get("simulatedLatencyMs") ?? 0),
   },
 );
-voice = new VoiceChat(
-  (message) => session.sendControl(message),
-  (status) => {
-    voiceButton.textContent = status;
-    document.body.dataset.voice = status;
-  },
-);
-voiceButton.addEventListener("click", () => {
-  document.body.dataset.voiceClicked = "true";
-  if (voice.enabled) voice.disable();
-  else void voice.enable();
-});
 
 renderer.start();
 session.connect();
@@ -157,6 +127,5 @@ addEventListener("pagehide", () => {
   session.close();
   input.dispose();
   predictor.dispose();
-  voice.dispose();
   renderer.dispose();
 });

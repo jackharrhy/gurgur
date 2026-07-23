@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 1;
 export const PHYSICS_HZ = 60;
 export const PHYSICS_DT = 1 / PHYSICS_HZ;
 export const PHYSICS_SUBSTEPS = 4;

@@ -14,8 +14,6 @@ export type EntityDefinition = {
   properties: Readonly<Record<string, PropertyDefinition>>;
 };
 
-export const ENTITY_SCHEMA_VERSION = 3;
-
 const authoredId: PropertyDefinition = {
   type: "string",
   description: "Stable unique persistence identity",

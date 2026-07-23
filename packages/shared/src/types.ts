@@ -44,11 +44,6 @@ export type WelcomeMessage = {
   snapshotHz: number;
   sessionToken: string;
   socketGeneration: number;
-  peerId: string;
-  voiceConfig: {
-    iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }>;
-    iceTransportPolicy: "all" | "relay";
-  };
 };
 
 export type HelloMessage = {
@@ -77,59 +72,8 @@ export type PongMessage = {
   serverTick: number;
 };
 
-export type VoiceReadyMessage = {
-  type: "voice-ready";
-  protocolVersion: number;
-  worldEpoch: number;
-  enabled: boolean;
-};
-
-export type VoiceBlockMessage = {
-  type: "voice-block";
-  protocolVersion: number;
-  worldEpoch: number;
-  peerId: string;
-  blocked: boolean;
-};
-
-export type VoiceSignalMessage = {
-  type: "voice-signal";
-  protocolVersion: number;
-  worldEpoch: number;
-  toPeerId: string;
-  signal: {
-    description?: { type: "offer" | "answer" | "pranswer" | "rollback"; sdp?: string };
-    candidate?: {
-      candidate: string;
-      sdpMid?: string | null;
-      sdpMLineIndex?: number | null;
-      usernameFragment?: string | null;
-    };
-  };
-};
-
-export type VoiceSignalForwardMessage = Omit<VoiceSignalMessage, "toPeerId"> & {
-  fromPeerId: string;
-};
-
-export type VoicePeersMessage = {
-  type: "voice-peers";
-  protocolVersion: number;
-  worldEpoch: number;
-  peers: Array<{ peerId: string; distance: number; relative: Vec3; polite: boolean }>;
-};
-
-export type ClientControlMessage =
-  | HelloMessage
-  | PingMessage
-  | VoiceReadyMessage
-  | VoiceBlockMessage
-  | VoiceSignalMessage;
-export type ServerControlMessage =
-  | WelcomeMessage
-  | PongMessage
-  | VoicePeersMessage
-  | VoiceSignalForwardMessage;
+export type ClientControlMessage = HelloMessage | PingMessage;
+export type ServerControlMessage = WelcomeMessage | PongMessage;
 
 export type InputCommand = {
   type: "input";

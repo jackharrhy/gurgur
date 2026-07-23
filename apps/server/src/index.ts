@@ -16,18 +16,6 @@ if (process.env.PUBLIC_ORIGIN) {
     throw new Error("PUBLIC_ORIGIN must be an HTTP(S) origin without a path");
   }
 }
-if (Boolean(process.env.TURN_USERNAME) !== Boolean(process.env.TURN_CREDENTIAL)) {
-  throw new Error("TURN_USERNAME and TURN_CREDENTIAL must be configured together");
-}
-if (process.env.VOICE_RELAY_ONLY && !["true", "false"].includes(process.env.VOICE_RELAY_ONLY)) {
-  throw new Error("VOICE_RELAY_ONLY must be true or false");
-}
-for (const value of process.env.STUN_URL?.split(",").filter(Boolean) ?? []) {
-  if (!/^stuns?:/i.test(value.trim())) throw new Error("STUN_URL entries must use stun: or stuns:");
-}
-for (const value of process.env.TURN_URL?.split(",").filter(Boolean) ?? []) {
-  if (!/^turns?:/i.test(value.trim())) throw new Error("TURN_URL entries must use turn: or turns:");
-}
 const extraDynamicBodies = Number(process.env.EXTRA_DYNAMIC_BODIES ?? 0);
 if (!Number.isInteger(extraDynamicBodies) || extraDynamicBodies < 0 || extraDynamicBodies > 512) {
   throw new Error("EXTRA_DYNAMIC_BODIES must be an integer between 0 and 512");
@@ -52,6 +40,7 @@ const stop = (): void => {
   if (stopping) return;
   stopping = true;
   server.stop();
+  process.exit(0);
 };
 
 process.on("SIGINT", stop);

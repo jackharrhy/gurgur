@@ -46,9 +46,7 @@ export type CompiledEntity = {
 };
 
 export type WorldBundle = {
-  bundleVersion: 2;
-  compilerVersion: number;
-  schemaVersion: number;
+  bundleVersion: 1;
   mapRevision: string;
   sourceName: string;
   entities: CompiledEntity[];

@@ -22,8 +22,7 @@ simulation loop, and persistence in the same process and on the same origin.
 
 Production code accesses Box3D only through Gurgur's physics adapter. Box3D owns
 live physical state; application registries own stable identity and gameplay
-state. Voice uses browser WebRTC media connections and never enters the Bun
-simulation tick.
+state.
 
 Persistent external resources have explicit lifecycle owners, but other modules
 depend on small structural capability interfaces rather than concrete classes.
@@ -35,7 +34,7 @@ players, replication, and persistence; it does not implement every subsystem.
 
 ```text
 apps/
-  web/             HTML, vanilla TS, Three.js, input, worker, audio, UI
+  web/             HTML, vanilla TS, Three.js, input, prediction worker
   server/          sole Bun entrypoint, HTTP/WebSocket, simulation, administration
 packages/
   shared/          packet types, codecs, input, controller rules, math
@@ -51,8 +50,8 @@ content/
   maps/ textures/ models/ generated/
 ```
 
-Browser, DOM, Three.js, and Web Audio code stay out of shared packages. SQLite,
-filesystem, administration, and server sockets stay out of client packages.
+Browser, DOM, and Three.js code stay out of shared packages. SQLite, filesystem,
+administration, and server sockets stay out of client packages.
 The network harness is production-adjacent tooling: it imports the real shared
 codecs and drives the real server and client simulation boundaries.
 
@@ -91,22 +90,24 @@ statements, and tick-boundary transactions. The default snapshot interval is fiv
 seconds; important mechanism changes also request a snapshot at the next tick
 boundary.
 
-A schema-v5 snapshot contains its schema version, `mapRevision`, `worldEpoch`,
-server tick, save time, authored IDs, transforms, velocities, sleep state,
+A snapshot contains `mapRevision`, `worldEpoch`, server tick, save time, authored
+IDs, transforms, velocities, sleep state,
 mechanism progress, trigger/relay latches, cooldown deadlines, queued delayed
 signals, complete player-controller state, and authored grab ownership. It never
 contains raw Box3D memory, Wasm pointers, or runtime network IDs.
 
-Startup restores a snapshot only when its schema and `mapRevision` match the
-compiled bundle. Otherwise the server starts from authored defaults.
+Startup restores a snapshot only when its `mapRevision` matches the compiled
+bundle. Otherwise the server starts from authored defaults. This pre-release
+schema is clean-start only: schema changes require deleting the local database,
+not carrying migrations or compatibility branches.
 
 ## Reset transaction
 
 A reset stops input consumption, increments `worldEpoch`, discards durable body
 state, recreates the Box3D world from the compiled bundle, respawns connected
 players, writes the reset snapshot, publishes a full snapshot, and resumes input.
-Clients clear prediction, interpolation, and voice-signaling state associated
-with the previous epoch.
+Clients clear prediction and interpolation state associated with the previous
+epoch.
 
 ## Deployment
 
@@ -119,6 +120,3 @@ SQLite lives at `/data/gurgur.sqlite` on a mounted persistent volume. Compiled
 world content is immutable image content. On `SIGTERM`, the server stops accepting
 new connections, completes the current tick, writes a final snapshot, closes
 SQLite and WebSockets, then exits within the container grace period.
-
-STUN/TURN for optional peer voice is external network infrastructure, not another
-Gurgur application process. The game remains fully playable without voice.

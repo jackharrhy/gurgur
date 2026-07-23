@@ -146,9 +146,9 @@ Additional gates are:
 - after a five-second impairment, snapshot age and prediction error return to
   the affected profile budget within one second;
 - reset/reconnect leaves no old-epoch command, interpolation sample, predicted
-  state, voice signal, or runtime handle active.
+  state, or runtime handle active.
 
-Reports are emitted as versioned JSON plus a concise terminal summary. CI fails
+Reports are emitted as structured JSON plus a concise terminal summary. CI fails
 on correctness errors and budget regressions. Intentional budget changes require
 a decision record or an updated canonical requirement, never a looser assertion
 hidden in a test.
@@ -160,4 +160,4 @@ run on every change. The mixed
 16-client network suite runs for networking, physics, controller, persistence,
 and protocol changes. Browser prediction/interpolation scenarios run in Chromium
 on every such change and in Firefox/WebKit before a release. Long physics,
-connection-churn, persistence, and voice tests run as scheduled soaks.
+connection-churn, and persistence tests run as scheduled soaks.

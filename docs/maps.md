@@ -10,6 +10,25 @@ types, defaults, and runtime construction behavior.
 Generated meshes, collision data, FGD files, TrenchBroom game configuration, and
 runtime bundles are reproducible build artifacts. They are never edited by hand.
 
+## TrenchBroom setup
+
+Run `bun run setup:trenchbroom` after cloning or whenever the entity schema or
+procedural material language changes. The command regenerates the FGD, game
+configuration, and PNG editor previews, installs the game configuration in the
+current operating system's TrenchBroom user-data directory, and configures this
+repository's `content` directory as the Gurgur game path without discarding other
+TrenchBroom preferences. Restart TrenchBroom after installation.
+
+Gurgur maps identify themselves with `// Game: Gurgur` and `// Format: Valve`
+header comments so TrenchBroom selects the installed game and Valve 220 format
+automatically. Runtime and editor textures share the deterministic palette and
+pixel-pattern generator. TrenchBroom loads its generated PNG previews from
+`content/textures/GURGUR` through the configured game path.
+
+The installer follows TrenchBroom's platform user-data locations. Set
+`TRENCHBROOM_USER_DATA_PATH` only for a portable or otherwise nonstandard
+installation.
+
 ## Parser
 
 Gurgur owns a small scanner and parser for the required Valve 220 grammar. It
@@ -28,6 +47,13 @@ interior, intersects plane triplets, retains points inside all half-spaces,
 deduplicates vertices, sorts each face around its normal, and triangulates it with
 a stable fan. Epsilon policy and sort order are fixed so identical inputs produce
 identical output.
+
+Valve face-defining points establish an infinite plane and need not lie inside the
+eventual clipped face. The compiler therefore never guesses an interior point by
+averaging them. It tests the authored winding and its complete reversal, accepting
+the orientation only when it produces a closed convex volume in which every plane
+contributes a face. This supports globally mirrored TrenchBroom brushes without
+accepting mixed-winding or open geometry.
 
 The compiler applies the canonical transform and unit scale exactly once:
 
@@ -49,11 +75,12 @@ One source map compiles into one immutable world bundle containing:
 - typed runtime entity definitions and authored defaults;
 - spawn points and persistent `authoredId` values;
 - source-to-generated diagnostic tables;
-- compiler/schema versions and SHA-256 `mapRevision`.
+- a SHA-256 `mapRevision`.
 
-Serialization uses explicit versioned binary sections with deterministic ordering.
-The same sources, schema, and compiler version produce byte-identical bundles.
-Runtime startup rejects an unsupported bundle version before creating the world.
+Serialization uses a v1 binary envelope with deterministic, unversioned sections.
+The same sources, schema, and compiler produce byte-identical bundles. Runtime
+startup rejects a non-v1 bundle before creating the world; there are no legacy
+bundle decoders.
 
 ## Entity schema
 
@@ -81,6 +108,13 @@ composable; arbitrary mapper scripts and runtime code strings are forbidden.
 Every entity whose state can persist requires a unique explicit `authoredId`.
 Compilation fails on missing or duplicate persistent IDs. Entity order, line
 number, and runtime network identity are never persistence keys.
+
+The `compile:map` authoring entrypoint assigns UUID-backed `authoredId` values to
+new persistent entities that TrenchBroom created without one and atomically writes
+them into the source map before compiling. The compiler API remains strict: a map
+passed directly to `compileWorld` must already contain complete, unique IDs. This
+keeps generated identity persistent without making entity order or geometry an
+implicit persistence key.
 
 The executable base schema lives in `packages/entity-schema`. It is the source
 for compiler validation and the generated `content/trenchbroom/Gurgur.fgd`.

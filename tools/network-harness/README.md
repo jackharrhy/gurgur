@@ -13,4 +13,4 @@ Run `bun run check`.
 
 The next integration layer connects two directional links to a headless client,
 then runs 16 mixed-profile clients against the real authoritative server while
-emitting the budgets defined in `docs/testing.md` as versioned JSON.
+emitting the budgets defined in `docs/testing.md` as structured JSON.

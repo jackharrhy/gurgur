@@ -165,23 +165,3 @@ Handshake requires an exact `protocolVersion`, `mapRevision`, authenticated
 session identity, and current `worldEpoch`. Reconnect replaces the prior socket
 generation and rejects all work from the stale socket. Reconnect backoff is
 exponential with jitter and capped at ten seconds.
-
-## Proximity voice
-
-Voice uses a server-signaled WebRTC peer mesh carrying Opus audio tracks. It is a
-separate media plane from gameplay WebSocket data. The game server authenticates
-signaling and computes audible membership from authoritative positions.
-
-The server maintains a symmetric audible graph with degree at most six,
-prioritizing the nearest permitted pairs. A peer pair enters the graph at 20 m
-and leaves beyond 24 m, providing boundary hysteresis.
-Client-side Web Audio spatialization is full gain through 3 m and reaches zero at
-20 m. These distances and the six-peer cap are server configuration, applied
-consistently to every client.
-
-Production voice includes STUN and TURN. Relay-only mode is available when peer
-network addresses must remain private. Signaling carries session identity and
-`worldEpoch`; leaving range, reset, logout, or block tears down the corresponding
-media connection. Local mute changes gain only. Blocking revokes signaling and
-media access on the server. Microphone access begins only after explicit user
-action, and denial or device loss leaves gameplay unaffected.

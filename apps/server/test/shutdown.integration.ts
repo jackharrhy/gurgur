@@ -10,12 +10,6 @@ test("production entrypoint rejects invalid environment before binding a port", 
     {
       PORT: "3000",
       ADMIN_TOKEN: "valid-production-token",
-      TURN_USERNAME: "user",
-      expected: "configured together",
-    },
-    {
-      PORT: "3000",
-      ADMIN_TOKEN: "valid-production-token",
       PUBLIC_ORIGIN: "not a URL",
       expected: "ERR_INVALID_URL",
     },
@@ -30,24 +24,6 @@ test("production entrypoint rejects invalid environment before binding a port", 
       ADMIN_TOKEN: "valid-production-token",
       PLAYER_SPAWN: "0,nope,1",
       expected: "PLAYER_SPAWN",
-    },
-    {
-      PORT: "3000",
-      ADMIN_TOKEN: "valid-production-token",
-      VOICE_RELAY_ONLY: "yes",
-      expected: "VOICE_RELAY_ONLY",
-    },
-    {
-      PORT: "3000",
-      ADMIN_TOKEN: "valid-production-token",
-      STUN_URL: "https://wrong.test",
-      expected: "STUN_URL",
-    },
-    {
-      PORT: "3000",
-      ADMIN_TOKEN: "valid-production-token",
-      TURN_URL: "stun:wrong.test",
-      expected: "TURN_URL",
     },
   ];
   for (const fixture of cases) {

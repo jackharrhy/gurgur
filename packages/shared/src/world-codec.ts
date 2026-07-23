@@ -9,14 +9,14 @@ import type {
 } from "./world";
 
 const MAGIC = 0x44525747; // GWRD in little endian
-const FORMAT_VERSION = 2;
+const FORMAT_VERSION = 1;
 const HEADER_BYTES = 8;
-const SECTION_ENTRY_BYTES = 12;
+const SECTION_ENTRY_BYTES = 10;
 const METADATA_SECTION = 1;
 const ENTITIES_SECTION = 2;
 const GEOMETRY_SECTION = 3;
 
-type Section = { type: number; version: number; bytes: Uint8Array };
+type Section = { type: number; bytes: Uint8Array };
 type BrushMetadata = Omit<
   CompiledBrush,
   | "worldVertices"
@@ -34,12 +34,8 @@ export function encodeWorldBundle(bundle: WorldBundle): Uint8Array {
   const sections: Section[] = [
     {
       type: METADATA_SECTION,
-      version: 1,
       bytes: encoder.encode(
         JSON.stringify({
-          bundleVersion: bundle.bundleVersion,
-          compilerVersion: bundle.compilerVersion,
-          schemaVersion: bundle.schemaVersion,
           mapRevision: bundle.mapRevision,
           sourceName: bundle.sourceName,
           brushes: bundle.brushes.map(
@@ -56,8 +52,8 @@ export function encodeWorldBundle(bundle: WorldBundle): Uint8Array {
         }),
       ),
     },
-    { type: ENTITIES_SECTION, version: 1, bytes: encoder.encode(JSON.stringify(bundle.entities)) },
-    { type: GEOMETRY_SECTION, version: 1, bytes: encodeGeometry(bundle.brushes) },
+    { type: ENTITIES_SECTION, bytes: encoder.encode(JSON.stringify(bundle.entities)) },
+    { type: GEOMETRY_SECTION, bytes: encodeGeometry(bundle.brushes) },
   ];
   const tableBytes = sections.length * SECTION_ENTRY_BYTES;
   const totalBytes =
@@ -73,9 +69,8 @@ export function encodeWorldBundle(bundle: WorldBundle): Uint8Array {
   sections.forEach((section, index) => {
     const entry = HEADER_BYTES + index * SECTION_ENTRY_BYTES;
     view.setUint16(entry, section.type, true);
-    view.setUint16(entry + 2, section.version, true);
-    view.setUint32(entry + 4, payloadOffset, true);
-    view.setUint32(entry + 8, section.bytes.byteLength, true);
+    view.setUint32(entry + 2, payloadOffset, true);
+    view.setUint32(entry + 6, section.bytes.byteLength, true);
     output.set(section.bytes, payloadOffset);
     payloadOffset += section.bytes.byteLength;
   });
@@ -159,11 +154,8 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
   for (let index = 0; index < sectionCount; index += 1) {
     const entry = HEADER_BYTES + index * SECTION_ENTRY_BYTES;
     const type = view.getUint16(entry, true);
-    const version = view.getUint16(entry + 2, true);
-    const offset = view.getUint32(entry + 4, true);
-    const length = view.getUint32(entry + 8, true);
-    if (version !== 1)
-      throw new Error(`unsupported world bundle section ${type} version ${version}`);
+    const offset = view.getUint32(entry + 2, true);
+    const length = view.getUint32(entry + 6, true);
     if (sections.has(type)) throw new Error(`duplicate world bundle section ${type}`);
     if (
       offset < HEADER_BYTES + sectionCount * SECTION_ENTRY_BYTES ||
@@ -178,18 +170,10 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
   const entityBytes = requiredSection(sections, ENTITIES_SECTION);
   const geometryBytes = requiredSection(sections, GEOMETRY_SECTION);
   const metadata = JSON.parse(decoder.decode(metadataBytes)) as {
-    bundleVersion: number;
-    compilerVersion: number;
-    schemaVersion: number;
     mapRevision: string;
     sourceName: string;
     brushes: BrushMetadata[];
   };
-  if (metadata.bundleVersion !== FORMAT_VERSION)
-    throw new Error("world bundle metadata version mismatch");
-  if (!Number.isInteger(metadata.compilerVersion) || !Number.isInteger(metadata.schemaVersion)) {
-    throw new Error("world bundle compiler/schema version is invalid");
-  }
   if (!/^[0-9a-f]{64}$/.test(metadata.mapRevision))
     throw new Error("world bundle revision is invalid");
   const entities = JSON.parse(decoder.decode(entityBytes)) as CompiledEntity[];
@@ -197,8 +181,6 @@ export function decodeWorldBundle(input: ArrayBuffer | ArrayBufferView): WorldBu
   const derived = deriveWorldBuffers(brushes);
   return {
     bundleVersion: FORMAT_VERSION,
-    compilerVersion: metadata.compilerVersion,
-    schemaVersion: metadata.schemaVersion,
     mapRevision: metadata.mapRevision,
     sourceName: metadata.sourceName,
     entities,

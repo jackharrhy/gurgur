@@ -57,6 +57,23 @@ const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
 if (simulatedLatencyMs > 0) url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
 const browser = await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+const waitForStablePlayerHeight = async (): Promise<number> =>
+  page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        let stableSince = performance.now();
+        let previousY = Number(document.body.dataset.predictedY);
+        const sample = (now: number): void => {
+          const y = Number(document.body.dataset.predictedY);
+          if (!Number.isFinite(y) || !Number.isFinite(previousY) || Math.abs(y - previousY) > 0.01)
+            stableSince = now;
+          previousY = y;
+          if (now - stableSince >= 300) resolve(y);
+          else requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      }),
+  );
 const worldBundleRequests: string[] = [];
 page.on("request", (request) => {
   const requestUrl = new URL(request.url());
@@ -90,6 +107,26 @@ try {
   await page.locator('body[data-world-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
+  const shell = await page.evaluate(() => {
+    const canvas = document.querySelector("#world");
+    const main = document.querySelector("main");
+    return {
+      mainChildren: main?.childElementCount,
+      canvasChildren: main?.querySelectorAll(":scope > canvas").length,
+      controls: document.querySelectorAll("button, [role=button], input, .hud").length,
+      cursor: canvas ? getComputedStyle(canvas).cursor : null,
+      reticle: main ? getComputedStyle(main, "::after").content : null,
+    };
+  });
+  if (
+    shell.mainChildren !== 1 ||
+    shell.canvasChildren !== 1 ||
+    shell.controls !== 0 ||
+    shell.cursor !== "none" ||
+    !["none", "normal"].includes(shell.reticle ?? "")
+  ) {
+    throw new Error(`play view is not canvas-only: ${JSON.stringify(shell)}`);
+  }
   const requestedRevision = new URL(worldBundleRequests.at(-1) ?? url.href).searchParams.get(
     "revision",
   );
@@ -98,12 +135,7 @@ try {
       `world bundle request is not revision-addressed: ${worldBundleRequests.at(-1) ?? "missing"}`,
     );
   }
-  await page.waitForFunction(() => Number(document.querySelector("#tick")?.textContent) >= 6);
-  const start = await page.evaluate(() => ({
-    x: Number(document.body.dataset.predictedX),
-    y: Number(document.body.dataset.predictedY),
-    z: Number(document.body.dataset.predictedZ),
-  }));
+  await page.waitForFunction(() => Number(document.body.dataset.serverTick) >= 6);
   if (scenario === "dynamic-push") {
     const cubeHalfX = Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.x)));
     const samples = page.evaluate(
@@ -219,19 +251,6 @@ try {
       ).__gurgurSmokePad.buttons[7]!.pressed = false;
     });
   } else if (scenario === "touch") {
-    const groundedY = Number(await page.evaluate(() => document.body.dataset.predictedY));
-    await page.dispatchEvent('[data-touch-action="jump"]', "pointerdown", {
-      pointerType: "touch",
-      pointerId: 41,
-    });
-    await page.dispatchEvent('[data-touch-action="jump"]', "pointerup", {
-      pointerType: "touch",
-      pointerId: 41,
-    });
-    await page.waitForFunction(
-      (y) => Number(document.body.dataset.predictedY) > y + 0.08,
-      groundedY,
-    );
     const before = await page.evaluate(() => ({
       x: Number(document.body.dataset.predictedX),
       z: Number(document.body.dataset.predictedZ),
@@ -298,6 +317,11 @@ try {
       groundedY,
     );
   } else {
+    await waitForStablePlayerHeight();
+    const movementStart = await page.evaluate(() => ({
+      x: Number(document.body.dataset.predictedX),
+      z: Number(document.body.dataset.predictedZ),
+    }));
     const cadence = page.evaluate(
       () =>
         new Promise<Array<{ x: number; z: number }>>((resolve) => {
@@ -324,7 +348,7 @@ try {
           Number(document.body.dataset.predictedX) - x,
           Number(document.body.dataset.predictedZ) - z,
         ) > 0.5,
-      start,
+      movementStart,
     );
     const deltas = renderedSamples
       .slice(1)
@@ -346,15 +370,17 @@ try {
         z: Number(document.body.dataset.playerZ),
       }));
       if (
-        Math.hypot(authorityDuringPrediction.x - start.x, authorityDuringPrediction.z - start.z) >
-        0.15
+        Math.hypot(
+          authorityDuringPrediction.x - movementStart.x,
+          authorityDuringPrediction.z - movementStart.z,
+        ) > 0.15
       ) {
         throw new Error(
           "authoritative movement arrived before the shaped-latency prediction check",
         );
       }
     }
-    const groundedY = Number(await page.evaluate(() => document.body.dataset.predictedY));
+    const groundedY = await waitForStablePlayerHeight();
     await page.keyboard.press("Space");
     await page.waitForFunction(
       (y) => Number(document.body.dataset.predictedY) > y + 0.08,
@@ -371,8 +397,8 @@ try {
     }
   }
   const result = await page.evaluate(() => ({
-    status: document.querySelector("#connection")?.textContent,
-    tick: Number(document.querySelector("#tick")?.textContent),
+    status: document.body.dataset.connection,
+    tick: Number(document.body.dataset.serverTick),
     canvasWidth: document.querySelector("canvas")?.width,
     canvasHeight: document.querySelector("canvas")?.height,
     player: {

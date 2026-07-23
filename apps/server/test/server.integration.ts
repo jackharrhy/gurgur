@@ -25,6 +25,11 @@ describe("authoritative server", () => {
     try {
       expect(await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).text()).toBe("ok");
       expect(await (await fetch(`http://127.0.0.1:${server.port}/readyz`)).text()).toBe("ready");
+      const playerBillboard = await fetch(`http://127.0.0.1:${server.port}/player-billboard.png`);
+      expect(playerBillboard.headers.get("content-type")).toBe("image/png");
+      expect(new Uint8Array(await playerBillboard.arrayBuffer()).slice(0, 8)).toEqual(
+        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+      );
       expect(
         (await fetch(`http://127.0.0.1:${server.port}/some/client/route`)).headers.get(
           "content-type",
@@ -77,13 +82,30 @@ describe("authoritative server", () => {
       expect(welcome.playerId.index).toBeGreaterThan(0x7fff_ffff);
       expect(world.type).toBe("world");
       expect(world.bundleUrl).toBe(`/world.bin?revision=${encodeURIComponent(world.mapRevision)}`);
-      expect(bundle.brushes.length).toBe(32);
-      expect(world.runtimeEntities.length).toBe(11);
+      expect(bundle.staticCollision.triangles.length).toBeGreaterThan(0);
+      const authoredRuntimeCount = bundle.entities.filter((entity) =>
+        ["func_physics", "func_door", "func_platform", "func_button"].includes(entity.classname),
+      ).length;
+      expect(world.runtimeEntities).toHaveLength(authoredRuntimeCount + 1);
       expect(world.runtimeEntities.some((entity) => entity.classname === "player")).toBe(true);
       expect(initial.serverTick).toBeLessThan(advanced.serverTick);
-      expect(initial.bodies[0]?.position.y).toBeGreaterThan(
-        advanced.bodies[0]?.position.y ?? Infinity,
-      );
+      expect(
+        advanced.bodies.some((body) => {
+          const before = initial.bodies.find(
+            (candidate) =>
+              candidate.id.index === body.id.index &&
+              candidate.id.generation === body.id.generation,
+          );
+          return (
+            before !== undefined &&
+            Math.hypot(
+              body.position.x - before.position.x,
+              body.position.y - before.position.y,
+              body.position.z - before.position.z,
+            ) > 1e-6
+          );
+        }),
+      ).toBe(true);
       const metrics = (await (
         await fetch(`http://127.0.0.1:${server.port}/metrics`)
       ).json()) as ReturnType<typeof server.metrics>;
@@ -291,116 +313,6 @@ describe("authoritative server", () => {
       expect(snapshot.worldEpoch).toBe(client.welcome.worldEpoch + 1);
       client.socket.close();
     } finally {
-      server.stop();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  test("builds a symmetric six-peer voice graph and revokes blocked signaling", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "gurgur-voice-"));
-    const server = await createGurgurServer({
-      port: 0,
-      hostname: "127.0.0.1",
-      databasePath: join(directory, "world.sqlite"),
-      voiceRelayOnly: true,
-      voiceIceServers: [{ urls: "turn:relay.test", username: "user", credential: "secret" }],
-    });
-    const connections: Awaited<ReturnType<typeof connectClient>>[] = [];
-    try {
-      const url = `ws://127.0.0.1:${server.port}/game`;
-      for (let index = 0; index < 8; index += 1) connections.push(await connectClient(url));
-      expect(connections[0]!.welcome.voiceConfig).toEqual({
-        iceTransportPolicy: "relay",
-        iceServers: [{ urls: "turn:relay.test", username: "user", credential: "secret" }],
-      });
-      for (const connection of connections) {
-        const acknowledged = waitForJson(connection.socket, "voice-peers");
-        connection.socket.send(
-          JSON.stringify({
-            type: "voice-ready",
-            protocolVersion: PROTOCOL_VERSION,
-            worldEpoch: connection.welcome.worldEpoch,
-            enabled: true,
-          }),
-        );
-        await acknowledged;
-      }
-      const peerUpdates = connections.map((connection) =>
-        waitForJson(
-          connection.socket,
-          "voice-peers",
-          (message) => Array.isArray(message.peers) && message.peers.length >= 1,
-        ),
-      );
-      connections[0]!.socket.send(
-        JSON.stringify({
-          type: "voice-ready",
-          protocolVersion: PROTOCOL_VERSION,
-          worldEpoch: connections[0]!.welcome.worldEpoch,
-          enabled: true,
-        }),
-      );
-      const graphs = await Promise.all(peerUpdates);
-      expect(graphs.every((graph) => graph.peers.length <= 6)).toBe(true);
-      for (let index = 0; index < connections.length; index += 1) {
-        for (const peer of graphs[index]!.peers) {
-          const reciprocal = graphs.find(
-            (_, candidate) => connections[candidate]!.welcome.peerId === peer.peerId,
-          )!;
-          expect(
-            reciprocal.peers.some(
-              (candidate: { peerId: string }) =>
-                candidate.peerId === connections[index]!.welcome.peerId,
-            ),
-          ).toBe(true);
-        }
-      }
-
-      const firstPeerId = graphs[0]!.peers[0]!.peerId as string;
-      const secondIndex = connections.findIndex(
-        (connection) => connection.welcome.peerId === firstPeerId,
-      );
-      const forwarded = waitForJson(
-        connections[secondIndex]!.socket,
-        "voice-signal",
-        (message) => message.fromPeerId === connections[0]!.welcome.peerId,
-      );
-      connections[0]!.socket.send(
-        JSON.stringify({
-          type: "voice-signal",
-          protocolVersion: PROTOCOL_VERSION,
-          worldEpoch: connections[0]!.welcome.worldEpoch,
-          toPeerId: firstPeerId,
-          signal: { candidate: { candidate: "candidate:test" } },
-        }),
-      );
-      expect((await forwarded).signal.candidate.candidate).toBe("candidate:test");
-
-      const revokedA = waitForJson(
-        connections[0]!.socket,
-        "voice-peers",
-        (message) => !message.peers.some((peer: { peerId: string }) => peer.peerId === firstPeerId),
-      );
-      const revokedB = waitForJson(
-        connections[secondIndex]!.socket,
-        "voice-peers",
-        (message) =>
-          !message.peers.some(
-            (peer: { peerId: string }) => peer.peerId === connections[0]!.welcome.peerId,
-          ),
-      );
-      connections[secondIndex]!.socket.send(
-        JSON.stringify({
-          type: "voice-block",
-          protocolVersion: PROTOCOL_VERSION,
-          worldEpoch: connections[secondIndex]!.welcome.worldEpoch,
-          peerId: connections[0]!.welcome.peerId,
-          blocked: true,
-        }),
-      );
-      await Promise.all([revokedA, revokedB]);
-    } finally {
-      for (const connection of connections) connection.socket.close();
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }

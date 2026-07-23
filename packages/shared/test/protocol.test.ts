@@ -10,7 +10,7 @@ import {
 } from "../src";
 
 describe("snapshot codec", () => {
-  test("round-trips a versioned body snapshot", () => {
+  test("round-trips a v1 body snapshot", () => {
     const snapshot = {
       worldEpoch: 4,
       serverTick: 120,

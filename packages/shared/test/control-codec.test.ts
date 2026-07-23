@@ -13,29 +13,6 @@ describe("bounded client control union", () => {
         socketGeneration: 0,
       },
       { type: "ping", protocolVersion: PROTOCOL_VERSION, worldEpoch: 1, nonce: 2, sentAtMs: 3.5 },
-      { type: "voice-ready", protocolVersion: PROTOCOL_VERSION, worldEpoch: 1, enabled: true },
-      {
-        type: "voice-block",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        peerId: "peer",
-        blocked: true,
-      },
-      {
-        type: "voice-signal",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        toPeerId: "peer",
-        signal: {
-          description: { type: "offer", sdp: "v=0" },
-          candidate: {
-            candidate: "candidate:test",
-            sdpMid: null,
-            sdpMLineIndex: 0,
-            usernameFragment: null,
-          },
-        },
-      },
     ];
     for (const message of messages) {
       expect(JSON.stringify(decodeClientControl(JSON.stringify(message)))).toBe(
@@ -67,20 +44,7 @@ describe("bounded client control union", () => {
         nonce: 0,
         sentAtMs: null,
       }),
-      JSON.stringify({
-        type: "voice-ready",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        enabled: true,
-        surprise: 1,
-      }),
-      JSON.stringify({
-        type: "voice-signal",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        toPeerId: "peer",
-        signal: {},
-      }),
+      JSON.stringify({ type: "not-supported", protocolVersion: PROTOCOL_VERSION }),
       "x".repeat(32_769),
     ];
     let state = 0x6d2b79f5;
@@ -111,11 +75,6 @@ describe("bounded server control union", () => {
         snapshotHz: 20,
         sessionToken: "0123456789abcdef",
         socketGeneration: 0,
-        peerId: "peer",
-        voiceConfig: {
-          iceServers: [{ urls: ["stun:test"], username: "u", credential: "c" }],
-          iceTransportPolicy: "all",
-        },
       },
       {
         type: "world",
@@ -142,21 +101,6 @@ describe("bounded server control union", () => {
         sentAtMs: 3.5,
         serverTick: 4,
       },
-      {
-        type: "voice-peers",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        peers: [{ peerId: "peer", distance: 2, relative: { x: 1, y: 0, z: -1 }, polite: true }],
-      },
-      {
-        type: "voice-signal",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        fromPeerId: "peer",
-        signal: {
-          description: { type: "answer", sdp: "v=0" },
-        },
-      },
     ];
     for (const message of messages) {
       expect(JSON.stringify(decodeServerControl(JSON.stringify(message)))).toBe(
@@ -181,12 +125,7 @@ describe("bounded server control union", () => {
           { id: { index: -1, generation: 0 }, authoredId: "bad", classname: "player" },
         ],
       }),
-      JSON.stringify({
-        type: "voice-peers",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        peers: [{ peerId: "p", distance: -1, relative: { x: 0, y: 0, z: 0 }, polite: true }],
-      }),
+      JSON.stringify({ type: "not-supported", protocolVersion: PROTOCOL_VERSION }),
       JSON.stringify({
         type: "pong",
         protocolVersion: PROTOCOL_VERSION,

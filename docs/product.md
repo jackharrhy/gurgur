@@ -13,18 +13,19 @@ authenticated administrator can reset the entire world to its authored state.
 
 - One continuously running world, not matches, rooms, or server zones.
 - The server owns players, bodies, constraints, mechanisms, persistence, and reset.
-- The client owns input sampling, prediction, rendering, audio, and interface.
+- The client owns input sampling, prediction, and rendering.
 - TrenchBroom Valve 220 maps are the primary level-authoring format.
 - Authored defaults and persisted runtime state remain distinct.
 - A reset is global, explicit, authenticated, and visible to every client.
-- Proximity voice is optional for each player and never affects gameplay state.
+- The play view is the world canvas alone, with no HUD, reticle, or visible cursor.
+- Realtime voice is outside the current product scope.
 
 ## Scope boundaries
 
 Gurgur does not use Redis, microservices, distributed simulation, matchmaking,
 public user-generated content hosting, arbitrary mapper scripting, procedural
-worlds, or account systems beyond the identity required for administration,
-reconnect, blocking, and voice.
+worlds, realtime voice, or account systems beyond the identity required for
+administration and reconnect.
 
 Puzzle completion is not durable state. Physical and mechanism state can persist,
 but the authored world is always the reset baseline.

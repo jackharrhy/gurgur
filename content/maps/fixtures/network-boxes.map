@@ -1,3 +1,5 @@
+// Game: Gurgur
+// Format: Valve
 // Minimal authoritative/prediction regression world: one push cube and a two-cube stack.
 {
 "classname" "worldspawn"

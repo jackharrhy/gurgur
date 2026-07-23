@@ -31,6 +31,7 @@ if (!workerResult.success) {
 
 await mkdir("dist/apps/server/src", { recursive: true });
 await mkdir("dist/content/generated", { recursive: true });
+await mkdir("dist/content/generated/player-billboard", { recursive: true });
 await Bun.write(
   "dist/apps/server/src/box3d.wasm",
   Bun.file("node_modules/box3d.js/dist/box3d.wasm"),
@@ -38,5 +39,9 @@ await Bun.write(
 await Bun.write(
   "dist/content/generated/systems-garden.bin",
   Bun.file("content/generated/systems-garden.bin"),
+);
+await Bun.write(
+  "dist/content/generated/player-billboard/player-billboard.png",
+  Bun.file("content/generated/player-billboard/player-billboard.png"),
 );
 console.log(`built ${result.outputs.length + workerResult.outputs.length} files plus box3d.wasm`);

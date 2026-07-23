@@ -7,7 +7,7 @@ status, implementation order, or competing designs.
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Game purpose, player experience, scope                           | [`product.md`](product.md)           |
 | Runtime topology, state ownership, identity, persistence         | [`architecture.md`](architecture.md) |
-| Input, replication, prediction, WebSocket, voice                 | [`networking.md`](networking.md)     |
+| Input, replication, prediction, WebSocket                        | [`networking.md`](networking.md)     |
 | Box3D adapter, stepping, collision, player controller            | [`physics.md`](physics.md)           |
 | Valve 220 parsing, geometry, bundles, entity schema              | [`maps.md`](maps.md)                 |
 | Vanilla browser shell, Three.js, and single-container deployment | [`web.md`](web.md)                   |
