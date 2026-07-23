@@ -4,7 +4,7 @@ type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }
   | { type: "world"; message: WorldMessage }
   | { type: "input"; command: InputCommand }
-  | { type: "snapshot"; snapshot: Snapshot };
+  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean };
 
 type WorkerResponse =
   | {
@@ -19,7 +19,7 @@ export type PredictionClient = {
   setLocalPlayer(id: RuntimeId): void;
   setWorld(message: WorldMessage): Promise<void>;
   pushInput(command: InputCommand): void;
-  reconcile(snapshot: Snapshot): void;
+  reconcile(snapshot: Snapshot, reconcilePlayer?: boolean): void;
   dispose(): void;
 };
 
@@ -65,7 +65,8 @@ export function createPredictionClient(
     setLocalPlayer: (id) => post({ type: "local-player", id }),
     setWorld,
     pushInput: (command) => post({ type: "input", command }),
-    reconcile: (snapshot) => post({ type: "snapshot", snapshot }),
+    reconcile: (snapshot, reconcilePlayer = true) =>
+      post({ type: "snapshot", snapshot, reconcilePlayer }),
     dispose,
   };
 }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PHYSICS_DT, PHYSICS_SUBSTEPS } from "@gurgur/shared";
 import {
   PLAYER_HALF_HEIGHT,
+  PLAYER_MAX_FIXED_TICK_DISPLACEMENT,
   PhysicsWorld,
   stepPlayerController,
   type PlayerControllerState,
@@ -103,6 +104,41 @@ describe("PhysicsWorld", () => {
     } finally {
       world.dispose();
     }
+  });
+
+  test("rejects an implausible fixed-tick mover result", () => {
+    const state = playerState();
+    const result = stepPlayerController(
+      {
+        applyLinearImpulse: () => false,
+        capsuleFits: () => true,
+        castCapsule: (start, desired) => ({
+          x: start.x + desired.x,
+          y: start.y + desired.y,
+          z: start.z + desired.z,
+        }),
+        moveCapsule: () => ({
+          x: state.position.x + PLAYER_MAX_FIXED_TICK_DISPLACEMENT + 100,
+          y: state.position.y,
+          z: state.position.z,
+        }),
+        pointVelocity: () => ({ x: 0, y: 0, z: 0 }),
+        raycastClosest: () => null,
+      },
+      state,
+      {
+        moveX: 1,
+        moveZ: 0,
+        lookYaw: 1.25,
+        jumpCounter: 7,
+      },
+      PHYSICS_DT,
+    );
+
+    expect(result.position).toEqual(state.position);
+    expect(result.verticalVelocity).toBe(0);
+    expect(result.yaw).toBe(1.25);
+    expect(result.lastJumpCounter).toBe(7);
   });
 
   test("steps onto a 0.28 metre obstacle and jumps only on a counter edge", async () => {
@@ -487,6 +523,42 @@ describe("PhysicsWorld", () => {
       );
       const exited = world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       expect(exited.sensorEnd).toContainEqual({ sensor, visitor: player });
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("drops stale Box3D events after a contacted body is destroyed", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      const ground = world.createBox({
+        type: "static",
+        position: { x: 0, y: -0.5, z: 0 },
+        halfExtents: { x: 5, y: 0.5, z: 5 },
+      });
+      const body = world.createBox({
+        type: "dynamic",
+        position: { x: 0, y: 0.5, z: 0 },
+        halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+      });
+      const entered = world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(
+        entered.contactBegin.some(
+          ({ a, b }) =>
+            [keyId(a), keyId(b)].includes(keyId(ground)) &&
+            [keyId(a), keyId(b)].includes(keyId(body)),
+        ),
+      ).toBe(true);
+
+      expect(world.destroy(body)).toBe(true);
+      const afterDestroy = world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      const emittedIds = [
+        ...afterDestroy.contactBegin.flatMap(({ a, b }) => [a, b]),
+        ...afterDestroy.contactEnd.flatMap(({ a, b }) => [a, b]),
+        ...afterDestroy.contactHit.flatMap(({ a, b }) => [a, b]),
+        ...afterDestroy.moved.map(({ body: movedBody }) => movedBody),
+      ];
+      expect(emittedIds.map(keyId)).not.toContain(keyId(body));
     } finally {
       world.dispose();
     }

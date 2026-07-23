@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@gurgur/shared": "workspace:*"
+    "@gurgur/shared": "workspace:*",
+    "werift": "0.23.0"
   },
   "scripts": {
     "check": "bun test",

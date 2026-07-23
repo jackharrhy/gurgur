@@ -1,6 +1,6 @@
 # 0010: Budget remote state separately from local prediction
 
-Status: accepted on 2026-07-22.
+Status: superseded by 0012 and 0013 on 2026-07-23.
 
 Keep local prediction inputs and the five-metre dynamic-contact region on every
 20 Hz snapshot packet. Stagger unrelated dirty moving bodies across alternate

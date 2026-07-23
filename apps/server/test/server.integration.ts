@@ -2,12 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RTCPeerConnection, type RTCDataChannel } from "werift";
 import {
   PROTOCOL_VERSION,
   SNAPSHOT_TAG,
+  STATE_DATAGRAM_TARGET_BYTES,
+  STATE_MAX_RETRANSMITS,
   decodeSnapshot,
   decodeWorldBundle,
   encodeInput,
+  encodeSnapshot,
   type Snapshot,
   type WelcomeMessage,
   type WorldManifestMessage,
@@ -51,49 +55,19 @@ describe("authoritative server", () => {
           "content-type",
         ),
       ).toContain("text/html");
-      const socket = new WebSocket(`ws://127.0.0.1:${server.port}/game`);
-      socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", () =>
-        socket.send(
-          JSON.stringify({
-            type: "hello",
-            protocolVersion: PROTOCOL_VERSION,
-            mapRevision: null,
-            worldEpoch: null,
-            sessionToken: null,
-            socketGeneration: 0,
-          }),
-        ),
+      const client = await connectClient(`ws://127.0.0.1:${server.port}/game`);
+      expect(client.stateChannel.maxRetransmits).toBe(STATE_MAX_RETRANSMITS);
+      const advanced = await waitForSnapshot(
+        client.stateChannel,
+        (snapshot) => snapshot.serverTick > client.snapshot.serverTick,
       );
-      const messages = await new Promise<Array<WelcomeMessage | WorldManifestMessage | Snapshot>>(
-        (resolve, reject) => {
-          const received: Array<WelcomeMessage | WorldManifestMessage | Snapshot> = [];
-          const timeout = setTimeout(
-            () => reject(new Error("timed out waiting for snapshots")),
-            3_000,
-          );
-          socket.addEventListener("message", (event) => {
-            received.push(
-              typeof event.data === "string"
-                ? (JSON.parse(event.data) as WelcomeMessage)
-                : decodeSnapshot(event.data as ArrayBuffer),
-            );
-            if (received.length >= 4) {
-              clearTimeout(timeout);
-              resolve(received);
-            }
-          });
-          socket.addEventListener("error", () => reject(new Error("websocket failed")));
-        },
-      );
-      socket.close();
-      const welcome = messages[0] as WelcomeMessage;
-      const world = messages[1] as WorldManifestMessage;
+      client.socket.close();
+      const welcome = client.welcome;
+      const world = client.world;
       const bundle = decodeWorldBundle(
         await (await fetch(`http://127.0.0.1:${server.port}${world.bundleUrl}`)).arrayBuffer(),
       );
-      const initial = messages[2] as Snapshot;
-      const advanced = messages[3] as Snapshot;
+      const initial = client.snapshot;
       expect(welcome.type).toBe("welcome");
       expect(welcome.playerId.index).toBeGreaterThan(0x7fff_ffff);
       expect(world.type).toBe("world");
@@ -128,6 +102,7 @@ describe("authoritative server", () => {
       expect(metrics.serverTick).toBeGreaterThan(0);
       expect(metrics.tickP99Ms).toBeGreaterThanOrEqual(0);
       expect(metrics.queuedBytes).toBeGreaterThanOrEqual(0);
+      expect(metrics.stateTransportClients).toBeGreaterThanOrEqual(0);
     } finally {
       server.stop();
       await rm(directory, { recursive: true, force: true });
@@ -140,6 +115,7 @@ describe("authoritative server", () => {
       port: 0,
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
+      extraDynamicBodies: 122,
     });
     const sockets: WebSocket[] = [];
     try {
@@ -159,6 +135,12 @@ describe("authoritative server", () => {
         connections.at(-1)!.world.runtimeEntities.filter((entity) => entity.classname === "player")
           .length,
       ).toBe(16);
+      const newest = connections.at(-1)!;
+      const state = await waitForSnapshot(
+        newest.stateChannel,
+        (snapshot) => snapshot.serverTick > newest.snapshot.serverTick,
+      );
+      expect(encodeSnapshot(state).byteLength).toBeLessThanOrEqual(STATE_DATAGRAM_TARGET_BYTES);
     } finally {
       for (const socket of sockets) socket.close();
       server.stop();
@@ -219,32 +201,38 @@ describe("authoritative server", () => {
   test("resumes the same private session position across a complete server process lifecycle", async () => {
     const directory = await mkdtemp(join(tmpdir(), "gurgur-process-resume-"));
     const databasePath = join(directory, "world.sqlite");
-    let firstServer = await createGurgurServer({ port: 0, hostname: "127.0.0.1", databasePath });
+    let firstServer = await createGurgurServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      databasePath,
+    });
     let first: Awaited<ReturnType<typeof connectClient>> | null = null;
     try {
       first = await connectClient(`ws://127.0.0.1:${firstServer.port}/game`);
       const movedSnapshot = waitForSnapshot(
-        first.socket,
+        first.stateChannel,
         (snapshot) => snapshot.serverTick >= first!.snapshot.serverTick + 12,
       );
       for (let sequence = 0; sequence < 20; sequence += 1)
-        first.socket.send(
-          encodeInput({
-            type: "input",
-            protocolVersion: PROTOCOL_VERSION,
-            worldEpoch: first.welcome.worldEpoch,
-            sequence,
-            clientTick: sequence,
-            moveX: 1,
-            moveZ: 0,
-            lookYaw: 0,
-            lookPitch: 0,
-            buttons: 0,
-            jumpCounter: 0,
-            interactCounter: 0,
-            primaryCounter: 0,
-            interactTarget: null,
-          }),
+        first.inputChannel.send(
+          Buffer.from(
+            encodeInput({
+              type: "input",
+              protocolVersion: PROTOCOL_VERSION,
+              worldEpoch: first.welcome.worldEpoch,
+              sequence,
+              clientTick: sequence,
+              moveX: 1,
+              moveZ: 0,
+              lookYaw: 0,
+              lookPitch: 0,
+              buttons: 0,
+              jumpCounter: 0,
+              interactCounter: 0,
+              primaryCounter: 0,
+              interactTarget: null,
+            }),
+          ),
         );
       const moved = await movedSnapshot;
       const movedPlayer = moved.players.find(
@@ -309,7 +297,7 @@ describe("authoritative server", () => {
         (message) => message.worldEpoch === client.welcome.worldEpoch + 1,
       );
       const resetSnapshot = waitForSnapshot(
-        client.socket,
+        client.stateChannel,
         (snapshot) => snapshot.worldEpoch === client.welcome.worldEpoch + 1,
       );
       const response = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
@@ -343,6 +331,9 @@ function connectClient(
   worldEpoch: number | null = null,
 ): Promise<{
   socket: WebSocket;
+  peer: RTCPeerConnection;
+  inputChannel: RTCDataChannel;
+  stateChannel: RTCDataChannel;
   welcome: WelcomeMessage;
   world: WorldManifestMessage;
   snapshot: Snapshot;
@@ -350,15 +341,67 @@ function connectClient(
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
+    const peer = new RTCPeerConnection({
+      iceAdditionalHostAddresses: ["127.0.0.1"],
+    });
+    const inputChannel = peer.createDataChannel("gurgur-input-v2", {
+      ordered: false,
+      maxRetransmits: 0,
+    });
+    let stateChannel: RTCDataChannel | null = null;
     let welcome: WelcomeMessage | null = null;
     let world: WorldManifestMessage | null = null;
     let snapshot: Snapshot | null = null;
+    let stateReady = false;
+    let offerStarted = false;
     const done = (): void => {
-      if (!welcome || !world || !snapshot) return;
+      if (!welcome || !world || !snapshot || !stateReady || !stateChannel) return;
       clearTimeout(timeout);
-      resolve({ socket, welcome, world, snapshot });
+      resolve({
+        socket,
+        peer,
+        inputChannel,
+        stateChannel,
+        welcome,
+        world,
+        snapshot,
+      });
     };
-    const timeout = setTimeout(() => reject(new Error("timed out connecting test client")), 3_000);
+    const timeout = setTimeout(() => reject(new Error("timed out connecting test client")), 5_000);
+    peer.onDataChannel.subscribe((channel) => {
+      if (channel.label !== "gurgur-state-v2" || stateChannel) {
+        channel.close();
+        return;
+      }
+      stateChannel = channel;
+      channel.stateChanged.subscribe((state) => {
+        if (state !== "open") return;
+        stateReady = true;
+        done();
+      });
+      if (channel.readyState === "open") {
+        stateReady = true;
+        done();
+      }
+    });
+    const startOffer = async (): Promise<void> => {
+      if (!welcome || offerStarted) return;
+      offerStarted = true;
+      try {
+        await peer.setLocalDescription(await peer.createOffer());
+        if (!peer.localDescription?.sdp) throw new Error("test RTC offer has no SDP");
+        socket.send(
+          JSON.stringify({
+            type: "rtc-offer",
+            protocolVersion: PROTOCOL_VERSION,
+            worldEpoch: welcome.worldEpoch,
+            description: { type: "offer", sdp: peer.localDescription.sdp },
+          }),
+        );
+      } catch (error) {
+        reject(error);
+      }
+    };
     socket.addEventListener("open", () =>
       socket.send(
         JSON.stringify({
@@ -378,9 +421,15 @@ function connectClient(
         done();
         return;
       }
-      const message = JSON.parse(event.data) as WelcomeMessage | WorldManifestMessage;
+      const message = JSON.parse(event.data) as
+        | WelcomeMessage
+        | WorldManifestMessage
+        | { type: "rtc-answer"; description: { type: "answer"; sdp: string } };
       if (message.type === "welcome") welcome = message;
       if (message.type === "world") world = message;
+      if (message.type === "rtc-answer")
+        void peer.setRemoteDescription(message.description).catch(reject);
+      void startOffer();
       done();
     });
     socket.addEventListener("error", () => reject(new Error("test client websocket failed")));
@@ -388,24 +437,22 @@ function connectClient(
 }
 
 function waitForSnapshot(
-  socket: WebSocket,
+  channel: RTCDataChannel,
   predicate: (snapshot: Snapshot) => boolean,
 ): Promise<Snapshot> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      socket.removeEventListener("message", listener);
+      subscription.unSubscribe();
       reject(new Error("timed out waiting for snapshot"));
     }, 3_000);
-    const listener = (event: MessageEvent): void => {
-      if (typeof event.data === "string") return;
-      if (new Uint8Array(event.data as ArrayBuffer)[0] !== SNAPSHOT_TAG) return;
-      const snapshot = decodeSnapshot(event.data as ArrayBuffer);
+    const subscription = channel.onMessage.subscribe((packet) => {
+      if (typeof packet === "string" || packet[0] !== SNAPSHOT_TAG) return;
+      const snapshot = decodeSnapshot(Uint8Array.from(packet).buffer);
       if (!predicate(snapshot)) return;
       clearTimeout(timeout);
-      socket.removeEventListener("message", listener);
+      subscription.unSubscribe();
       resolve(snapshot);
-    };
-    socket.addEventListener("message", listener);
+    });
   });
 }
 

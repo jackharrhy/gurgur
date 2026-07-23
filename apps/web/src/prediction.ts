@@ -1,7 +1,11 @@
 import {
+  FULL_RATE_BODY_RADIUS_METRES,
   PHYSICS_DT,
   PHYSICS_SUBSTEPS,
-  LOCAL_PHYSICS_RADIUS_METRES,
+  SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_FLAG_TELEPORT,
+  STATE_ALWAYS_NEAR_BODY_SLOTS,
+  STATE_EXTRAPOLATION_MAX_TICKS,
   type BodySnapshot,
   type InputCommand,
   type PlayerStateSnapshot,
@@ -14,26 +18,37 @@ import {
 import {
   PhysicsWorld,
   PLAYER_CROUCHED_HALF_SEGMENT,
+  PLAYER_GRAVITY,
+  PLAYER_MAX_FIXED_TICK_DISPLACEMENT,
+  PLAYER_SPEED,
   stepPlayerController,
-  type BodyKind,
   type PlayerControllerState,
 } from "@gurgur/physics";
 
 const MAX_INPUT_HISTORY = 120;
+const PREDICTION_STALL_RESET_TICKS = 30;
+const PREDICTION_DIVERGENCE_BUFFER_METRES = 2;
 const SNAP_CORRECTION_METRES = 0.25;
 const CORRECTION_SECONDS = 0.1;
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
-type PredictedFrame = { command: InputCommand; state: PlayerControllerState | null };
+type PredictedFrame = {
+  command: InputCommand;
+  state: PlayerControllerState | null;
+};
 type CollisionProxy = {
   handle: RuntimeId;
   networkId: RuntimeId;
-  bodyKind: BodyKind;
-  locallySimulated: boolean;
+  contactPresentation: boolean;
   position: Vec3;
   rotation: Quat;
   linearVelocity: Vec3;
   angularVelocity: Vec3;
+  extrapolationTicksRemaining: number;
+  freshnessTicksRemaining: number;
+  authorityTick: number;
+  collisionEnabled: boolean;
+  holdWhenStale: boolean;
 };
 
 export class PlayerPredictor {
@@ -48,6 +63,8 @@ export class PlayerPredictor {
   #lastReconciliationError = 0;
   #pendingAuthority: Snapshot | null = null;
   #worldEpoch: number | null = null;
+  #latestAuthorityTick: number | null = null;
+  #lastAuthorityPosition: Vec3 | null = null;
   #mapRevision: string | null = null;
   #loadGeneration = 0;
   #collisionProxies = new Map<string, CollisionProxy>();
@@ -67,6 +84,8 @@ export class PlayerPredictor {
     this.#localPlayer = id;
     this.#state = null;
     this.#history = [];
+    this.#latestAuthorityTick = null;
+    this.#lastAuthorityPosition = null;
     this.#correction = zero();
     this.#correctionSecondsRemaining = 0;
     this.#onPresentation(null, []);
@@ -89,6 +108,8 @@ export class PlayerPredictor {
     this.#mapRevision = message.bundle.mapRevision;
     this.#state = null;
     this.#history = [];
+    this.#latestAuthorityTick = null;
+    this.#lastAuthorityPosition = null;
     this.#correction = zero();
     this.#correctionSecondsRemaining = 0;
     this.#pendingAuthority = null;
@@ -111,7 +132,7 @@ export class PlayerPredictor {
       const brush = message.bundle.brushes[runtime.brushIndex];
       if (!brush) throw new Error(`runtime brush ${runtime.brushIndex} does not exist`);
       const rotation = identityRotation();
-      const bodyKind: BodyKind =
+      const bodyKind =
         runtime.classname === "func_physics"
           ? "dynamic"
           : runtime.classname === "func_button"
@@ -152,12 +173,16 @@ export class PlayerPredictor {
                 ...material,
               }),
         networkId: { ...runtime.id },
-        bodyKind,
-        locallySimulated: false,
+        contactPresentation: runtime.classname === "func_physics",
         position: { ...brush.center },
         rotation,
         linearVelocity: zero(),
         angularVelocity: zero(),
+        extrapolationTicksRemaining: 0,
+        freshnessTicksRemaining: 0,
+        authorityTick: -1,
+        collisionEnabled: true,
+        holdWhenStale: false,
       });
     }
     physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
@@ -179,8 +204,26 @@ export class PlayerPredictor {
     this.#history.push(frame);
     if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
     if (!this.#physics || !this.#state) return;
-    this.#updateLocalPhysicsScope();
-    this.#state = stepPlayerController(this.#physics, this.#state, command, PHYSICS_DT);
+    const previous = this.#state;
+    const predicted = stepPlayerController(this.#physics, previous, command, PHYSICS_DT);
+    if (
+      !plausiblePredictionStep(previous, predicted) ||
+      !plausibleFromAuthority(this.#lastAuthorityPosition, predicted, this.#history.length)
+    ) {
+      this.#history = [];
+      this.#state = {
+        ...previous,
+        yaw: command.lookYaw,
+        lastJumpCounter: command.jumpCounter,
+      };
+      this.#correction = zero();
+      this.#correctionSecondsRemaining = 0;
+      this.#freezeCollisionProxies();
+      this.#updatePlayerProxy();
+      this.#emit();
+      return;
+    }
+    this.#state = predicted;
     this.#updatePlayerProxy();
     this.#stepPhysics();
     frame.state = cloneState(this.#state);
@@ -188,34 +231,77 @@ export class PlayerPredictor {
     this.#emit();
   }
 
-  reconcile(snapshot: Snapshot): void {
+  reconcile(snapshot: Snapshot, reconcilePlayer = true): void {
     if (!this.#physics || !this.#localPlayer) {
       this.#pendingAuthority = snapshot;
       return;
     }
     if (snapshot.worldEpoch !== this.#worldEpoch) return;
+    if (!reconcilePlayer) {
+      this.#synchronizeCollisionProxies(snapshot);
+      return;
+    }
+    if (this.#latestAuthorityTick !== null && snapshot.serverTick <= this.#latestAuthorityTick) {
+      this.#synchronizeCollisionProxies(snapshot);
+      return;
+    }
     const authority = snapshot.players.find(
       (player) => idKey(player.id) === idKey(this.#localPlayer!),
     );
     if (!authority) return;
+    const teleportMarked =
+      ((snapshot.bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!))?.flags ?? 0) &
+        SNAPSHOT_FLAG_TELEPORT) !==
+      0;
+    const teleported =
+      teleportMarked &&
+      (!this.#lastAuthorityPosition ||
+        length(subtract(authority.position, this.#lastAuthorityPosition)) >= 2);
 
     const before = this.#state ? { ...this.#state.position } : null;
+    const stalled =
+      this.#latestAuthorityTick !== null &&
+      snapshot.serverTick - this.#latestAuthorityTick > PREDICTION_STALL_RESET_TICKS;
+    this.#latestAuthorityTick = Math.max(
+      this.#latestAuthorityTick ?? snapshot.serverTick,
+      snapshot.serverTick,
+    );
+    this.#lastAuthorityPosition = { ...authority.position };
+    if (stalled || teleported) this.#freezeCollisionProxies();
     this.#synchronizeCollisionProxies(snapshot);
     this.#history = this.#history.filter(
       (frame) => frame.command.sequence > authority.lastProcessedInputSequence,
     );
     this.#state = controllerState(authority);
     this.#updatePlayerProxy();
-    this.#updateLocalPhysicsScope();
-    for (const frame of this.#history) {
-      this.#updateLocalPhysicsScope();
-      this.#state = stepPlayerController(this.#physics, this.#state, frame.command, PHYSICS_DT);
-      this.#updatePlayerProxy();
-      this.#stepPhysics();
-      frame.state = cloneState(this.#state);
+    if (stalled || teleported) {
+      this.#history = [];
+    } else {
+      for (const frame of this.#history) {
+        const predicted = stepPlayerController(
+          this.#physics,
+          this.#state,
+          frame.command,
+          PHYSICS_DT,
+        );
+        if (
+          !plausiblePredictionStep(this.#state, predicted) ||
+          !plausibleFromAuthority(authority.position, predicted, this.#history.length)
+        ) {
+          this.#history = [];
+          this.#state = controllerState(authority);
+          this.#freezeCollisionProxies();
+          this.#updatePlayerProxy();
+          break;
+        }
+        this.#state = predicted;
+        this.#updatePlayerProxy();
+        this.#stepPhysics(false);
+        frame.state = cloneState(this.#state);
+      }
     }
 
-    if (before) {
+    if (before && !teleported) {
       const delta = subtract(before, this.#state.position);
       this.#lastReconciliationError = length(delta);
       const combined = add(this.#correction, delta);
@@ -259,7 +345,27 @@ export class PlayerPredictor {
       : null;
   }
   get predictedBodies(): BodySnapshot[] {
-    return this.#nearbyPredictedBodies();
+    if (!this.#state) return [];
+    return [...this.#collisionProxies.values()]
+      .filter(
+        (proxy) =>
+          proxy.contactPresentation &&
+          proxy.collisionEnabled &&
+          length(subtract(proxy.position, this.#state!.position)) <= FULL_RATE_BODY_RADIUS_METRES,
+      )
+      .toSorted(
+        (left, right) =>
+          length(subtract(left.position, this.#state!.position)) -
+          length(subtract(right.position, this.#state!.position)),
+      )
+      .slice(0, STATE_ALWAYS_NEAR_BODY_SLOTS)
+      .map((proxy) => ({
+        id: { ...proxy.networkId },
+        position: { ...proxy.position },
+        rotation: { ...proxy.rotation },
+        linearVelocity: { ...proxy.linearVelocity },
+        angularVelocity: { ...proxy.angularVelocity },
+      }));
   }
   get lastReconciliationError(): number {
     return this.#lastReconciliationError;
@@ -302,7 +408,7 @@ export class PlayerPredictor {
         position: this.#presentationPosition()!,
         rotation: { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) },
       },
-      this.#nearbyPredictedBodies(),
+      this.predictedBodies,
     );
   }
 
@@ -310,25 +416,50 @@ export class PlayerPredictor {
     if (!this.#physics) return;
     for (const body of snapshot.bodies) {
       const proxy = this.#collisionProxies.get(idKey(body.id));
-      if (!proxy) continue;
+      if (!proxy || snapshot.serverTick <= proxy.authorityTick) continue;
+      proxy.authorityTick = snapshot.serverTick;
       proxy.position = { ...body.position };
       proxy.rotation = { ...body.rotation };
       proxy.linearVelocity = { ...(body.linearVelocity ?? zero()) };
       proxy.angularVelocity = { ...(body.angularVelocity ?? zero()) };
+      proxy.extrapolationTicksRemaining = STATE_EXTRAPOLATION_MAX_TICKS;
+      proxy.freshnessTicksRemaining = STATE_EXTRAPOLATION_MAX_TICKS;
+      proxy.holdWhenStale = ((body.flags ?? 0) & SNAPSHOT_FLAG_SLEEP) !== 0;
       this.#physics.setBodyTransform(proxy.handle, proxy.position, proxy.rotation);
-      this.#physics.setBodyVelocity(
-        proxy.handle,
-        proxy.bodyKind === "dynamic" && !proxy.locallySimulated ? zero() : proxy.linearVelocity,
-        proxy.bodyKind === "dynamic" && !proxy.locallySimulated ? zero() : proxy.angularVelocity,
-      );
+      this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
+      if (!proxy.collisionEnabled) {
+        this.#physics.setBodyEnabled(proxy.handle, true);
+        proxy.collisionEnabled = true;
+      }
     }
   }
 
-  #stepPhysics(): void {
+  #stepPhysics(consumeFreshness = true): void {
     if (!this.#physics) return;
+    for (const proxy of this.#collisionProxies.values()) {
+      const freshnessExpired = consumeFreshness && proxy.freshnessTicksRemaining <= 0;
+      if (consumeFreshness && proxy.freshnessTicksRemaining > 0) {
+        proxy.freshnessTicksRemaining -= 1;
+      }
+      if (proxy.extrapolationTicksRemaining > 0) {
+        proxy.extrapolationTicksRemaining -= 1;
+      } else {
+        proxy.linearVelocity = zero();
+        proxy.angularVelocity = zero();
+        this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
+      }
+      if (
+        freshnessExpired &&
+        proxy.contactPresentation &&
+        !proxy.holdWhenStale &&
+        proxy.collisionEnabled
+      ) {
+        this.#physics.setBodyEnabled(proxy.handle, false);
+        proxy.collisionEnabled = false;
+      }
+    }
     this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
     for (const proxy of this.#collisionProxies.values()) {
-      if (proxy.bodyKind === "dynamic" && !proxy.locallySimulated) continue;
       const state = this.#physics.state(proxy.handle);
       proxy.position = { ...state.position };
       proxy.rotation = { ...state.rotation };
@@ -337,42 +468,19 @@ export class PlayerPredictor {
     }
   }
 
-  #updateLocalPhysicsScope(): void {
-    if (!this.#physics || !this.#state) return;
+  #freezeCollisionProxies(): void {
+    if (!this.#physics) return;
     for (const proxy of this.#collisionProxies.values()) {
-      if (proxy.bodyKind !== "dynamic") continue;
-      const shouldSimulate =
-        length(subtract(proxy.position, this.#state.position)) <= LOCAL_PHYSICS_RADIUS_METRES;
-      if (shouldSimulate === proxy.locallySimulated) continue;
-      proxy.locallySimulated = shouldSimulate;
-      this.#physics.setBodyType(proxy.handle, shouldSimulate ? "dynamic" : "kinematic");
-      this.#physics.setBodyVelocity(
-        proxy.handle,
-        shouldSimulate ? proxy.linearVelocity : zero(),
-        shouldSimulate ? proxy.angularVelocity : zero(),
-      );
-      if (!shouldSimulate) {
-        proxy.linearVelocity = zero();
-        proxy.angularVelocity = zero();
+      proxy.extrapolationTicksRemaining = 0;
+      proxy.freshnessTicksRemaining = 0;
+      proxy.linearVelocity = zero();
+      proxy.angularVelocity = zero();
+      this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
+      if (proxy.contactPresentation && !proxy.holdWhenStale && proxy.collisionEnabled) {
+        this.#physics.setBodyEnabled(proxy.handle, false);
+        proxy.collisionEnabled = false;
       }
     }
-  }
-
-  #nearbyPredictedBodies(): BodySnapshot[] {
-    if (!this.#state) return [];
-    return [...this.#collisionProxies.values()].flatMap((proxy) =>
-      length(subtract(proxy.position, this.#state!.position)) <= LOCAL_PHYSICS_RADIUS_METRES
-        ? [
-            {
-              id: { ...proxy.networkId },
-              position: { ...proxy.position },
-              rotation: { ...proxy.rotation },
-              linearVelocity: { ...proxy.linearVelocity },
-              angularVelocity: { ...proxy.angularVelocity },
-            },
-          ]
-        : [],
-    );
   }
 
   #updatePlayerProxy(): void {
@@ -426,4 +534,36 @@ function multiply(value: Vec3, amount: number): Vec3 {
 }
 function length(value: Vec3): number {
   return Math.hypot(value.x, value.y, value.z);
+}
+
+function plausiblePredictionStep(
+  before: PlayerControllerState,
+  after: PlayerControllerState,
+): boolean {
+  return (
+    [
+      after.position.x,
+      after.position.y,
+      after.position.z,
+      after.verticalVelocity,
+      after.yaw,
+      after.stepCooldown,
+    ].every(Number.isFinite) &&
+    length(subtract(after.position, before.position)) <= PLAYER_MAX_FIXED_TICK_DISPLACEMENT
+  );
+}
+
+function plausibleFromAuthority(
+  authority: Vec3 | null,
+  predicted: PlayerControllerState,
+  inputCount: number,
+): boolean {
+  if (!authority) return true;
+  const seconds = Math.min(inputCount, MAX_INPUT_HISTORY) * PHYSICS_DT;
+  return (
+    Math.hypot(predicted.position.x - authority.x, predicted.position.z - authority.z) <=
+      PLAYER_SPEED * seconds + PREDICTION_DIVERGENCE_BUFFER_METRES &&
+    Math.abs(predicted.position.y - authority.y) <=
+      0.5 * PLAYER_GRAVITY * seconds * seconds + PREDICTION_DIVERGENCE_BUFFER_METRES
+  );
 }

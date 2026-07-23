@@ -519,6 +519,12 @@ export class PhysicsWorld {
     this.#box3d.b3Body_SetAwake(this.#resolve(id), awake);
   }
 
+  setBodyEnabled(id: RuntimeId, enabled: boolean): void {
+    const body = this.#resolve(id);
+    if (enabled) this.#box3d.b3Body_Enable(body);
+    else this.#box3d.b3Body_Disable(body);
+  }
+
   pointVelocity(id: RuntimeId, point: Vec3): Vec3 {
     const body = this.#resolve(id);
     const linear = this.#box3d.b3Body_GetLinearVelocity(body);
@@ -787,6 +793,12 @@ export class PhysicsWorld {
   }
 
   #runtimeIdForBody(body: b3BodyId): RuntimeId {
+    const tracked = this.#runtimeIdForEventBody(body);
+    if (tracked) return tracked;
+    throw new Error("Box3D referenced an untracked body");
+  }
+
+  #runtimeIdForEventBody(body: b3BodyId): RuntimeId | null {
     for (let index = 0; index < this.#slots.length; index += 1) {
       const slot = this.#slots[index];
       if (
@@ -797,7 +809,7 @@ export class PhysicsWorld {
       )
         return { index, generation: slot.generation };
     }
-    throw new Error("Box3D event referenced an untracked body");
+    return null;
   }
 
   #readSensorEvents(
@@ -810,13 +822,16 @@ export class PhysicsWorld {
     for (let index = 0; index < count; index += 1) {
       if (begin) this.#box3d.getSensorBeginEventAt(this.#sensorEvent, this.#events, index);
       else this.#box3d.getSensorEndEventAt(this.#sensorEvent, this.#events, index);
+      const sensor = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#sensorEvent.sensorShapeId),
+      );
+      const visitor = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#sensorEvent.visitorShapeId),
+      );
+      if (!sensor || !visitor) continue;
       events.push({
-        sensor: this.#runtimeIdForBody(
-          this.#box3d.b3Shape_GetBody(this.#sensorEvent.sensorShapeId),
-        ),
-        visitor: this.#runtimeIdForBody(
-          this.#box3d.b3Shape_GetBody(this.#sensorEvent.visitorShapeId),
-        ),
+        sensor,
+        visitor,
       });
     }
   }
@@ -828,9 +843,16 @@ export class PhysicsWorld {
     for (let index = 0; index < count; index += 1) {
       if (begin) this.#box3d.getContactBeginEventAt(this.#contactTouchEvent, this.#events, index);
       else this.#box3d.getContactEndEventAt(this.#contactTouchEvent, this.#events, index);
+      const a = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#contactTouchEvent.shapeIdA),
+      );
+      const b = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#contactTouchEvent.shapeIdB),
+      );
+      if (!a || !b) continue;
       events.push({
-        a: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactTouchEvent.shapeIdA)),
-        b: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactTouchEvent.shapeIdB)),
+        a,
+        b,
       });
     }
   }
@@ -838,9 +860,16 @@ export class PhysicsWorld {
   #readContactHits(): void {
     for (let index = 0; index < this.#box3d.getNumContactHitEvents(this.#events); index += 1) {
       this.#box3d.getContactHitEventAt(this.#contactHitEvent, this.#events, index);
+      const a = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdA),
+      );
+      const b = this.#runtimeIdForEventBody(
+        this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdB),
+      );
+      if (!a || !b) continue;
       this.#stepEvents.contactHit.push({
-        a: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdA)),
-        b: this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(this.#contactHitEvent.shapeIdB)),
+        a,
+        b,
         point: { ...this.#contactHitEvent.point },
         normal: { ...this.#contactHitEvent.normal },
         approachSpeed: this.#contactHitEvent.approachSpeed,
@@ -851,8 +880,10 @@ export class PhysicsWorld {
   #readBodyMoves(): void {
     for (let index = 0; index < this.#box3d.getNumBodyMoveEvents(this.#events); index += 1) {
       this.#box3d.getBodyMoveEventAt(this.#bodyMoveEvent, this.#events, index);
+      const body = this.#runtimeIdForEventBody(this.#bodyMoveEvent.bodyId);
+      if (!body) continue;
       this.#stepEvents.moved.push({
-        body: this.#runtimeIdForBody(this.#bodyMoveEvent.bodyId),
+        body,
         position: { ...this.#bodyMoveEvent.position },
         rotation: { ...this.#bodyMoveEvent.rotation },
         fellAsleep: this.#bodyMoveEvent.fellAsleep,

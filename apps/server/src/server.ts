@@ -1,10 +1,23 @@
 import webApp from "../../web/index.html";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
+import { RTCPeerConnection, type RTCDataChannel, type RTCIceServer } from "werift";
 import {
+  FULL_RATE_BODY_RADIUS_METRES,
   PHYSICS_HZ,
   PROTOCOL_VERSION,
+  SNAPSHOT_BODY_BYTES,
   SNAPSHOT_HZ,
-  decodeInput,
+  SNAPSHOT_HEADER_BYTES,
+  SNAPSHOT_INTERVAL_TICKS,
+  SNAPSHOT_PLAYER_BYTES,
+  STATE_ALWAYS_NEAR_BODY_SLOTS,
+  STATE_DATAGRAM_TARGET_BYTES,
+  STATE_FAR_BODY_RESERVE,
+  STATE_FAR_PLAYER_RESERVE,
+  STATE_MAX_PLAYER_RECORDS,
+  STATE_MAX_RETRANSMITS,
+  decodeInputBundle,
   decodeClientControl,
   encodeLifecycle,
   encodeWorldBundle,
@@ -16,6 +29,7 @@ import {
   type Vec3,
   type WelcomeMessage,
   type ClientControlMessage,
+  type WorldBundle,
   type WorldMessage,
   type WorldManifestMessage,
 } from "@gurgur/shared";
@@ -24,15 +38,14 @@ import { loadMaterialTextureAsset, loadMaterialTextureManifest } from "./materia
 import { WorldStore } from "./store";
 
 type ClientData = {
-  backpressured: boolean;
   playerId: RuntimeId | null;
-  pendingSnapshot: ArrayBuffer | null;
-  backpressureSinceMs: number;
   sessionToken: string | null;
   socketGeneration: number;
-  pendingSnapshotAtMs: number;
-  snapshotAgeMs: number;
-  queuedBytes: number;
+  peerConnection: RTCPeerConnection | null;
+  inputChannel: RTCDataChannel | null;
+  stateChannel: RTCDataChannel | null;
+  droppedStatePackets: number;
+  rtcNegotiating: boolean;
 };
 type SessionRecord = {
   playerId: RuntimeId;
@@ -55,7 +68,11 @@ export type ServerMetrics = ReturnType<AuthoritativeGame["metrics"]> & {
   backpressuredClients: number;
   queuedBytes: number;
   maxSnapshotAgeMs: number;
+  stateTransportClients: number;
+  droppedStatePackets: number;
 };
+
+const MAX_STATE_BUFFERED_BYTES = STATE_DATAGRAM_TARGET_BYTES * 2;
 
 export async function createGurgurServer(
   options: {
@@ -66,6 +83,10 @@ export async function createGurgurServer(
     playerSpawn?: Vec3;
     publicOrigin?: string;
     extraDynamicBodies?: number;
+    rtcAdditionalHostAddresses?: string[];
+    rtcPortRange?: [number, number];
+    rtcIceServers?: RTCIceServer[];
+    worldBundle?: WorldBundle;
   } = {},
 ): Promise<GurgurServer> {
   if (
@@ -76,6 +97,22 @@ export async function createGurgurServer(
   }
   const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? null;
   if (publicOrigin && !URL.canParse(publicOrigin)) throw new Error("public origin is invalid");
+  const serverHostname = options.hostname ?? process.env.HOST ?? "0.0.0.0";
+  const rtcAdditionalHostAddresses = [
+    ...(options.rtcAdditionalHostAddresses ??
+      (process.env.RTC_ADDITIONAL_HOST_IPS ? process.env.RTC_ADDITIONAL_HOST_IPS.split(",") : [])),
+  ];
+  if (rtcAdditionalHostAddresses.some((address) => isIP(address) === 0))
+    throw new Error("RTC_ADDITIONAL_HOST_IPS must contain comma-separated IP addresses");
+  if (
+    isIP(serverHostname) !== 0 &&
+    serverHostname !== "0.0.0.0" &&
+    serverHostname !== "::" &&
+    !rtcAdditionalHostAddresses.includes(serverHostname)
+  )
+    rtcAdditionalHostAddresses.push(serverHostname);
+  const rtcPortRange = options.rtcPortRange ?? readRtcPortRange();
+  const rtcIceServers = options.rtcIceServers ?? readRtcIceServers();
   const adjacentWasm = Bun.file(new URL("./box3d.wasm", import.meta.url));
   const sourceWasm = Bun.file(
     new URL("../../../node_modules/box3d.js/dist/box3d.wasm", import.meta.url),
@@ -106,43 +143,39 @@ export async function createGurgurServer(
       worldEpoch: game.worldEpoch,
       serverTick: game.serverTick,
       connectedClients: active.length,
-      backpressuredClients: active.filter((socket) => socket.data.backpressured).length,
-      queuedBytes: active.reduce((sum, socket) => sum + socket.data.queuedBytes, 0),
-      maxSnapshotAgeMs: Math.max(0, ...active.map((socket) => socket.data.snapshotAgeMs)),
+      backpressuredClients: active.filter(
+        (socket) => (socket.data.stateChannel?.bufferedAmount ?? 0) >= MAX_STATE_BUFFERED_BYTES,
+      ).length,
+      queuedBytes: active.reduce(
+        (sum, socket) => sum + (socket.data.stateChannel?.bufferedAmount ?? 0),
+        0,
+      ),
+      maxSnapshotAgeMs: 0,
+      stateTransportClients: active.filter(
+        (socket) => socket.data.stateChannel?.readyState === "open",
+      ).length,
+      droppedStatePackets: active.reduce((sum, socket) => sum + socket.data.droppedStatePackets, 0),
     };
   };
 
   const broadcast = (snapshot: Snapshot): void => {
-    const packet = encodeSnapshot(snapshot);
-    let completeReplacement: ArrayBuffer | null = null;
-    const replacement = (): ArrayBuffer =>
-      (completeReplacement ??= encodeSnapshot(
-        game.snapshot({
-          full: true,
-          discontinuity: true,
-        }),
-      ));
     for (const socket of clients) {
-      if (!socket.data.playerId) continue;
-      if (socket.data.backpressured) {
-        socket.data.pendingSnapshot = replacement();
-        socket.data.pendingSnapshotAtMs = performance.now();
-        socket.data.snapshotAgeMs = 0;
-        socket.data.queuedBytes = socket.getBufferedAmount();
-        if (performance.now() - socket.data.backpressureSinceMs >= 5_000) {
-          socket.close(1013, "send queue made no progress");
-        }
+      const playerId = socket.data.playerId;
+      if (!playerId) continue;
+      const channel = socket.data.stateChannel;
+      if (channel?.readyState !== "open") continue;
+      if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
+        socket.data.droppedStatePackets += 1;
         continue;
       }
-      const acceptedBytes = socket.send(packet);
-      if (acceptedBytes < 0) {
-        socket.data.backpressured = true;
-        socket.data.pendingSnapshot = replacement();
-        socket.data.backpressureSinceMs = performance.now();
-        socket.data.pendingSnapshotAtMs = performance.now();
-        socket.data.queuedBytes = socket.getBufferedAmount();
-      } else {
-        socket.data.queuedBytes = socket.getBufferedAmount();
+      try {
+        channel.send(
+          Buffer.from(
+            encodeSnapshot(snapshotForPlayer(snapshot, game.playerPosition(playerId), playerId)),
+          ),
+        );
+      } catch {
+        socket.close(1013, "state transport failed");
       }
     }
   };
@@ -164,18 +197,131 @@ export async function createGurgurServer(
   const game = await AuthoritativeGame.create(store, broadcast, broadcastWorld, {
     playerSpawn: options.playerSpawn,
     extraDynamicBodies: options.extraDynamicBodies,
+    worldBundle: options.worldBundle,
   });
   const worldBundleBytes = encodeWorldBundle(game.worldMessage().bundle);
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
+  const acceptInputPacket = (
+    socket: Bun.ServerWebSocket<ClientData>,
+    packet: ArrayBuffer | ArrayBufferView,
+  ): boolean => {
+    let commands: InputCommand[];
+    try {
+      commands = decodeInputBundle(packet);
+    } catch {
+      return false;
+    }
+    if (!socket.data.playerId) return false;
+    for (const command of commands) {
+      if (!validInputCommand(command) || !game.acceptInput(socket.data.playerId, command))
+        return false;
+    }
+    return true;
+  };
+  const closeRtc = (socket: Bun.ServerWebSocket<ClientData>): void => {
+    socket.data.inputChannel?.close();
+    socket.data.stateChannel?.close();
+    if (socket.data.peerConnection) void socket.data.peerConnection.close();
+    socket.data.inputChannel = null;
+    socket.data.stateChannel = null;
+    socket.data.peerConnection = null;
+    socket.data.rtcNegotiating = false;
+  };
+  const negotiateRtc = async (
+    socket: Bun.ServerWebSocket<ClientData>,
+    description: { type: "offer"; sdp: string },
+  ): Promise<void> => {
+    if (socket.data.rtcNegotiating) {
+      socket.close(1008, "RTC negotiation already in progress");
+      return;
+    }
+    closeRtc(socket);
+    socket.data.rtcNegotiating = true;
+    const peer = new RTCPeerConnection({
+      iceUseIpv4: true,
+      iceUseIpv6: false,
+      iceServers: rtcIceServers,
+      ...(rtcPortRange ? { icePortRange: rtcPortRange } : {}),
+      ...(rtcAdditionalHostAddresses.length > 0
+        ? { iceAdditionalHostAddresses: rtcAdditionalHostAddresses }
+        : {}),
+    });
+    socket.data.peerConnection = peer;
+    const stateChannel = peer.createDataChannel("gurgur-state-v2", {
+      ordered: false,
+      maxRetransmits: STATE_MAX_RETRANSMITS,
+    });
+    socket.data.stateChannel = stateChannel;
+    stateChannel.stateChanged.subscribe((state) => {
+      if (state !== "open" || socket.data.stateChannel !== stateChannel) return;
+      const playerId = socket.data.playerId;
+      if (!playerId) return;
+      stateChannel.send(
+        Buffer.from(
+          encodeSnapshot(
+            snapshotForPlayer(
+              game.snapshot({ full: true }),
+              game.playerPosition(playerId),
+              playerId,
+            ),
+          ),
+        ),
+      );
+    });
+    peer.connectionStateChange.subscribe((state) => {
+      if (socket.data.peerConnection === peer && state === "failed")
+        socket.close(1013, "RTC connection failed");
+    });
+    peer.onDataChannel.subscribe((channel) => {
+      if (socket.data.peerConnection !== peer) {
+        channel.close();
+        return;
+      }
+      if (channel.label === "gurgur-input-v2" && !socket.data.inputChannel) {
+        socket.data.inputChannel = channel;
+        channel.onMessage.subscribe((packet) => {
+          if (typeof packet === "string" || !acceptInputPacket(socket, packet))
+            socket.close(1007, "invalid input datagram");
+        });
+        return;
+      }
+      channel.close();
+    });
+    try {
+      await peer.setRemoteDescription(description);
+      await peer.setLocalDescription(await peer.createAnswer());
+      if (socket.data.peerConnection !== peer || !peer.localDescription?.sdp) return;
+      socket.data.rtcNegotiating = false;
+      socket.send(
+        JSON.stringify({
+          type: "rtc-answer",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: game.worldEpoch,
+          description: { type: "answer", sdp: peer.localDescription.sdp },
+        }),
+      );
+    } catch {
+      if (socket.data.peerConnection === peer) {
+        closeRtc(socket);
+        socket.close(1007, "invalid RTC offer");
+      }
+    }
+  };
   const server = Bun.serve<ClientData>({
     port: options.port ?? Number(process.env.PORT ?? 3000),
-    hostname: options.hostname ?? process.env.HOST ?? "0.0.0.0",
+    hostname: serverHostname,
     routes: {
       "/": webApp,
-      "/healthz": new Response("ok", { headers: { "content-type": "text/plain" } }),
-      "/readyz": new Response("ready", { headers: { "content-type": "text/plain" } }),
+      "/healthz": new Response("ok", {
+        headers: { "content-type": "text/plain" },
+      }),
+      "/readyz": new Response("ready", {
+        headers: { "content-type": "text/plain" },
+      }),
       "/metrics": { GET: () => Response.json(metrics()) },
-      "/box3d.wasm": new Response(box3dWasm, { headers: { "content-type": "application/wasm" } }),
+      "/box3d.wasm": new Response(box3dWasm, {
+        headers: { "content-type": "application/wasm" },
+      }),
       "/prediction-worker.js": new Response(predictionWorker, {
         headers: { "content-type": "text/javascript" },
       }),
@@ -248,15 +394,14 @@ export async function createGurgurServer(
         if (
           bunServer.upgrade(request, {
             data: {
-              backpressured: false,
               playerId: null,
-              pendingSnapshot: null,
-              backpressureSinceMs: 0,
               sessionToken: null,
               socketGeneration: 0,
-              pendingSnapshotAtMs: 0,
-              snapshotAgeMs: 0,
-              queuedBytes: 0,
+              peerConnection: null,
+              inputChannel: null,
+              stateChannel: null,
+              droppedStatePackets: 0,
+              rtcNegotiating: false,
             },
           })
         )
@@ -391,43 +536,24 @@ export async function createGurgurServer(
             );
             return;
           }
+          if (
+            control.type === "rtc-offer" &&
+            socket.data.playerId &&
+            control.worldEpoch === game.worldEpoch
+          ) {
+            void negotiateRtc(socket, control.description);
+            return;
+          }
           socket.close(1007, "invalid control packet");
           return;
         }
-        let command: InputCommand;
-        try {
-          command = decodeInput(message);
-        } catch {
+        if (!acceptInputPacket(socket, message)) {
           socket.close(1007, "invalid input packet");
-          return;
-        }
-        if (
-          !validInputCommand(command) ||
-          !socket.data.playerId ||
-          !game.acceptInput(socket.data.playerId, command)
-        ) {
-          socket.close(1007, "invalid input command");
-        }
-      },
-      drain(socket) {
-        const pending = socket.data.pendingSnapshot;
-        socket.data.snapshotAgeMs = pending
-          ? performance.now() - socket.data.pendingSnapshotAtMs
-          : 0;
-        socket.data.pendingSnapshot = null;
-        socket.data.backpressured = false;
-        socket.data.backpressureSinceMs = 0;
-        socket.data.queuedBytes = socket.getBufferedAmount();
-        if (pending && socket.send(pending) < 0) {
-          socket.data.pendingSnapshot = pending;
-          socket.data.backpressured = true;
-          socket.data.backpressureSinceMs = performance.now();
-          socket.data.pendingSnapshotAtMs = performance.now();
-          socket.data.queuedBytes = socket.getBufferedAmount();
         }
       },
       close(socket) {
         clients.delete(socket);
+        closeRtc(socket);
         const token = socket.data.sessionToken;
         const session = token ? sessions.get(token) : null;
         if (!session || session.socket !== socket) return;
@@ -457,7 +583,10 @@ export async function createGurgurServer(
       shuttingDown = true;
       for (const session of sessions.values())
         if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
-      for (const socket of clients) socket.close(1001, "server stopping");
+      for (const socket of clients) {
+        closeRtc(socket);
+        socket.close(1001, "server stopping");
+      }
       game.stop();
       store.close();
       server.stop(true);
@@ -512,6 +641,179 @@ function validInputCommand(input: InputCommand): boolean {
   return true;
 }
 
+export function snapshotForPlayer(
+  snapshot: Snapshot,
+  localPosition: Vec3 | null,
+  localPlayerId: RuntimeId,
+): Snapshot {
+  if (!localPosition) return snapshot;
+  const rotation = Math.floor(snapshot.serverTick / SNAPSHOT_INTERVAL_TICKS);
+  const playerIds = new Set(snapshot.players.map(({ id }) => `${id.index}:${id.generation}`));
+  // Distant players are interest-managed too; at 32 peers, including every
+  // player would consume the entire state-datagram budget before any prop.
+  const orderedPlayers = snapshot.players.toSorted((left, right) => {
+    const leftIsLocal =
+      left.id.index === localPlayerId.index && left.id.generation === localPlayerId.generation;
+    const rightIsLocal =
+      right.id.index === localPlayerId.index && right.id.generation === localPlayerId.generation;
+    if (leftIsLocal !== rightIsLocal) return leftIsLocal ? -1 : 1;
+    return (
+      Math.hypot(
+        left.position.x - localPosition.x,
+        left.position.y - localPosition.y,
+        left.position.z - localPosition.z,
+      ) -
+      Math.hypot(
+        right.position.x - localPosition.x,
+        right.position.y - localPosition.y,
+        right.position.z - localPosition.z,
+      )
+    );
+  });
+  const selectedPlayers =
+    orderedPlayers.length <= STATE_MAX_PLAYER_RECORDS
+      ? orderedPlayers
+      : [
+          ...orderedPlayers.slice(0, STATE_MAX_PLAYER_RECORDS - STATE_FAR_PLAYER_RESERVE),
+          ...takeRotating(
+            orderedPlayers.slice(STATE_MAX_PLAYER_RECORDS - STATE_FAR_PLAYER_RESERVE),
+            STATE_FAR_PLAYER_RESERVE,
+            rotation,
+          ),
+        ];
+  const selectedPlayerIds = new Set(
+    selectedPlayers.map(({ id }) => `${id.index}:${id.generation}`),
+  );
+  const selectedPlayerBodies = snapshot.bodies.filter((body) =>
+    selectedPlayerIds.has(`${body.id.index}:${body.id.generation}`),
+  );
+  const bodyCapacity = Math.max(
+    0,
+    Math.floor(
+      (STATE_DATAGRAM_TARGET_BYTES -
+        SNAPSHOT_HEADER_BYTES -
+        selectedPlayers.length * SNAPSHOT_PLAYER_BYTES) /
+        SNAPSHOT_BODY_BYTES,
+    ),
+  );
+  const candidates = snapshot.bodies
+    .filter((body) => !playerIds.has(`${body.id.index}:${body.id.generation}`))
+    .map((body) => ({
+      body,
+      distance: Math.hypot(
+        body.position.x - localPosition.x,
+        body.position.y - localPosition.y,
+        body.position.z - localPosition.z,
+      ),
+    }));
+  if (candidates.length <= bodyCapacity)
+    return {
+      ...snapshot,
+      players: selectedPlayers,
+      bodies: [...selectedPlayerBodies, ...candidates.map(({ body }) => body)],
+    };
+
+  const urgent = candidates.filter(({ body }) => (body.flags ?? 0) !== 0);
+  const ordinary = candidates.filter(({ body }) => (body.flags ?? 0) === 0);
+  const near = ordinary
+    .filter(({ distance }) => distance <= FULL_RATE_BODY_RADIUS_METRES)
+    .toSorted((left, right) => left.distance - right.distance);
+  const far = ordinary
+    .filter(({ distance }) => distance > FULL_RATE_BODY_RADIUS_METRES)
+    .toSorted((left, right) => left.distance - right.distance);
+  const selected = takeRotating(urgent, bodyCapacity, rotation);
+  let remaining = bodyCapacity - selected.length;
+  const farReserve = Math.min(STATE_FAR_BODY_RESERVE, far.length, remaining);
+  const alwaysNearCount = Math.min(
+    STATE_ALWAYS_NEAR_BODY_SLOTS,
+    near.length,
+    remaining - farReserve,
+  );
+  selected.push(...near.slice(0, alwaysNearCount));
+  remaining -= alwaysNearCount;
+  const rotatingNear = near.slice(alwaysNearCount);
+  const selectedNear = takeRotating(
+    rotatingNear,
+    Math.min(rotatingNear.length, remaining - farReserve),
+    rotation,
+  );
+  selected.push(...selectedNear);
+  remaining -= selectedNear.length;
+  const selectedFar = takeRotating(far, remaining, rotation);
+  selected.push(...selectedFar);
+  remaining -= selectedFar.length;
+  if (remaining > 0) {
+    const selectedKeys = new Set(
+      selected.map(({ body }) => `${body.id.index}:${body.id.generation}`),
+    );
+    selected.push(
+      ...takeRotating(
+        rotatingNear.filter(
+          ({ body }) => !selectedKeys.has(`${body.id.index}:${body.id.generation}`),
+        ),
+        remaining,
+        rotation + 1,
+      ),
+    );
+  }
+  return {
+    ...snapshot,
+    players: selectedPlayers,
+    bodies: [...selectedPlayerBodies, ...selected.map(({ body }) => body)],
+  };
+}
+
+function takeRotating<T>(items: T[], count: number, rotation: number): T[] {
+  if (count <= 0 || items.length === 0) return [];
+  if (count >= items.length) return [...items];
+  const start = (rotation * count) % items.length;
+  return Array.from({ length: count }, (_, index) => items[(start + index) % items.length]!);
+}
+
 function persistentIdForToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function readRtcPortRange(): [number, number] | undefined {
+  const minimumText = process.env.RTC_PORT_MIN;
+  const maximumText = process.env.RTC_PORT_MAX;
+  if (minimumText === undefined && maximumText === undefined) return undefined;
+  const minimum = Number(minimumText);
+  const maximum = Number(maximumText);
+  if (
+    !Number.isInteger(minimum) ||
+    !Number.isInteger(maximum) ||
+    minimum < 1 ||
+    maximum > 65_535 ||
+    minimum >= maximum
+  )
+    throw new Error("RTC_PORT_MIN and RTC_PORT_MAX must define an increasing UDP port range");
+  return [minimum, maximum];
+}
+
+function readRtcIceServers(): RTCIceServer[] {
+  const source = process.env.RTC_ICE_SERVERS_JSON;
+  if (!source) return [];
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    throw new Error("RTC_ICE_SERVERS_JSON must be valid JSON");
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length > 8 ||
+    value.some(
+      (server) =>
+        typeof server !== "object" ||
+        server === null ||
+        Array.isArray(server) ||
+        typeof (server as { urls?: unknown }).urls !== "string" ||
+        !/^(?:stun|stuns|turn|turns):/.test((server as { urls: string }).urls) ||
+        ("username" in server && typeof server.username !== "string") ||
+        ("credential" in server && typeof server.credential !== "string"),
+    )
+  )
+    throw new Error("RTC_ICE_SERVERS_JSON must contain valid STUN or TURN server objects");
+  return value as RTCIceServer[];
 }

@@ -13,6 +13,12 @@ describe("bounded client control union", () => {
         socketGeneration: 0,
       },
       { type: "ping", protocolVersion: PROTOCOL_VERSION, worldEpoch: 1, nonce: 2, sentAtMs: 3.5 },
+      {
+        type: "rtc-offer",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 1,
+        description: { type: "offer", sdp: "v=0\r\n" },
+      },
     ];
     for (const message of messages) {
       expect(JSON.stringify(decodeClientControl(JSON.stringify(message)))).toBe(
@@ -72,7 +78,7 @@ describe("bounded server control union", () => {
         playerId: { index: 1, generation: 2 },
         mapRevision: "revision",
         physicsHz: 60,
-        snapshotHz: 20,
+        snapshotHz: 30,
         sessionToken: "0123456789abcdef",
         socketGeneration: 0,
       },
@@ -100,6 +106,12 @@ describe("bounded server control union", () => {
         nonce: 2,
         sentAtMs: 3.5,
         serverTick: 4,
+      },
+      {
+        type: "rtc-answer",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 1,
+        description: { type: "answer", sdp: "v=0\r\n" },
       },
     ];
     for (const message of messages) {

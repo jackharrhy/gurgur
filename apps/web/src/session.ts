@@ -1,4 +1,5 @@
 import {
+  INPUT_REDUNDANCY,
   PROTOCOL_VERSION,
   SNAPSHOT_HISTORY_PACKETS,
   decodeSnapshot,
@@ -6,10 +7,11 @@ import {
   decodeWorldBundle,
   decodeServerControl,
   LIFECYCLE_TAG,
-  encodeInput,
+  encodeInputBundle,
   type InputCommand,
   type HelloMessage,
   type LifecycleMessage,
+  type RtcAnswerMessage,
   type Snapshot,
   type WelcomeMessage,
   type WorldMessage,
@@ -24,6 +26,7 @@ export type SessionCallbacks = {
   snapshot(snapshot: Snapshot, latestInFrame: boolean): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
+  transport?(state: "negotiating" | "webrtc" | "disconnected"): void;
 };
 
 export class GameSession {
@@ -47,6 +50,10 @@ export class GameSession {
   #snapshotQueue: Snapshot[] = [];
   #pendingLifecycles: LifecycleMessage[] = [];
   #snapshotFrame: number | null = null;
+  #peerConnection: RTCPeerConnection | null = null;
+  #inputChannel: RTCDataChannel | null = null;
+  #stateChannel: RTCDataChannel | null = null;
+  #inputHistory: InputCommand[] = [];
 
   constructor(callbacks: SessionCallbacks, options: { simulatedLatencyMs?: number } = {}) {
     this.#callbacks = callbacks;
@@ -87,6 +94,7 @@ export class GameSession {
       }
       this.#callbacks.status("disconnected");
       this.#stopPings();
+      this.#closeRtc();
       if (!this.#closed) {
         const base = Math.min(10_000, 500 * 2 ** this.#retryAttempt++);
         const delay = base * (0.8 + Math.random() * 0.4);
@@ -116,6 +124,7 @@ export class GameSession {
         this.#retryAttempt = 0;
         this.#callbacks.welcome(message);
         this.#startPings();
+        void this.#startRtc(socket, message);
       } else if (message.type === "world") {
         if (
           message.protocolVersion !== PROTOCOL_VERSION ||
@@ -123,6 +132,7 @@ export class GameSession {
         )
           return;
         this.#worldEpoch = message.worldEpoch;
+        this.#inputHistory = [];
         this.#loadedWorldEpoch = null;
         if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
         this.#snapshotFrame = null;
@@ -139,9 +149,15 @@ export class GameSession {
         this.#jitterMs += (Math.abs(sample - previous) - this.#jitterMs) * 0.25;
         this.#callbacks.clock?.(message.serverTick, now, sample / 2);
         this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
+      } else if (message.type === "rtc-answer") {
+        void this.#acceptRtcAnswer(socket, message);
       }
       return;
     }
+    this.#handleBinary(data);
+  }
+
+  #handleBinary(data: ArrayBuffer): void {
     if (new DataView(data).getUint8(0) === LIFECYCLE_TAG) {
       const message = decodeLifecycle(data);
       if (message.worldEpoch === this.#loadedWorldEpoch) this.#callbacks.lifecycle(message);
@@ -161,15 +177,113 @@ export class GameSession {
     for (const timer of this.#timers) clearTimeout(timer);
     this.#timers.clear();
     if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
+    this.#closeRtc();
     this.#socket?.close(1000, "page closed");
   }
 
   sendInput(command: InputCommand): void {
     const socket = this.#socket;
-    const packet = encodeInput(command);
+    this.#inputHistory.push(command);
+    if (this.#inputHistory.length > INPUT_REDUNDANCY) this.#inputHistory.shift();
+    const packet = encodeInputBundle(this.#inputHistory);
     this.#defer(() => {
-      if (this.#socket === socket && socket?.readyState === WebSocket.OPEN) socket.send(packet);
+      if (this.#socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
+      const channel = this.#inputChannel;
+      if (channel?.readyState === "open") {
+        if (channel.bufferedAmount < 16_384) channel.send(packet);
+      } else {
+        socket.send(packet);
+      }
     });
+  }
+
+  async #startRtc(socket: WebSocket, welcome: WelcomeMessage): Promise<void> {
+    this.#closeRtc();
+    this.#callbacks.transport?.("negotiating");
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    let receivedState = false;
+    const input = peer.createDataChannel("gurgur-input-v2", {
+      ordered: false,
+      maxRetransmits: 0,
+    });
+    peer.addEventListener("datachannel", (event) => {
+      const state = event.channel;
+      if (
+        this.#peerConnection !== peer ||
+        state.label !== "gurgur-state-v2" ||
+        this.#stateChannel
+      ) {
+        state.close();
+        return;
+      }
+      this.#stateChannel = state;
+      state.binaryType = "arraybuffer";
+      state.addEventListener("message", (message) => {
+        if (this.#peerConnection !== peer || !(message.data instanceof ArrayBuffer)) return;
+        this.#defer(() => {
+          if (this.#peerConnection !== peer) return;
+          this.#handleBinary(message.data as ArrayBuffer);
+          if (!receivedState) {
+            receivedState = true;
+            this.#callbacks.transport?.("webrtc");
+          }
+        });
+      });
+    });
+    peer.addEventListener("connectionstatechange", () => {
+      if (this.#peerConnection === peer && peer.connectionState === "failed")
+        socket.close(4012, "state transport failed");
+    });
+    this.#peerConnection = peer;
+    this.#inputChannel = input;
+    try {
+      await peer.setLocalDescription(await peer.createOffer());
+      await waitForIceGathering(peer);
+      if (
+        this.#peerConnection !== peer ||
+        this.#socket !== socket ||
+        socket.readyState !== WebSocket.OPEN
+      )
+        return;
+      const description = peer.localDescription;
+      if (!description?.sdp) throw new Error("RTC offer is missing SDP");
+      socket.send(
+        JSON.stringify({
+          type: "rtc-offer",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: welcome.worldEpoch,
+          description: { type: "offer", sdp: description.sdp },
+        }),
+      );
+    } catch {
+      if (this.#peerConnection === peer) socket.close(4012, "state transport negotiation failed");
+    }
+  }
+
+  async #acceptRtcAnswer(socket: WebSocket, message: RtcAnswerMessage): Promise<void> {
+    const peer = this.#peerConnection;
+    if (
+      !peer ||
+      this.#socket !== socket ||
+      message.worldEpoch !== this.#worldEpoch ||
+      peer.signalingState !== "have-local-offer"
+    )
+      return;
+    try {
+      await peer.setRemoteDescription(message.description);
+    } catch {
+      socket.close(4012, "invalid RTC answer");
+    }
+  }
+
+  #closeRtc(): void {
+    if (this.#peerConnection) this.#callbacks.transport?.("disconnected");
+    this.#inputChannel?.close();
+    this.#stateChannel?.close();
+    this.#peerConnection?.close();
+    this.#inputChannel = null;
+    this.#stateChannel = null;
+    this.#peerConnection = null;
   }
 
   #defer(callback: () => void): void {
@@ -256,10 +370,38 @@ export class GameSession {
 }
 
 export function retainSnapshot(queue: Snapshot[], snapshot: Snapshot): void {
-  const latest = queue.at(-1);
-  if (latest && snapshot.serverTick <= latest.serverTick) return;
-  queue.push(snapshot);
+  const existing = queue.findIndex(
+    (candidate) =>
+      candidate.worldEpoch === snapshot.worldEpoch && candidate.serverTick === snapshot.serverTick,
+  );
+  if (existing >= 0) queue[existing] = snapshot;
+  else {
+    const insertion = queue.findIndex(
+      (candidate) =>
+        candidate.worldEpoch > snapshot.worldEpoch ||
+        (candidate.worldEpoch === snapshot.worldEpoch &&
+          candidate.serverTick > snapshot.serverTick),
+    );
+    if (insertion < 0) queue.push(snapshot);
+    else queue.splice(insertion, 0, snapshot);
+  }
   if (queue.length > SNAPSHOT_HISTORY_PACKETS) queue.shift();
+}
+
+function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
+  if (peer.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(finish, 2_500);
+    function finish(): void {
+      clearTimeout(timeout);
+      peer.removeEventListener("icegatheringstatechange", changed);
+      resolve();
+    }
+    function changed(): void {
+      if (peer.iceGatheringState === "complete") finish();
+    }
+    peer.addEventListener("icegatheringstatechange", changed);
+  });
 }
 
 function readSessionToken(): string | null {

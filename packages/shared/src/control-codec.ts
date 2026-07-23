@@ -4,6 +4,8 @@ import type {
   HelloMessage,
   PingMessage,
   PongMessage,
+  RtcAnswerMessage,
+  RtcOfferMessage,
   WelcomeMessage,
 } from "./types";
 import type { RuntimeEntity, WorldManifestMessage } from "./world";
@@ -25,16 +27,22 @@ export function decodeClientControl(text: string): ClientControlMessage {
     throw new Error("control protocol version mismatch");
   if (value.type === "hello") return hello(value);
   if (value.type === "ping") return ping(value);
+  if (value.type === "rtc-offer") return rtcOffer(value);
   throw new Error("unknown control packet type");
 }
 
-export type ServerTextMessage = WelcomeMessage | PongMessage | WorldManifestMessage;
+export type ServerTextMessage =
+  | WelcomeMessage
+  | PongMessage
+  | RtcAnswerMessage
+  | WorldManifestMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
   const value = parseControl(text);
   if (value.type === "welcome") return welcome(value);
   if (value.type === "world") return world(value);
   if (value.type === "pong") return pong(value);
+  if (value.type === "rtc-answer") return rtcAnswer(value);
   throw new Error("unknown control packet type");
 }
 
@@ -144,6 +152,28 @@ function ping(value: RecordValue): PingMessage {
     throw new Error("ping fields are invalid");
   }
   return value as PingMessage;
+}
+
+function rtcOffer(value: RecordValue): RtcOfferMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "description"]);
+  if (!safeInteger(value.worldEpoch, 0) || !sessionDescription(value.description, "offer")) {
+    throw new Error("RTC offer fields are invalid");
+  }
+  return value as RtcOfferMessage;
+}
+
+function rtcAnswer(value: RecordValue): RtcAnswerMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "description"]);
+  if (!safeInteger(value.worldEpoch, 0) || !sessionDescription(value.description, "answer")) {
+    throw new Error("RTC answer fields are invalid");
+  }
+  return value as RtcAnswerMessage;
+}
+
+function sessionDescription(value: unknown, type: "offer" | "answer"): boolean {
+  if (!record(value)) return false;
+  exact(value, ["type", "sdp"]);
+  return value.type === type && string(value.sdp, 32_768, 1);
 }
 
 function validateRuntimeEntity(value: unknown): asserts value is RuntimeEntity {

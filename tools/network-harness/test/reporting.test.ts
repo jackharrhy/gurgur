@@ -8,7 +8,7 @@ test("keeps constrained saturation separate from gated movement quality", () => 
     predictionErrorMaxMetres,
     inputLatencyP95Ms: 0,
     snapshotAgeP95Ms: 0,
-    extrapolatedPercent: 0,
+    contactProxyOverrunPercent: 0,
     correctnessErrors: 0,
   });
   const report: HarnessSummarySource = {
@@ -37,6 +37,8 @@ test("keeps constrained saturation separate from gated movement quality", () => 
       backpressuredClients: 0,
       queuedBytes: 0,
       maxSnapshotAgeMs: 0,
+      stateTransportClients: 16,
+      droppedStatePackets: 0,
     },
   };
 

@@ -1,163 +1,138 @@
 # Testing and simulation harnesses
 
-Testing infrastructure is part of Gurgur's production architecture. Every
-stateful subsystem ships with deterministic controls, metrics, and a headless
-path so correctness and performance can be measured before browser presentation
-hides the cause of a failure.
+Testing infrastructure is part of the production architecture. Every stateful
+subsystem has deterministic controls, metrics, and a headless path so transport,
+simulation, prediction, and presentation failures remain distinguishable.
 
-The root static gate runs `oxfmt --check` with a 100-column target, `oxlint` with
-correctness and suspicious categories denied, and TypeScript checking before the
-runtime suites. Generated bundles, reports, runtime data, and TrenchBroom
-autosaves are excluded; authored source and tests are not.
+`bun run check` runs formatting, lint, TypeScript, unit/contract/simulation tests,
+the real server integration suite, and shutdown/configuration integration.
+Generated bundles, reports, runtime data, and TrenchBroom autosaves are ignored;
+authored fixtures and tests are not.
 
-## Test layers
+## Layers
 
-| Layer       | Purpose                                                                |
-| ----------- | ---------------------------------------------------------------------- |
-| Unit        | codecs, handles, math, map parsing, controller rules, persistence rows |
-| Contract    | browser/server codec parity and physics-adapter ownership              |
-| Simulation  | fixed-tick world scenarios with deterministic input scripts            |
-| Multiplayer | real server with shaped links and many headless clients                |
-| Browser     | rendering, worker prediction, input, interpolation, reconnect          |
-| Soak        | leaks, handle churn, persistence, reset, queue growth, long-run drift  |
+| Layer       | Purpose                                                               |
+| ----------- | --------------------------------------------------------------------- |
+| Unit        | codecs, quantization, datagram shaping, handles, map parsing, storage |
+| Contract    | protocol unions, transport channels, adapter ownership                |
+| Simulation  | fixed-tick authoritative and predicted interaction scripts            |
+| Multiplayer | real server, real WebRTC peers, shaped datagrams, many clients        |
+| Browser     | worker prediction, WebRTC session, Three.js presentation, input       |
+| Soak        | physics churn, connection churn, persistence, reset, long-run drift   |
 
-Tests use original compact fixtures and fixed random seeds. A failure report
-includes the seed, build revision, map revision, world epoch, network profile,
-server tick, client ID, and the metric samples needed to replay it.
+There are no skipped networking or physics tests. A player-visible regression
+belongs at the lowest layer that reproduces it and in a browser scenario when
+the failure is visual.
 
-## Regression fixture policy
+## Authored network-physics fixtures
 
-Every player-visible controller or networking failure becomes a named regression
-at the lowest layer that can reproduce it and at one real-browser layer. The
-lower test uses the production fixed-step controller, production map bundle or a
-minimal authored map, exact runtime body shapes, and an explicit tick script. It
-settles bodies before measuring them and asserts spatial bounds throughout the
-failure window, not only the final position.
+Fixtures compile through the production Valve 220 compiler and typed entity
+schema:
 
-Browser regressions run the real Bun server, WebSocket codec, prediction worker,
-Box3D Wasm, Three.js renderer, and browser input path. They sample the rendered
-pose on `requestAnimationFrame`, keep authoritative, predicted, and rendered
-poses separate, and fail on collision tunnelling, repeated display frames,
-prediction-budget violations, stale immutable map URLs, or browser errors.
-Headless simulation is never accepted as evidence for visual smoothness by
-itself.
+- `network-boxes.map` covers sustained pushing and stacked support;
+- `network-push-corridor.map` contrasts a light pushable prop with a heavy prop;
+- `network-stack-tower.map` exercises propagation and terminal sleep through a
+  five-body vertical stack;
+- `network-domino-field.map` exercises chained wake/contact/sleep transitions.
 
-Concrete cases live under the subsystem that owns the invariant. The current
-dynamic-support regression drops a player onto `physics.cube.heavy` from the
-production Systems Garden bundle, waits for both authority and prediction to
-settle on the body, jumps, and verifies the player lands on the same support.
-The minimal `content/maps/fixtures/network-boxes.map` fixture separately drives
-sustained pushing and stacked-box jump scripts through the real authority and
-predictor with delayed sparse snapshots. Those tests record authority-to-
-prediction player error, body error, grounded disagreement, and collision
-penetration throughout the script.
+Simulation tests settle each map, assert finite state throughout, verify that
+only the authority moves props, exercise latest-wins intent and action counters,
+measure near/far cadence, drop terminal sleep samples, persist/restart, and reset
+runtime generations. Prediction tests restore and replay only the player against
+authoritative kinematic prop proxies; current contact presentation may use those
+proxies, but player contact cannot apply local rigid-body motion to them.
 
-The `dynamic-push` browser scenario samples the actual rendered capsule and
-rendered heavy cube on `requestAnimationFrame` under 150 ms simulated RTT. It
-requires visible cube response and fails if the presented capsule enters the
-cube by more than 3.5 cm. Run it with `bun run smoke:push`; run dynamic support
-with `bun run smoke:dynamic`, and the ordinary shaped-link path with
-`bun run smoke:latency`.
-
-This policy follows the useful parts of Crashcat's named KCC bug fixtures and
-stress scene, Bongle's fixed-tick controller/environment scripts, and Bongle's
-separate fixed-pose/render interpolation tests. Fixtures remain original to
-Gurgur and exercise Gurgur's selected Box3D runtime and server authority.
+Browser scenarios run the actual Bun server, WebSocket signaling, WebRTC data
+channels, codecs, prediction worker, Box3D Wasm, Three.js renderer, and input
+path. `smoke:dynamic` covers moving support, `smoke:push` covers visible prop
+response under shaped latency, `smoke:latency` covers held input, and the other
+smokes cover grab, touch, gamepad, reconnect, and ordinary movement.
 
 ## Multiplayer harness
 
-The harness launches the real Bun server and at least 16 concurrent clients. A
-headless client uses the production packet unions, binary codecs, clock
-estimator, input history, controller, prediction, reconciliation, and snapshot
-interpolator. It omits rendering and audio only. Browser scenarios replace
-selected headless clients with real browser pages against the same server.
+The harness launches the real child-process server and connects real `werift`
+peers. It does not replace WebRTC with a mock socket. Each direction then passes
+application datagrams through an independently seeded shaper that applies
+latency, jitter, random loss, bandwidth serialization, reordering, packet
+lifetime expiry, outages, and receiver stalls. Expired packets are dropped;
+there is no synthetic retransmission queue.
 
-Each direction of each client connection receives an independently seeded link
-profile. Because gameplay uses ordered reliable WebSockets, simulated loss adds
-retransmission delay and head-of-line stalls rather than silently dropping an
-application packet. The link model also applies latency, jitter, bandwidth,
-temporary outages, and receiver backpressure.
+The baseline has 16 moving players and 128 authoritative dynamic bodies. Runs at
+2, 8, 16, and 32 peers cover scaling; dedicated runs cover a five-second outage,
+receiver stall, and connected epoch reset. All clients exercise signaling,
+codecs, input redundancy, acknowledgement, interpolation, and epoch checks. One
+client per profile also runs the full Box3D predictor, avoiding the false
+receiver stall caused by advancing sixteen 128-proxy prediction worlds on one
+test-process thread.
 
-The baseline world contains 16 moving players, at least 128 replicated dynamic
-bodies, sleeping/waking bodies, sensors, grabs, a moving platform, reconnects,
-and a global reset. Tests assert both individual behavior and aggregate server
-headroom.
+Reports include seed, build and map revision, world epoch, server tick, client
+identity, input acknowledgement, state age, prediction correction, shaped drops,
+queue high-water marks, server state drops, fixed-tick cost, and contact-proxy
+extrapolation-cap overruns.
 
-## Network profiles
+## Profiles
 
-| Profile     |    RTT | Jitter | Simulated loss |  Bandwidth |
-| ----------- | -----: | -----: | -------------: | ---------: |
-| Local       |   2 ms |   0 ms |             0% |  unlimited |
-| Typical     |  80 ms |  20 ms |             1% |  10 Mbit/s |
-| Adverse     | 150 ms |  40 ms |             5% |   1 Mbit/s |
-| Constrained | 250 ms |  80 ms |             8% | 256 Kbit/s |
+| Profile     |    RTT | Jitter | Loss |  Bandwidth |
+| ----------- | -----: | -----: | ---: | ---------: |
+| Local       |   2 ms |   0 ms |   0% |  unlimited |
+| Typical     |  80 ms |  20 ms |   1% |  10 Mbit/s |
+| Adverse     | 150 ms |  40 ms |   5% |   1 Mbit/s |
+| Constrained | 250 ms |  80 ms |   8% | 256 Kbit/s |
 
-The 16-client suite mixes profiles in one world instead of assigning one global
-latency. Outage cases pause a selected link for five seconds and then restore it.
-Every profile is deterministic from its seed.
+Local, Typical, and Adverse are quality profiles. Constrained intentionally sits
+below the 30 Hz stress-world state rate and is a saturation/recovery profile, not
+part of a blended quality headline.
 
-Movement-quality gates are evaluated per profile. The mixed aggregate remains in
-the JSON report for capacity diagnosis, but is not a quality score: it includes
-the deliberately saturated Constrained clients and will therefore be dominated
-by their continuous 256 Kbit/s bottleneck. Concise terminal output labels Local,
-Typical, and Adverse as `qualityProfiles` and reports Constrained separately as
-`saturationProfile` so these two questions cannot be confused.
+## Budgets
 
-## Quality budgets
+Prediction error is raw authority-to-predictor correction before the 100 ms
+display decay. Explicit teleport, respawn, and epoch discontinuities clear replay
+and are not counted as prediction error. The 128-body stress world deliberately
+drives clients through dense authoritative prop contacts, so prediction and
+transport have separate budgets:
 
-Raw reconciliation error is measured before the 100 ms render-offset decay and
-includes scripted direction changes. A 60 Hz player at the 5 m/s speed cap moves
-8.33 cm per tick, so a sub-tick global threshold would reject correct quantized
-behavior. The deterministic profile budgets are therefore:
+| Profile | Prediction p95 | Prediction p99 | Prediction max | State age p95 | Input ack p95 |
+| ------- | -------------: | -------------: | -------------: | ------------: | ------------: |
+| Local   |         1.25 m |          1.5 m |          2.0 m |         50 ms |        100 ms |
+| Typical |          1.5 m |          2.0 m |          2.5 m |        150 ms |        250 ms |
+| Adverse |          2.0 m |          3.0 m |          3.5 m |        250 ms |        400 ms |
 
-| Profile | Prediction p95 | Prediction p99 | Prediction max | Snapshot age p95 |
-| ------- | -------------: | -------------: | -------------: | ---------------: |
-| Local   |          10 cm |          25 cm |          50 cm |           100 ms |
-| Typical |          10 cm |          50 cm |          1.0 m |           200 ms |
-| Adverse |          1.0 m |         1.25 m |          1.5 m |           450 ms |
-
-The Adverse raw bounds explicitly capture the selected ordered-WebSocket tradeoff:
-a retransmission stall can make current steering differ from the last intent the
-authority received. Constrained is a saturation/recovery profile, not a movement
-quality target; it must remain bounded, avoid correctness failures, and recover
-after the impairment clears.
+The larger poor-network prediction bounds describe a pathological contact pile,
+not permission for stale transport. State age and acknowledgement stay close to
+the shaped path, the server state queue remains at or below two 1,200-byte
+datagrams, and the gated 16-peer run permits no server-side state drops.
 
 Additional gates are:
 
-- local-contact simulation tracks authority within 1 cm for sustained pushing,
-  within 6 cm for stacked support/jump scripts, and keeps measured predicted
-  collision penetration below 6 mm in the minimal fixture;
-- presentation collision is measured independently from simulation divergence;
-  the shaped-RTT browser push regression allows at most 3.5 cm including the
-  controller skin/tolerance;
+- 60 Hz server work stays below 8 ms p95 and 12 ms p99 at 16 peers/128 props;
+- no current-time contact proxy retains nonzero linear or angular velocity more
+  than 100 ms after the client received its last authoritative sample;
+- a state gap over 500 ms discards stale player replay, and no accepted predicted
+  tick moves the player more than one metre;
+- the minimal push fixture keeps player/proxy alignment within 1 cm and measured
+  penetration below 6 mm; stacked support stays within 6 cm;
+- the browser push view allows at most 3.5 cm of presented capsule/prop overlap;
+- a five-second outage never exceeds a 15 m raw partition-heal correction and
+  recovers the affected Local client below 1.75 m correction and 50 ms state age
+  within the final one-second window;
+- a Typical receiver stall recovers below 1.5 m correction and 150 ms state age;
+- reset/reconnect leaves no old-epoch input, track, prediction, or runtime handle;
+- every scenario ends with zero correctness errors.
 
-- the 60 Hz server tick stays below 8 ms p95 and 12 ms p99 with 16 clients and
-  the baseline dynamic world;
-- input acknowledgement stays below 200 ms Local, 350 ms Typical, and 1,100 ms
-  Adverse at p95;
-- remote interpolation extrapolates fewer than 1% of rendered samples on Typical
-  with the selected 250 ms interpolation delay; a frame counts as extrapolated
-  when any moving, remotely presented body track lacks a newer sample, even if a
-  later sparse packet exists for another body;
-- the real-browser held-input scenario at 300 ms RTT converges below 5 cm and
-  does not repeat more than 25% of sampled display frames;
-- no application queue is unbounded, and state backpressure retains only one
-  complete newest-state replacement snapshot;
-- after a five-second impairment, snapshot age and prediction error return to
-  the affected profile budget within one second;
-- reset/reconnect leaves no old-epoch command, interpolation sample, predicted
-  state, or runtime handle active.
+Changing a budget requires a decision record or canonical requirement update,
+never a weakened assertion hidden in a test.
 
-Reports are emitted as structured JSON plus a concise terminal summary. CI fails
-on correctness errors and budget regressions. Intentional budget changes require
-a decision record or an updated canonical requirement, never a looser assertion
-hidden in a test.
+## Commands
 
-## Continuous execution
-
-Fast unit, production-map collision regressions, and two-client simulation tests
-run on every change. The mixed
-16-client network suite runs for networking, physics, controller, persistence,
-and protocol changes. Browser prediction/interpolation scenarios run in Chromium
-on every such change and in Firefox/WebKit before a release. Long physics,
-connection-churn, and persistence tests run as scheduled soaks.
+```sh
+bun run check
+bun run harness:network
+bun run harness:matrix
+bun run smoke:browser
+bun run smoke:latency
+bun run smoke:dynamic
+bun run smoke:push
+bun run soak:physics
+bun run soak:connections
+bun run soak:persistence
+```

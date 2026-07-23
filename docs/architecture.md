@@ -3,9 +3,10 @@
 ## Runtime
 
 One Bun process imports and serves the browser HTML application, accepts native
-Bun WebSockets, runs the authoritative game state and Box3D world, and persists
-snapshots through `bun:sqlite`. Browser clients use vanilla TypeScript and direct
-Three.js, with a small prediction world in a module worker.
+Bun WebSockets, terminates WebRTC gameplay data channels, runs the authoritative
+game state and Box3D world, and persists snapshots through `bun:sqlite`. Browser
+clients use vanilla TypeScript and direct Three.js, with local-player prediction
+in a module worker.
 
 The selected runtime stack is:
 
@@ -14,11 +15,14 @@ The selected runtime stack is:
 - TypeScript for application, compiler, and protocol code;
 - Three.js for browser rendering;
 - `box3d.js@0.0.2`, single-threaded separate-Wasm build, in Bun and the browser;
+- `werift@0.23.0` for server-side ICE, DTLS, SCTP, and WebRTC data channels;
 - direct application registries rather than BitECS or a general game engine.
 
 Gurgur does not use Remix, React, Elysia, Express, Vite, or a separate frontend
 server. Bun owns HTTP routes, frontend asset delivery, WebSocket upgrades, the
 simulation loop, and persistence in the same process and on the same origin.
+Werift owns the UDP gameplay transport inside that process; it is not another
+authority or service.
 
 Production code accesses Box3D only through Gurgur's physics adapter. Box3D owns
 live physical state; application registries own stable identity and gameplay
@@ -35,7 +39,7 @@ players, replication, and persistence; it does not implement every subsystem.
 ```text
 apps/
   web/             HTML, vanilla TS, Three.js, input, prediction worker
-  server/          sole Bun entrypoint, HTTP/WebSocket, simulation, administration
+  server/          sole Bun entrypoint, HTTP/WebSocket/WebRTC, simulation, administration
 packages/
   shared/          packet types, codecs, input, controller rules, math
   physics/         lifecycle-safe box3d.js adapter
@@ -113,10 +117,12 @@ epoch.
 
 One Dockerfile builds generated maps and browser assets, then produces one runtime
 image containing Bun and the server bundle. The container starts exactly one Bun
-process, listens on one HTTP port, and serves HTTP, static assets, health checks,
-administrative endpoints, and gameplay WebSockets from that process.
+process, listens on one HTTP port and a bounded UDP range, and serves HTTP,
+static assets, health checks, administrative endpoints, WebSocket control, and
+WebRTC gameplay data from that process.
 
 SQLite lives at `/data/gurgur.sqlite` on a mounted persistent volume. Compiled
 world content is immutable image content. On `SIGTERM`, the server stops accepting
 new connections, completes the current tick, writes a final snapshot, closes
-SQLite and WebSockets, then exits within the container grace period.
+SQLite, WebSocket, and WebRTC resources, then exits within the container grace
+period.

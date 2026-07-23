@@ -22,7 +22,9 @@ raw Embind objects and Wasm views do not cross that boundary.
 Runtime Box3D IDs are wrapped in `{ index, generation }` handles and validated on
 every external lookup. Destruction requested during a physics step or callback is
 queued for the post-step phase. Destroying a world invalidates all handles issued
-by that world.
+by that world. Box3D can report a terminal contact, sensor, hit, or move event
+whose body was destroyed after the preceding step; extraction drops that stale
+event instead of resolving it into a recycled runtime handle.
 
 Hull source data is copied by Box3D and can be released after shape creation.
 Mesh, compound, and height-field backing allocations remain owned by the adapter
@@ -39,21 +41,34 @@ before the step. Contacts, sensors, moved bodies, sleep transitions, and deferre
 destruction are processed afterward.
 
 The host loop executes at most four catch-up ticks per turn. Box3D movement events
-mark bodies dirty for replication. A final sleep state is sent once, then the
-body is omitted until another movement or wake event. Persistence captures
-application state only at a completed tick boundary.
+mark bodies dirty for replication. A terminal sleep state repeats for one second
+so datagram loss cannot strand a moving presentation, then the body is omitted
+until another movement or wake event. Persistence captures application state
+only at a completed tick boundary.
 
 Box3D's cross-platform determinism reduces prediction error but is not a lockstep
 contract. The server remains authoritative and clients always reconcile.
 
-The prediction worker keeps all authored moving-body geometry available for
-queries but advances dynamics only inside a five-metre region around its local
-player. A body entering that region is restored from the latest authoritative
-same-tick state and promoted to dynamic; a body leaving it returns to a
-non-simulated proxy. This bounds client physics cost while allowing controller
-reaction impulses, stacked support, and nearby rigid-body contacts to replay in
-the same order as the authority. Those nearby states replicate at 20 Hz;
-unrelated dirty dynamics replicate at 10 Hz and remain presentation-only.
+The prediction worker keeps authored moving-body geometry available as kinematic
+collision proxies. It never promotes a prop to a client-owned dynamic body. An
+authoritative sample sets a proxy's transform and velocity; pending
+player-command replay advances the proxy from that state for at most 100 ms,
+then freezes its motion. Replay is instantaneous and does not spend the separate
+freshness lifetime: an awake proxy leaves collision only after 100 ms of actual
+client time without a received sample. A terminal-sleep sample stays as a
+stationary proxy. The four nearest fresh prop proxies may also drive current-time
+contact presentation so the predicted player does not visibly overlap a prop
+buffered in the past. They cannot receive local impulses. Only the local
+geometric player controller is restored and replayed. This keeps moving support
+and collision queries available without assuming that two independent
+rigid-body worlds can replay stacks, contacts, other players, and constraints
+identically.
+
+The browser still loads Box3D because its controller and collision proxies use
+the production geometry and queries. This is not rigid-body lockstep. Prop
+presentation always originates in authoritative state: buffered tracks for
+ordinary rendering, or a bounded authoritative-velocity proxy for the immediate
+contact set.
 
 ## Coordinates and scale
 
@@ -96,6 +111,18 @@ Each controller tick:
 4. limits motion with `b3World_CastMover`;
 5. repeats for at most five iterations with a 1 cm movement tolerance;
 6. clips velocity and applies bounded reaction impulses to contacted dynamic bodies.
+
+A fixed-tick controller result must be finite and move no more than one metre.
+The server and predictor both reject a larger Box3D depenetration result, retain
+the prior pose, consume the yaw/jump edge, and zero vertical velocity. This is a
+safety invariant for pathological overlapping contact piles, not ordinary speed
+clamping.
+
+The authority respawns a player at `info_player_start` after it falls ten metres
+below the map's lowest static collision vertex. Respawn clears held movement and
+grabs, recreates the query proxy, and replicates as a teleport for one second so
+the discontinuity survives state loss. A disconnected player therefore cannot
+accumulate unbounded free-fall state beneath the map.
 
 Ground is walkable through 50 degrees. The controller steps up at most 0.30 m and
 snaps down at most 0.40 m while grounded. Jumping suppresses ground snapping until

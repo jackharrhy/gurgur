@@ -6,6 +6,7 @@ export const PLAYER_GRAVITY = 10;
 export const PLAYER_JUMP_SPEED = 5.2;
 export const PLAYER_STEP_HEIGHT = 0.3;
 export const PLAYER_GROUND_SNAP = 0.4;
+export const PLAYER_MAX_FIXED_TICK_DISPLACEMENT = 1;
 const GROUND_PROBE = 0.06;
 const EPSILON = 0.002;
 const STANDING_HALF_SEGMENT = 0.55;
@@ -219,7 +220,7 @@ export function stepPlayerController(
     }
   }
 
-  return {
+  const result = {
     position,
     verticalVelocity,
     yaw: input.lookYaw,
@@ -227,6 +228,29 @@ export function stepPlayerController(
     lastJumpCounter: input.jumpCounter,
     stepCooldown,
     crouched,
+  };
+  if (
+    [
+      result.position.x,
+      result.position.y,
+      result.position.z,
+      result.verticalVelocity,
+      result.yaw,
+      result.stepCooldown,
+    ].every(Number.isFinite) &&
+    Math.hypot(
+      result.position.x - state.position.x,
+      result.position.y - state.position.y,
+      result.position.z - state.position.z,
+    ) <= PLAYER_MAX_FIXED_TICK_DISPLACEMENT
+  )
+    return result;
+  return {
+    ...state,
+    verticalVelocity: 0,
+    yaw: input.lookYaw,
+    lastJumpCounter: input.jumpCounter,
+    stepCooldown: 0,
   };
 }
 

@@ -2,25 +2,16 @@
 
 ## Authority and time
 
-The Bun server is authoritative. Clients send sequenced input and interaction
-intent; the server validates those commands, advances one shared simulation, and
-publishes authoritative state. The local player and nearby dynamic contact region
-are predicted and reconciled. Remote players and unrelated bodies render from
-snapshot history.
+One Bun server owns the only gameplay-authoritative Box3D world. Clients send
+sequenced intent, never transforms, collision outcomes, impulses, or successful
+interaction results. The server validates intent, advances the shared world at a
+fixed 60 Hz with four Box3D substeps, and publishes disposable views at 30 Hz.
+Client time is diagnostic metadata and never advances server physics.
 
-The server runs a fixed 60 Hz simulation with four Box3D substeps per tick.
-Clients sample and send input at 60 Hz. The server publishes snapshot packets at
-20 Hz. Player state and dynamic bodies in a player's five-metre prediction region
-are present at that full rate. Dirty unrelated moving bodies are deterministically
-staggered across alternate packets, producing a 10 Hz body stream without changing
-their simulation rate or delaying a final sleep transition beyond one packet.
-Client time is metadata only and never determines server stepping or movement
-duration.
-
-Each server tick performs exactly this transaction:
+Each server tick is:
 
 ```text
-consume validated intent
+select newest validated intent
   -> run pre-physics gameplay
   -> step Box3D once at 1/60 second
   -> collect contacts, sensors, movement, and sleep events
@@ -28,12 +19,14 @@ consume validated intent
   -> emit due replication and persistence work
 ```
 
-Catch-up is capped at four ticks per host-loop turn. Additional accumulated time
-is recorded as overload and discarded rather than creating an unbounded spiral.
+Catch-up is capped at four ticks per host-loop turn. Excess accumulated time is
+recorded and discarded rather than creating a latency spiral.
 
 ## Input
 
-The fixed-rate input codec contains:
+The browser samples at 60 Hz. Each datagram contains the newest command plus up
+to two predecessors. Redundancy recovers ordinary loss without retransmitting a
+stale intent:
 
 ```ts
 type InputCommand = {
@@ -52,116 +45,143 @@ type InputCommand = {
 };
 ```
 
-The server accepts finite, ranged values and strictly increasing sequences. It
-keeps at most 120 pending commands per connection. It consumes FIFO during
-ordinary delivery and coalesces a burst longer than twelve commands to its newest
-intent, preventing a 60 Hz producer/consumer queue from accumulating permanent
-latency. Held axes/buttons survive an ordered-transport stall for 750 ms and then
-clear. One-shot actions use monotonic counters, so coalescing or a repeated packet
-cannot lose or repeat an action edge.
+The server range-checks decoded values, rejects stale epochs, and accepts only
+strictly increasing sequences. It keeps one pending intent per player: a newer
+command replaces an older unconsumed command. It never drains a delayed FIFO to
+reenact obsolete movement. If no new intent arrives for 250 ms, held movement
+axes clear. Monotonic action counters preserve jump/use/grab edges across loss
+and redundant delivery without repeating them.
 
-Interaction commands use generation-bearing targets. The server validates target
-existence, generation, distance, line of sight, rate, and authorization before it
-creates constraints or changes mechanisms. Clients never submit collision
-results, transforms, or successful outcomes.
+Interaction targets carry generation-bearing runtime identity. The server
+validates generation, distance, line of sight, rate, and authorization before
+changing constraints or mechanisms.
 
-## Prediction and reconciliation
+## Physics-prop authority and prediction
 
-The client prediction worker runs the same pinned Box3D Wasm, controller code,
-coordinate conversion, material properties, constants, fixed timestep, and input
-codec as the server. It predicts the local player plus dynamic bodies within five
-metres of that player. Dynamic bodies outside that local region remain
-non-simulated collision proxies and use authoritative snapshot presentation.
-Grab success is never predicted.
+All loose props, stacks, dominoes, constraints, grabs, sleep decisions, and
+interaction outcomes are server authoritative. The client never presents a
+locally simulated rigid-body result as truth.
 
-Every prediction tick stores the input command and replayable player state. The
-client applies controller movement and reaction impulses before advancing its
-local Box3D region by the same fixed step as the server. An authoritative player
-sample contains server tick, transform, linear velocity, controller ground
-state, and last processed input sequence. Sparse snapshots also include complete
-same-tick states for dynamic bodies within five metres of any player, even when
-those bodies are otherwise clean. On receipt, the client restores that local
-state, drops acknowledged commands, replays the remainder, and stores any small
-player correction as a render-only offset.
+The prediction worker predicts and replays only the local geometric player
+controller. Authored moving geometry is present as a kinematic collision proxy.
+An arriving authoritative prop sample replaces that proxy's pose and velocity;
+during unacknowledged player replay the proxy advances by that authoritative
+velocity. This permits moving-platform and prop-support queries without creating
+a second client-owned rigid-body history. The four nearest prop meshes may use
+those current kinematic proxy poses so player and contact prop share one
+presentation time. The proxy cannot receive local impulses or become gameplay
+truth. Authoritative-velocity extrapolation advances for at most 100 ms from the
+sample and then freezes. Reconciliation replay does not consume the separate
+receipt-freshness clock: an awake dynamic proxy leaves prediction collision and
+current-time contact presentation only after 100 ms of real client time without
+another sample. A terminal-sleep sample instead remains as a stationary
+collision proxy. Other prop meshes render from buffered authoritative tracks.
 
-Errors at or above 0.25 m and explicit discontinuities snap immediately; smaller
-visual offsets decay over 100 ms. Render-only correction is collision-clamped so
-the smoothing path cannot move the displayed capsule through current prediction
-geometry. Locally predicted bodies replace their delayed authoritative samples
-for presentation while they remain in the local region.
+On an authoritative player sample the predictor:
 
-This is speculation, not delegated authority. The server still validates intent
-and owns every transform, impulse result, interaction, and puzzle outcome. Global
-puzzle results, remote players, ownership, and world interactions are never
-predicted as truth. Teleport, respawn, `worldEpoch` change, and map reload clear
-prediction and interpolation history.
+1. restores the acknowledged controller state;
+2. updates included moving-body collision proxies;
+3. drops acknowledged commands;
+4. replays remaining commands at the fixed timestep;
+5. records the correction as presentation-only state.
 
-## Remote interpolation
+Corrections at or above 0.25 m and explicit discontinuities snap. Smaller offsets
+decay over 100 ms through collision-clamped movement. Teleport, respawn,
+`worldEpoch` change, and map reload clear prediction and interpolation state. A
+state blackout longer than 500 ms is also a prediction discontinuity: the client
+discards unacknowledged replay, expires awake prop proxies, and resumes from
+authority. The shared controller rejects any non-finite or greater-than-one-metre
+fixed-tick result on both server and client rather than presenting a Box3D
+depenetration launch.
 
-Snapshots are keyed by authoritative server tick, never packet-arrival time. The
-client estimates server time from ping/pong samples and renders remote entities
-and unrelated bodies 250 ms behind it. The local player and locally predicted
-dynamic bodies render near current predicted time instead. Snapshot history
-retains 500 ms. At the 20 Hz packet and 10 Hz unrelated-body rates,
-this maintains:
+## Replication and interest
 
-```text
-100 ms unrelated-body interval < 250 ms render delay < 500 ms history
-```
+Snapshots are self-contained samples, not a reliable delta chain. The wire codec
+uses a 15-byte header, 41-byte quantized rigid-body records, and 36-byte player
+records. A player is serialized once; decoding reconstructs its render-body
+sample. Position remains float32, quaternion components and velocities are
+bounded int16 values, and flags mark create, teleport, wake, and sleep
+discontinuities. A detected teleport marker repeats for one second so losing the
+first disposable state packet cannot turn a respawn into an enormous predicted
+correction.
 
-Position uses linear interpolation and orientation uses shortest-path quaternion
-interpolation. Sparse packets are accumulated into per-body tracks, so staggered
-10 Hz body deltas interpolate across intervening 20 Hz packets instead of
-freezing. The browser retains the last eleven packets delivered in one display
-frame for history but reconciles prediction only against the newest. When a
-track runs dry, velocity extrapolation is capped at 50 ms. Player snapshots carry
-vertical controller velocity; presentation derives missing horizontal velocity
-from the preceding same-player sample rather than freezing an uncounted moving
-player.
-Spawn, teleport, wake discontinuity, and epoch changes snap. Sleeping bodies emit
-one final state and remain silent until changed.
+The per-client state packet targets at most 1,200 application bytes:
 
-## Protocol
+- the local player and twelve nearest remotes have permanent slots, while three
+  farther-player slots rotate when more than 16 players are connected;
+- up to four nearest props receive permanent high-priority slots;
+- the remaining near slots rotate across bodies within 12 m;
+- two slots are reserved for rotating farther state when capacity is saturated;
+- create, repeated teleport, wake, and repeated terminal-sleep samples take
+  priority.
 
-There is one discriminated client-packet union and one server-packet union in the
-shared package. Every packet carries `protocolVersion`, message tag, and
-`worldEpoch`; state packets also carry server tick. Connection and administrative
-control messages use bounded JSON. Fixed-rate input, lifecycle, and snapshot
-messages use explicit little-endian `DataView` codecs with a one-byte tag.
+Limiting remote-player records prevents players from consuming the whole packet
+at 32 peers without starving distant-player presentation; a 16-player packet
+still has room for roughly fourteen prop records. With fewer included players,
+unused player bytes automatically become prop capacity. An awake or dirty body
+outside every player's near region is globally staggered at 5 Hz. A sleeping
+body repeats its terminal state for one second, then becomes silent until it
+changes. The reliable connection snapshot seeds every body, so sparse later
+samples never imply creation or deletion.
 
-State samples are disposable by body identity. Bounded client history retains
-staggered deltas until a newer sample for that body arrives. Commands and control
-events are reliable, bounded, epoch checked, and idempotent. Inputs, snapshots,
-and predicted state are never replayed across reconnect. Static map geometry is
-addressed by `mapRevision` and never replicated per tick.
+This is presentation interest, not simulation culling. Every body continues in
+the one 60 Hz server world.
 
-After the welcome control message, the server sends one bounded world manifest
-containing the immutable bundle URL, its `mapRevision`, and the runtime-handle
-binding for each moving authored brush. The browser verifies and decodes the
-binary bundle over HTTP, builds static Three.js geometry from it, and binds every
-local-space convex child of a moving entity to its handle. Reset sends a new
-manifest before the first snapshot of the new epoch; ordinary snapshots contain
-transforms only. Snapshots arriving while the immutable bundle loads use the same
-bounded eleven-packet history, preserving the initial complete state when a later
-sparse packet arrives first at presentation.
+## Interpolation
+
+Snapshots are keyed by server tick. Each body owns an independently sorted track,
+so reordered datagrams and sparse body selection cannot make a newer body state
+discard an older sample for another body. Duplicate same-tick samples replace
+their prior value.
+
+The client clock estimator combines snapshot ticks with ping/pong RTT. Its render
+delay adapts from 100 ms to 250 ms using measured jitter and missing-packet
+pressure. Position is linear and orientation uses shortest-path quaternion
+interpolation. When a moving track runs dry, velocity extrapolation is capped at
+100 ms and then holds. Teleport and epoch discontinuities never interpolate.
+
+The locally predicted player and four nearest authoritative-velocity contact
+proxies render near predicted current time. Other props and remote players render
+from buffered authoritative history.
+
+## Protocol and connection lifecycle
+
+Protocol version 2 has exact bounded JSON control unions and explicit
+little-endian binary codecs. `mapRevision`, `worldEpoch`, runtime identity, and
+protocol version remain separate:
+
+- HTTP transfers the immutable, revision-addressed world bundle;
+- WebSocket carries hello/welcome, world manifest, lifecycle, reset,
+  ping/pong, WebRTC signaling, and the initial complete snapshot;
+- WebRTC carries disposable input and current state datagrams.
+
+The browser may temporarily send binary input on WebSocket while WebRTC
+negotiates. State never falls back to an ordered reliable stream; a peer that
+cannot establish the gameplay state channel reconnects rather than accumulating
+stale snapshots. Local input prediction arms only after the prediction world is
+loaded and the first current WebRTC state sample has arrived, so negotiation
+cannot create a prediction-only gap after the reliable initial snapshot.
+
+Reconnect replaces the prior socket generation and rejects stale work. Ordinary
+input, interpolation history, and prediction history never cross a reconnect or
+epoch boundary.
 
 ## Gameplay transport
 
-Gameplay uses Bun's native server WebSocket and the browser WebSocket API. It does
-not use `ws`, geckos.io, WebTransport, application retransmission, or a generic
-replication framework.
+The same Bun process terminates HTTP/WebSocket and a `werift@0.23.0` WebRTC peer
+per client. The client creates `gurgur-input-v2` as unordered with no
+retransmissions. The server creates `gurgur-state-v2` as unordered with at most
+one retransmission. Creating a channel at its sender is mandatory: partial
+reliability is a sender policy.
 
-WebSocket is ordered and reliable. The server records send results, queued bytes,
-backpressure duration, and pending-snapshot age. Clients and harnesses record RTT,
-jitter, acknowledgement latency, interpolation use, and correction error. When
-`ServerWebSocket.send` reports backpressure, the server stops producing sparse
-snapshots for that peer and retains a complete newest-state replacement. It is
-marked as a presentation discontinuity, so no staggered delta or final sleep
-transition can be lost while older queued bytes drain. Immutable map bulk uses a
-separately cacheable HTTP transfer. A connection whose queue makes no drain
-progress for five seconds is closed.
+The server does not enqueue another state packet once the channel has two target
+datagrams buffered. It drops that sample and continues with the next current
+snapshot. Metrics expose connected state transports, buffered bytes, dropped
+state packets, tick cost, acknowledgement latency, snapshot age, and whether any
+current-time contact proxy continues moving beyond its 100 ms extrapolation cap.
 
-Handshake requires an exact `protocolVersion`, `mapRevision`, authenticated
-session identity, and current `worldEpoch`. Reconnect replaces the prior socket
-generation and rejects all work from the stale socket. Reconnect backoff is
-exponential with jitter and capped at ten seconds.
+Production binds a configured UDP range with `RTC_PORT_MIN` and `RTC_PORT_MAX`.
+`RTC_ADDITIONAL_HOST_IPS` adds explicit bindable host candidates.
+`RTC_ICE_SERVERS_JSON` supplies validated STUN/TURN configuration for deployments
+that require relay. Docker exposes UDP 40000-40100 by default in addition to the
+HTTP port.

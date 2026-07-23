@@ -27,3 +27,25 @@ test("retains a bounded pre-world snapshot history instead of overwriting the in
   expect(queue).toHaveLength(SNAPSHOT_HISTORY_PACKETS);
   expect(queue[0]?.serverTick).toBe(3);
 });
+
+test("sorts reordered disposable snapshots and replaces duplicate ticks", () => {
+  const queue: Snapshot[] = [];
+  const state = (tick: number, x = tick): Snapshot => ({
+    worldEpoch: 1,
+    serverTick: tick,
+    bodies: [
+      {
+        id: { index: 1, generation: 1 },
+        position: { x, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    ],
+    players: [],
+  });
+  retainSnapshot(queue, state(12));
+  retainSnapshot(queue, state(10));
+  retainSnapshot(queue, state(11));
+  retainSnapshot(queue, state(11, 99));
+  expect(queue.map(({ serverTick }) => serverTick)).toEqual([10, 11, 12]);
+  expect(queue[1]!.bodies[0]!.position.x).toBe(99);
+});

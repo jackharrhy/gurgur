@@ -1,6 +1,6 @@
 # 0009: Predict the local dynamic-contact region
 
-Status: accepted on 2026-07-22.
+Status: superseded by 0013 on 2026-07-23.
 
 Keep the server authoritative while speculatively advancing the local player and
 nearby dynamic bodies with the shared fixed-step Box3D implementation. Render

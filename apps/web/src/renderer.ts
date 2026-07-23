@@ -1,7 +1,8 @@
 import * as THREE from "three/webgpu";
 import {
-  INTERPOLATION_DELAY_TICKS,
+  FULL_RATE_BODY_RADIUS_METRES,
   MATERIAL_TEXTURE_SIZE,
+  STATE_ALWAYS_NEAR_BODY_SLOTS,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
@@ -25,6 +26,8 @@ import playerBillboardLayout from "../../../content/generated/player-billboard/p
 import { playerBillboardAtlasOffset, playerBillboardView } from "./player-billboard";
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
+const distance = (left: BodySnapshot["position"], right: BodySnapshot["position"]): number =>
+  Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
 
 function disposeOwnedResources(object: THREE.Object3D): void {
   if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
@@ -46,6 +49,7 @@ export class WorldRenderer {
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
+  readonly #physicsPropIds = new Set<string>();
   readonly #materialTextureUrls: Readonly<Record<string, string>>;
   #worldRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
@@ -92,6 +96,7 @@ export class WorldRenderer {
     this.#worldRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
     this.#meshes.clear();
+    this.#physicsPropIds.clear();
     this.#predictedBodies.clear();
     this.#cameraFollowing = false;
     for (const batch of message.bundle.renderBatches)
@@ -123,6 +128,7 @@ export class WorldRenderer {
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
+      if (runtime.classname === "func_physics") this.#physicsPropIds.add(idKey(runtime.id));
       this.#worldRoot.add(group);
     }
     for (const player of message.runtimeEntities.filter((entity) => entity.classname === "player"))
@@ -193,14 +199,32 @@ export class WorldRenderer {
       if (latest !== null) {
         const now = performance.now();
         const estimatedServerTick = this.#history.serverTickAt(now);
-        const authoritative = this.#history.sample(estimatedServerTick - INTERPOLATION_DELAY_TICKS);
+        const authoritative = this.#history.sample(
+          estimatedServerTick - this.#history.interpolationDelayTicks,
+        );
+        const current = this.#history.sample(estimatedServerTick);
+        const predictedLocal = this.#predictedLocal.sample(now);
+        const contactProps = predictedLocal
+          ? current
+              .filter(
+                (body) =>
+                  this.#physicsPropIds.has(idKey(body.id)) &&
+                  distance(body.position, predictedLocal.position) <= FULL_RATE_BODY_RADIUS_METRES,
+              )
+              .toSorted(
+                (left, right) =>
+                  distance(left.position, predictedLocal.position) -
+                  distance(right.position, predictedLocal.position),
+              )
+              .slice(0, STATE_ALWAYS_NEAR_BODY_SLOTS)
+          : [];
         const predictedBodies = [...this.#predictedBodies.values()].flatMap((timeline) => {
           const body = timeline.sample(now);
           return body ? [body] : [];
         });
-        this.#apply(mergeBodySamples(authoritative, predictedBodies));
-        const current = this.#history.sample(estimatedServerTick);
-        const predictedLocal = this.#predictedLocal.sample(now);
+        this.#apply(
+          mergeBodySamples(mergeBodySamples(authoritative, contactProps), predictedBodies),
+        );
         if (predictedLocal) {
           this.#apply([predictedLocal]);
           this.#follow(predictedLocal);

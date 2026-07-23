@@ -24,7 +24,7 @@ apps/web/
   index.html
   main.ts
   style.css
-  session.ts            WebSocket lifecycle and protocol dispatch
+  session.ts            WebSocket control, WebRTC signaling, datagram dispatch
   prediction-worker.ts  Box3D worker entrypoint
   prediction-client.ts  worker ownership and message bridge
   prediction.ts         replay and reconciliation implementation
@@ -51,8 +51,8 @@ Three.js objects.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission without advancing local physics by
-elapsed wall time. Leaving the page closes the gameplay socket, prediction worker,
-geometries, materials, and renderer resources.
+elapsed wall time. Leaving the page closes the WebSocket, RTCPeerConnection,
+data channels, prediction worker, geometries, materials, and renderer resources.
 
 ## Visual language
 
@@ -101,18 +101,18 @@ interaction rays, map geometry, and network transforms remain full precision.
 
 The server exposes a deliberately small surface:
 
-| Route                                     | Purpose                            |
-| ----------------------------------------- | ---------------------------------- |
-| `/` and SPA fallback                      | browser application                |
-| `/game`                                   | gameplay WebSocket upgrade         |
-| `/healthz`                                | process and event-loop health      |
-| `/readyz`                                 | map, Box3D, and SQLite readiness   |
-| `/metrics`                                | simulation and send-queue metrics  |
-| `/world.bin`                              | immutable compiled map bundle      |
-| `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets          |
-| `/player-billboard.png`                   | generated directional player atlas |
-| `/textures.json` and `/textures/*`        | hashed authored material textures  |
-| `/admin/reset`                            | authenticated world reset request  |
+| Route                                     | Purpose                             |
+| ----------------------------------------- | ----------------------------------- |
+| `/` and SPA fallback                      | browser application                 |
+| `/game`                                   | control/signaling WebSocket upgrade |
+| `/healthz`                                | process and event-loop health       |
+| `/readyz`                                 | map, Box3D, and SQLite readiness    |
+| `/metrics`                                | simulation and send-queue metrics   |
+| `/world.bin`                              | immutable compiled map bundle       |
+| `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets           |
+| `/player-billboard.png`                   | generated directional player atlas  |
+| `/textures.json` and `/textures/*`        | hashed authored material textures   |
+| `/admin/reset`                            | authenticated world reset request   |
 
 Browser assets and gameplay share an origin, so no application CORS layer is
 required. Administrative authorization remains server-side and never trusts UI
@@ -126,9 +126,12 @@ assets. Its runtime stage contains the minimum Bun runtime and generated output.
 
 The image starts one command and one Bun process. `/data` is the only writable
 persistent path. Production configuration uses `PORT`, `HOST`, `DATABASE_PATH`,
-`PUBLIC_ORIGIN`, and `ADMIN_TOKEN`. Startup validates ranges, URL schemes, and
-production administration-token length before binding the port. Secrets are
-never bundled into browser assets.
+`PUBLIC_ORIGIN`, `ADMIN_TOKEN`, `RTC_PORT_MIN`, `RTC_PORT_MAX`,
+`RTC_ADDITIONAL_HOST_IPS`, and optional `RTC_ICE_SERVERS_JSON`. Startup validates
+HTTP/UDP ranges, IPs, ICE server schemes, URL schemes, and production
+administration-token length before binding. The deployment publishes the
+configured UDP range and supplies TURN when direct candidates are not reachable.
+Secrets are never bundled into browser assets.
 
 GitHub Actions builds this Dockerfile on pushes to `main`, version tags, and
 manual dispatches, then publishes it to `ghcr.io/<owner>/<repository>`. The

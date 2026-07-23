@@ -18,6 +18,10 @@ Keep these invariants:
 - Clients send intent, never authoritative transforms or interaction results.
 - TrenchBroom Valve 220 maps and the TypeScript entity schema are authored truth.
 - Physics advances at a fixed server timestep; never step it by client time.
+- Reliable control/lifecycle and disposable input/state use separate transport
+  semantics; never put current-state snapshots behind an ordered reliable queue.
+- Client prop simulation is collision assistance only; prop presentation and
+  gameplay results remain authoritative.
 - Replication, persistence, `mapRevision`, and `worldEpoch` are separate.
 
 Canonical design documents state selected behavior. Put TODOs, sequencing, and

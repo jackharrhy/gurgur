@@ -1,14 +1,17 @@
 import {
+  INTERPOLATION_MAX_DELAY_TICKS,
+  INTERPOLATION_MIN_DELAY_TICKS,
   PHYSICS_HZ,
+  STATE_EXTRAPOLATION_MAX_TICKS,
   SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_FLAG_TELEPORT,
   SNAPSHOT_HISTORY_PACKETS,
+  SNAPSHOT_INTERVAL_TICKS,
   type BodySnapshot,
   type Quat,
   type Snapshot,
   type Vec3,
 } from "@gurgur/shared";
-
-const MAX_EXTRAPOLATION_TICKS = PHYSICS_HZ * 0.05;
 
 function key(body: BodySnapshot): string {
   return `${body.id.index}:${body.id.generation}`;
@@ -38,12 +41,18 @@ function interpolate(a: BodySnapshot, b: BodySnapshot, amount: number): BodySnap
       y: a.position.y + (b.position.y - a.position.y) * amount,
       z: a.position.z + (b.position.z - a.position.z) * amount,
     },
-    rotation: { x: qx / length, y: qy / length, z: qz / length, w: qw / length },
+    rotation: {
+      x: qx / length,
+      y: qy / length,
+      z: qz / length,
+      w: qw / length,
+    },
   };
 }
 
 export type SnapshotTimeline = {
   readonly latestTick: number | null;
+  readonly interpolationDelayTicks: number;
   push(snapshot: Snapshot, receivedAtMs?: number, oneWayDelayMs?: number): void;
   observeServerTick(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   serverTickAt(nowMs: number): number;
@@ -58,11 +67,17 @@ export type TimelineSample = {
 
 export function createSnapshotTimeline(): SnapshotTimeline {
   let worldEpoch: number | null = null;
-  let snapshots: Snapshot[] = [];
+  let tracks = new Map<string, Array<{ tick: number; body: BodySnapshot }>>();
+  let playerIds = new Set<string>();
+  let latestObservedTick: number | null = null;
   let clockTick: number | null = null;
   let clockAtMs = 0;
+  let previousTransitMs: number | null = null;
+  let jitterMs = 0;
+  let lossPressure = 0;
+  let interpolationDelayTicks = INTERPOLATION_MIN_DELAY_TICKS;
 
-  const latestTick = (): number | null => snapshots.at(-1)?.serverTick ?? null;
+  const latestTick = (): number | null => latestObservedTick;
 
   const serverTickAt = (nowMs: number): number => {
     if (clockTick === null) return latestTick() ?? 0;
@@ -85,38 +100,59 @@ export function createSnapshotTimeline(): SnapshotTimeline {
   const push = (snapshot: Snapshot, receivedAtMs = performance.now(), oneWayDelayMs = 0): void => {
     if (snapshot.worldEpoch !== worldEpoch) {
       worldEpoch = snapshot.worldEpoch;
-      snapshots = [];
+      tracks = new Map();
+      playerIds = new Set();
+      latestObservedTick = null;
       clockTick = null;
+      previousTransitMs = null;
+      jitterMs = 0;
+      lossPressure = 0;
+      interpolationDelayTicks = INTERPOLATION_MIN_DELAY_TICKS;
     }
-    const latest = snapshots.at(-1);
-    if (latest && snapshot.serverTick <= latest.serverTick) return;
-    snapshots.push(snapshot);
-    if (snapshots.length > SNAPSHOT_HISTORY_PACKETS) snapshots.shift();
+    if (latestObservedTick !== null && snapshot.serverTick > latestObservedTick) {
+      const expectedSnapshotTicks = Math.max(1, snapshot.serverTick - latestObservedTick);
+      lossPressure +=
+        (Math.max(0, expectedSnapshotTicks / SNAPSHOT_INTERVAL_TICKS - 1) - lossPressure) * 0.125;
+    }
+    latestObservedTick = Math.max(latestObservedTick ?? snapshot.serverTick, snapshot.serverTick);
+    const transitMs = receivedAtMs - (snapshot.serverTick * 1_000) / PHYSICS_HZ;
+    if (previousTransitMs !== null) {
+      jitterMs += (Math.abs(transitMs - previousTransitMs) - jitterMs) * 0.125;
+    }
+    previousTransitMs = transitMs;
+    const adaptiveDelayMs = Math.min(250, Math.max(100, 100 + jitterMs * 2.5 + lossPressure * 20));
+    interpolationDelayTicks = Math.min(
+      INTERPOLATION_MAX_DELAY_TICKS,
+      Math.max(INTERPOLATION_MIN_DELAY_TICKS, (adaptiveDelayMs * PHYSICS_HZ) / 1_000),
+    );
+    for (const player of snapshot.players)
+      playerIds.add(`${player.id.index}:${player.id.generation}`);
+    for (const body of snapshot.bodies) {
+      const identity = key(body);
+      const track = tracks.get(identity) ?? [];
+      const existing = track.findIndex((state) => state.tick === snapshot.serverTick);
+      if (existing >= 0) track[existing] = { tick: snapshot.serverTick, body };
+      else {
+        const insertion = track.findIndex((state) => state.tick > snapshot.serverTick);
+        if (insertion < 0) track.push({ tick: snapshot.serverTick, body });
+        else track.splice(insertion, 0, { tick: snapshot.serverTick, body });
+      }
+      while (track.length > SNAPSHOT_HISTORY_PACKETS) track.shift();
+      tracks.set(identity, track);
+    }
     observeServerTick(snapshot.serverTick, receivedAtMs, oneWayDelayMs);
   };
 
   const sampleWithMetadata = (targetTick: number): TimelineSample => {
-    if (snapshots.length === 0) return { bodies: [], extrapolatedBodyIds: [] };
-    if (targetTick <= snapshots[0]!.serverTick) {
-      return { bodies: snapshots[0]!.bodies, extrapolatedBodyIds: [] };
-    }
-
-    const tracks = new Map<string, Array<{ tick: number; body: BodySnapshot }>>();
-    const playerIds = new Set<string>();
-    for (const snapshot of snapshots) {
-      for (const player of snapshot.players)
-        playerIds.add(`${player.id.index}:${player.id.generation}`);
-      for (const body of snapshot.bodies) {
-        const identity = key(body);
-        const track = tracks.get(identity) ?? [];
-        track.push({ tick: snapshot.serverTick, body });
-        tracks.set(identity, track);
-      }
-    }
-
+    if (tracks.size === 0) return { bodies: [], extrapolatedBodyIds: [] };
+    const earliestTick = Math.min(...[...tracks.values()].map((track) => track[0]!.tick));
     const bodies: BodySnapshot[] = [];
     const extrapolatedBodyIds: BodySnapshot["id"][] = [];
     for (const track of tracks.values()) {
+      if (targetTick < track[0]!.tick) {
+        if (track[0]!.tick === earliestTick) bodies.push(track[0]!.body);
+        continue;
+      }
       let older: (typeof track)[number] | null = null;
       let newer: (typeof track)[number] | null = null;
       for (const state of track) {
@@ -128,7 +164,8 @@ export function createSnapshotTimeline(): SnapshotTimeline {
       }
       if (!older) continue;
       if (!newer) {
-        const seconds = Math.min(targetTick - older.tick, MAX_EXTRAPOLATION_TICKS) / PHYSICS_HZ;
+        const seconds =
+          Math.min(targetTick - older.tick, STATE_EXTRAPOLATION_MAX_TICKS) / PHYSICS_HZ;
         const extrapolationState = playerIds.has(key(older.body))
           ? withInferredPlayerVelocity(track)
           : older.body;
@@ -139,7 +176,7 @@ export function createSnapshotTimeline(): SnapshotTimeline {
         continue;
       }
       if (older.tick === newer.tick || targetTick === newer.tick) bodies.push(newer.body);
-      else if (newer.body.flags) bodies.push(older.body);
+      else if (((newer.body.flags ?? 0) & SNAPSHOT_FLAG_TELEPORT) !== 0) bodies.push(older.body);
       else
         bodies.push(
           interpolate(
@@ -157,6 +194,9 @@ export function createSnapshotTimeline(): SnapshotTimeline {
   return {
     get latestTick() {
       return latestTick();
+    },
+    get interpolationDelayTicks() {
+      return interpolationDelayTicks;
     },
     push,
     observeServerTick,
@@ -225,5 +265,10 @@ function integrate(rotation: Quat, angularVelocity: Vec3, seconds: number): Quat
     w: w * rotation.w - x * rotation.x - y * rotation.y - z * rotation.z,
   };
   const length = Math.hypot(result.x, result.y, result.z, result.w) || 1;
-  return { x: result.x / length, y: result.y / length, z: result.z / length, w: result.w / length };
+  return {
+    x: result.x / length,
+    y: result.y / length,
+    z: result.z / length,
+    w: result.w / length,
+  };
 }

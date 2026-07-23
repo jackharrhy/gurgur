@@ -6,13 +6,20 @@ import type { InputCommand } from "./types";
 export const SNAPSHOT_TAG = 1;
 export const INPUT_TAG = 2;
 export const LIFECYCLE_TAG = 3;
-const HEADER_BYTES = 15;
-const BODY_BYTES = 61;
-const PLAYER_BYTES = 41;
-const INPUT_BYTES = 53;
+export const SNAPSHOT_HEADER_BYTES = 15;
+export const SNAPSHOT_BODY_BYTES = 41;
+export const SNAPSHOT_PLAYER_BYTES = 36;
+const HEADER_BYTES = SNAPSHOT_HEADER_BYTES;
+const BODY_BYTES = SNAPSHOT_BODY_BYTES;
+const PLAYER_BYTES = SNAPSHOT_PLAYER_BYTES;
+const INPUT_HEADER_BYTES = 8;
+const INPUT_RECORD_BYTES = 46;
+const MAX_INPUT_COMMANDS = 4;
 const LIFECYCLE_HEADER_BYTES = 11;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
+const UNIT_INT16_SCALE = 32_767;
+const VELOCITY_INT16_SCALE = 256;
 
 const runtimeClassToTag = {
   func_physics: 1,
@@ -152,54 +159,96 @@ export function decodeLifecycle(bytes: ArrayBuffer | ArrayBufferView): Lifecycle
 }
 
 export function encodeInput(command: InputCommand): ArrayBuffer {
-  const bytes = new ArrayBuffer(INPUT_BYTES);
+  return encodeInputBundle([command]);
+}
+
+export function encodeInputBundle(commands: readonly InputCommand[]): ArrayBuffer {
+  if (commands.length === 0 || commands.length > MAX_INPUT_COMMANDS)
+    throw new Error("input bundle count is invalid");
+  const first = commands[0]!;
+  if (
+    commands.some(
+      (command) =>
+        command.protocolVersion !== first.protocolVersion ||
+        command.worldEpoch !== first.worldEpoch,
+    )
+  )
+    throw new Error("input bundle commands do not share an epoch");
+  const bytes = new ArrayBuffer(INPUT_HEADER_BYTES + commands.length * INPUT_RECORD_BYTES);
   const view = new DataView(bytes);
   view.setUint8(0, INPUT_TAG);
-  view.setUint16(1, command.protocolVersion, true);
-  view.setUint32(3, command.worldEpoch, true);
-  view.setUint32(7, command.sequence, true);
-  view.setUint32(11, command.clientTick, true);
-  view.setFloat32(15, command.moveX, true);
-  view.setFloat32(19, command.moveZ, true);
-  view.setFloat32(23, command.lookYaw, true);
-  view.setFloat32(27, command.lookPitch, true);
-  view.setUint16(31, command.buttons, true);
-  view.setUint32(33, command.jumpCounter, true);
-  view.setUint32(37, command.interactCounter, true);
-  view.setUint32(41, command.interactTarget?.index ?? 0xffff_ffff, true);
-  view.setUint32(45, command.interactTarget?.generation ?? 0xffff_ffff, true);
-  view.setUint32(49, command.primaryCounter, true);
+  view.setUint16(1, first.protocolVersion, true);
+  view.setUint32(3, first.worldEpoch, true);
+  view.setUint8(7, commands.length);
+  let offset = INPUT_HEADER_BYTES;
+  for (const command of commands) {
+    view.setUint32(offset, command.sequence, true);
+    view.setUint32(offset + 4, command.clientTick, true);
+    view.setFloat32(offset + 8, command.moveX, true);
+    view.setFloat32(offset + 12, command.moveZ, true);
+    view.setFloat32(offset + 16, command.lookYaw, true);
+    view.setFloat32(offset + 20, command.lookPitch, true);
+    view.setUint16(offset + 24, command.buttons, true);
+    view.setUint32(offset + 26, command.jumpCounter, true);
+    view.setUint32(offset + 30, command.interactCounter, true);
+    view.setUint32(offset + 34, command.interactTarget?.index ?? 0xffff_ffff, true);
+    view.setUint32(offset + 38, command.interactTarget?.generation ?? 0xffff_ffff, true);
+    view.setUint32(offset + 42, command.primaryCounter, true);
+    offset += INPUT_RECORD_BYTES;
+  }
   return bytes;
 }
 
 export function decodeInput(bytes: ArrayBuffer | ArrayBufferView): InputCommand {
+  const commands = decodeInputBundle(bytes);
+  if (commands.length !== 1) throw new Error("input packet contains more than one command");
+  return commands[0]!;
+}
+
+export function decodeInputBundle(bytes: ArrayBuffer | ArrayBufferView): InputCommand[] {
   const view =
     bytes instanceof ArrayBuffer
       ? new DataView(bytes)
       : new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.byteLength !== INPUT_BYTES) throw new Error("input packet length mismatch");
+  if (view.byteLength < INPUT_HEADER_BYTES) throw new Error("input packet is truncated");
   if (view.getUint8(0) !== INPUT_TAG) throw new Error("unknown binary packet tag");
   if (view.getUint16(1, true) !== PROTOCOL_VERSION)
     throw new Error("input protocol version mismatch");
-  return {
-    type: "input",
-    protocolVersion: view.getUint16(1, true),
-    worldEpoch: view.getUint32(3, true),
-    sequence: view.getUint32(7, true),
-    clientTick: view.getUint32(11, true),
-    moveX: view.getFloat32(15, true),
-    moveZ: view.getFloat32(19, true),
-    lookYaw: view.getFloat32(23, true),
-    lookPitch: view.getFloat32(27, true),
-    buttons: view.getUint16(31, true),
-    jumpCounter: view.getUint32(33, true),
-    interactCounter: view.getUint32(37, true),
-    interactTarget:
-      view.getUint32(41, true) === 0xffff_ffff
-        ? null
-        : { index: view.getUint32(41, true), generation: view.getUint32(45, true) },
-    primaryCounter: view.getUint32(49, true),
-  };
+  const count = view.getUint8(7);
+  if (
+    count === 0 ||
+    count > MAX_INPUT_COMMANDS ||
+    view.byteLength !== INPUT_HEADER_BYTES + count * INPUT_RECORD_BYTES
+  )
+    throw new Error("input packet length mismatch");
+  const commands: InputCommand[] = [];
+  let offset = INPUT_HEADER_BYTES;
+  for (let index = 0; index < count; index += 1) {
+    commands.push({
+      type: "input",
+      protocolVersion: view.getUint16(1, true),
+      worldEpoch: view.getUint32(3, true),
+      sequence: view.getUint32(offset, true),
+      clientTick: view.getUint32(offset + 4, true),
+      moveX: view.getFloat32(offset + 8, true),
+      moveZ: view.getFloat32(offset + 12, true),
+      lookYaw: view.getFloat32(offset + 16, true),
+      lookPitch: view.getFloat32(offset + 20, true),
+      buttons: view.getUint16(offset + 24, true),
+      jumpCounter: view.getUint32(offset + 26, true),
+      interactCounter: view.getUint32(offset + 30, true),
+      interactTarget:
+        view.getUint32(offset + 34, true) === 0xffff_ffff
+          ? null
+          : {
+              index: view.getUint32(offset + 34, true),
+              generation: view.getUint32(offset + 38, true),
+            },
+      primaryCounter: view.getUint32(offset + 42, true),
+    });
+    offset += INPUT_RECORD_BYTES;
+  }
+  return commands;
 }
 
 export function encodeSnapshot(snapshot: Snapshot): ArrayBuffer {
@@ -232,17 +281,17 @@ export function encodeSnapshot(snapshot: Snapshot): ArrayBuffer {
     view.setFloat32(offset + 8, body.position.x, true);
     view.setFloat32(offset + 12, body.position.y, true);
     view.setFloat32(offset + 16, body.position.z, true);
-    view.setFloat32(offset + 20, body.rotation.x, true);
-    view.setFloat32(offset + 24, body.rotation.y, true);
-    view.setFloat32(offset + 28, body.rotation.z, true);
-    view.setFloat32(offset + 32, body.rotation.w, true);
-    view.setFloat32(offset + 36, body.linearVelocity?.x ?? 0, true);
-    view.setFloat32(offset + 40, body.linearVelocity?.y ?? 0, true);
-    view.setFloat32(offset + 44, body.linearVelocity?.z ?? 0, true);
-    view.setFloat32(offset + 48, body.angularVelocity?.x ?? 0, true);
-    view.setFloat32(offset + 52, body.angularVelocity?.y ?? 0, true);
-    view.setFloat32(offset + 56, body.angularVelocity?.z ?? 0, true);
-    view.setUint8(offset + 60, body.flags ?? 0);
+    view.setInt16(offset + 20, quantizeUnit(body.rotation.x), true);
+    view.setInt16(offset + 22, quantizeUnit(body.rotation.y), true);
+    view.setInt16(offset + 24, quantizeUnit(body.rotation.z), true);
+    view.setInt16(offset + 26, quantizeUnit(body.rotation.w), true);
+    view.setInt16(offset + 28, quantizeVelocity(body.linearVelocity?.x ?? 0), true);
+    view.setInt16(offset + 30, quantizeVelocity(body.linearVelocity?.y ?? 0), true);
+    view.setInt16(offset + 32, quantizeVelocity(body.linearVelocity?.z ?? 0), true);
+    view.setInt16(offset + 34, quantizeVelocity(body.angularVelocity?.x ?? 0), true);
+    view.setInt16(offset + 36, quantizeVelocity(body.angularVelocity?.y ?? 0), true);
+    view.setInt16(offset + 38, quantizeVelocity(body.angularVelocity?.z ?? 0), true);
+    view.setUint8(offset + 40, body.flags ?? 0);
     offset += BODY_BYTES;
   }
   for (const player of snapshot.players) {
@@ -251,19 +300,18 @@ export function encodeSnapshot(snapshot: Snapshot): ArrayBuffer {
     view.setFloat32(offset + 8, player.position.x, true);
     view.setFloat32(offset + 12, player.position.y, true);
     view.setFloat32(offset + 16, player.position.z, true);
-    view.setFloat32(offset + 20, player.yaw, true);
-    view.setFloat32(offset + 24, player.verticalVelocity, true);
+    view.setInt16(offset + 20, quantizeAngle(player.yaw), true);
+    view.setInt16(offset + 22, quantizeVelocity(player.verticalVelocity), true);
     view.setUint32(
-      offset + 28,
+      offset + 24,
       player.lastProcessedInputSequence < 0 ? 0xffff_ffff : player.lastProcessedInputSequence,
       true,
     );
-    view.setUint32(offset + 32, player.lastJumpCounter, true);
-    view.setUint16(offset + 36, player.stepCooldown, true);
-    view.setUint8(offset + 38, Number(player.grounded));
-    view.setUint8(offset + 39, Number(player.crouched));
+    view.setUint32(offset + 28, player.lastJumpCounter, true);
+    view.setUint16(offset + 32, player.stepCooldown, true);
+    view.setUint8(offset + 34, Number(player.grounded) | (Number(player.crouched) << 1));
     view.setUint8(
-      offset + 40,
+      offset + 35,
       playerBodies.get(`${player.id.index}:${player.id.generation}`)?.flags ?? 0,
     );
     offset += PLAYER_BYTES;
@@ -286,6 +334,12 @@ export function decodeSnapshot(bytes: ArrayBuffer): Snapshot {
   const bodies: Snapshot["bodies"] = [];
   let offset = HEADER_BYTES;
   for (let index = 0; index < bodyCount; index += 1) {
+    const rotation = normalizeQuaternion({
+      x: view.getInt16(offset + 20, true) / UNIT_INT16_SCALE,
+      y: view.getInt16(offset + 22, true) / UNIT_INT16_SCALE,
+      z: view.getInt16(offset + 24, true) / UNIT_INT16_SCALE,
+      w: view.getInt16(offset + 26, true) / UNIT_INT16_SCALE,
+    });
     bodies.push({
       id: {
         index: view.getUint32(offset, true),
@@ -296,30 +350,26 @@ export function decodeSnapshot(bytes: ArrayBuffer): Snapshot {
         y: view.getFloat32(offset + 12, true),
         z: view.getFloat32(offset + 16, true),
       },
-      rotation: {
-        x: view.getFloat32(offset + 20, true),
-        y: view.getFloat32(offset + 24, true),
-        z: view.getFloat32(offset + 28, true),
-        w: view.getFloat32(offset + 32, true),
-      },
+      rotation,
       linearVelocity: {
-        x: view.getFloat32(offset + 36, true),
-        y: view.getFloat32(offset + 40, true),
-        z: view.getFloat32(offset + 44, true),
+        x: view.getInt16(offset + 28, true) / VELOCITY_INT16_SCALE,
+        y: view.getInt16(offset + 30, true) / VELOCITY_INT16_SCALE,
+        z: view.getInt16(offset + 32, true) / VELOCITY_INT16_SCALE,
       },
       angularVelocity: {
-        x: view.getFloat32(offset + 48, true),
-        y: view.getFloat32(offset + 52, true),
-        z: view.getFloat32(offset + 56, true),
+        x: view.getInt16(offset + 34, true) / VELOCITY_INT16_SCALE,
+        y: view.getInt16(offset + 36, true) / VELOCITY_INT16_SCALE,
+        z: view.getInt16(offset + 38, true) / VELOCITY_INT16_SCALE,
       },
-      flags: view.getUint8(offset + 60),
+      flags: view.getUint8(offset + 40),
     });
     offset += BODY_BYTES;
   }
 
   const players: Snapshot["players"] = [];
   for (let index = 0; index < playerCount; index += 1) {
-    const acknowledged = view.getUint32(offset + 28, true);
+    const acknowledged = view.getUint32(offset + 24, true);
+    const stateFlags = view.getUint8(offset + 34);
     const player = {
       id: { index: view.getUint32(offset, true), generation: view.getUint32(offset + 4, true) },
       position: {
@@ -327,13 +377,13 @@ export function decodeSnapshot(bytes: ArrayBuffer): Snapshot {
         y: view.getFloat32(offset + 12, true),
         z: view.getFloat32(offset + 16, true),
       },
-      yaw: view.getFloat32(offset + 20, true),
-      verticalVelocity: view.getFloat32(offset + 24, true),
+      yaw: (view.getInt16(offset + 20, true) * Math.PI) / UNIT_INT16_SCALE,
+      verticalVelocity: view.getInt16(offset + 22, true) / VELOCITY_INT16_SCALE,
       lastProcessedInputSequence: acknowledged === 0xffff_ffff ? -1 : acknowledged,
-      lastJumpCounter: view.getUint32(offset + 32, true),
-      stepCooldown: view.getUint16(offset + 36, true),
-      grounded: view.getUint8(offset + 38) !== 0,
-      crouched: view.getUint8(offset + 39) !== 0,
+      lastJumpCounter: view.getUint32(offset + 28, true),
+      stepCooldown: view.getUint16(offset + 32, true),
+      grounded: (stateFlags & 1) !== 0,
+      crouched: (stateFlags & 2) !== 0,
     };
     players.push(player);
     bodies.push({
@@ -342,7 +392,7 @@ export function decodeSnapshot(bytes: ArrayBuffer): Snapshot {
       rotation: { x: 0, y: Math.sin(player.yaw / 2), z: 0, w: Math.cos(player.yaw / 2) },
       linearVelocity: { x: 0, y: player.verticalVelocity, z: 0 },
       angularVelocity: { x: 0, y: 0, z: 0 },
-      flags: view.getUint8(offset + 40),
+      flags: view.getUint8(offset + 35),
     });
     offset += PLAYER_BYTES;
   }
@@ -352,5 +402,30 @@ export function decodeSnapshot(bytes: ArrayBuffer): Snapshot {
     serverTick: view.getUint32(7, true),
     bodies,
     players,
+  };
+}
+
+function quantizeUnit(value: number): number {
+  return Math.round(Math.max(-1, Math.min(1, value)) * UNIT_INT16_SCALE);
+}
+
+function quantizeVelocity(value: number): number {
+  return Math.round(
+    Math.max(-UNIT_INT16_SCALE, Math.min(UNIT_INT16_SCALE, value * VELOCITY_INT16_SCALE)),
+  );
+}
+
+function quantizeAngle(value: number): number {
+  const normalized = Math.atan2(Math.sin(value), Math.cos(value));
+  return Math.round((normalized / Math.PI) * UNIT_INT16_SCALE);
+}
+
+function normalizeQuaternion(rotation: { x: number; y: number; z: number; w: number }) {
+  const length = Math.hypot(rotation.x, rotation.y, rotation.z, rotation.w) || 1;
+  return {
+    x: rotation.x / length,
+    y: rotation.y / length,
+    z: rotation.z / length,
+    w: rotation.w / length,
   };
 }

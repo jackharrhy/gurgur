@@ -25,6 +25,19 @@ test("production entrypoint rejects invalid environment before binding a port", 
       PLAYER_SPAWN: "0,nope,1",
       expected: "PLAYER_SPAWN",
     },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      RTC_PORT_MIN: "40100",
+      RTC_PORT_MAX: "40000",
+      expected: "RTC_PORT_MIN",
+    },
+    {
+      PORT: "3000",
+      ADMIN_TOKEN: "valid-production-token",
+      RTC_ICE_SERVERS_JSON: '[{"urls":"https://not-ice.example"}]',
+      expected: "RTC_ICE_SERVERS_JSON",
+    },
   ];
   for (const fixture of cases) {
     const child = Bun.spawn([process.execPath, "apps/server/src/index.ts"], {

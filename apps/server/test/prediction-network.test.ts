@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { PLAYER_CAPSULE_RADIUS } from "@gurgur/physics";
+import { PLAYER_CAPSULE_RADIUS, PLAYER_HALF_HEIGHT } from "@gurgur/physics";
 import { compileWorld } from "@gurgur/world-compiler";
 import {
   PHYSICS_DT,
@@ -13,9 +13,13 @@ import { AuthoritativeGame } from "../src/game";
 import { WorldStore } from "../src/store";
 
 const fixturePath = new URL("../../../content/maps/fixtures/network-boxes.map", import.meta.url);
+const pushCorridorPath = new URL(
+  "../../../content/maps/fixtures/network-push-corridor.map",
+  import.meta.url,
+);
 
-describe("authoritative and predicted dynamic-body simulation", () => {
-  test("stays aligned while the player pushes an authored dynamic cube across delayed snapshots", async () => {
+describe("server-authoritative props with player-only prediction", () => {
+  test("replays the player against an authoritative push-prop collision proxy", async () => {
     const bundle = compileWorld(await Bun.file(fixturePath).text(), "network-boxes.map");
     const store = new WorldStore(":memory:");
     const game = await AuthoritativeGame.create(
@@ -37,6 +41,7 @@ describe("authoritative and predicted dynamic-body simulation", () => {
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(game.worldMessage());
       predictor.reconcile(game.snapshot());
+      expect(predictor.predictedBodies.length).toBeGreaterThan(0);
 
       const delayed: Array<{ deliverAtTick: number; snapshot: Snapshot }> = [];
       let maximumPlayerError = 0;
@@ -87,7 +92,77 @@ describe("authoritative and predicted dynamic-body simulation", () => {
     }
   });
 
-  test("keeps stack support and jump state aligned across delayed sparse snapshots", async () => {
+  test("keeps a pushed contact proxy outside the player across bidirectional latency", async () => {
+    const bundle = compileWorld(
+      await Bun.file(pushCorridorPath).text(),
+      "network-push-corridor.map",
+    );
+    const boxEntity = bundle.entities.find((entity) => entity.authoredId === "corridor.light")!;
+    const boxBrush = bundle.brushes[boxEntity.brushIndices[0]!]!;
+    const boxHalfX = Math.max(...boxBrush.localVertices.map((vertex) => Math.abs(vertex.x)));
+    const store = new WorldStore(":memory:");
+    const game = await AuthoritativeGame.create(
+      store,
+      () => {},
+      () => {},
+      {
+        worldBundle: bundle,
+        playerSpawn: {
+          x: boxBrush.center.x - boxHalfX - 1.2,
+          y: PLAYER_HALF_HEIGHT,
+          z: boxBrush.center.z,
+        },
+      },
+    );
+    const predictor = new PlayerPredictor(() => {});
+    try {
+      game.advance(PHYSICS_DT * 60);
+      const playerId = game.connectPlayer("bidirectional-latency-fixture");
+      const box = game
+        .worldMessage()
+        .runtimeEntities.find((entity) => entity.authoredId === "corridor.light")!;
+      predictor.setLocalPlayer(playerId);
+      await predictor.setWorld(game.worldMessage());
+      predictor.reconcile(game.snapshot());
+
+      const delayedInputs: Array<{ deliverAtTick: number; command: InputCommand }> = [];
+      const delayedState: Array<{ deliverAtTick: number; snapshot: Snapshot }> = [];
+      let maximumVisualPenetration = 0;
+      for (let sequence = 0; sequence < 120; sequence += 1) {
+        const input = command(sequence, game.worldEpoch);
+        predictor.pushInput(input);
+        delayedInputs.push({ deliverAtTick: game.serverTick + 5, command: input });
+        while (delayedInputs[0] && delayedInputs[0].deliverAtTick <= game.serverTick) {
+          game.acceptInput(playerId, delayedInputs.shift()!.command);
+        }
+        game.advance(PHYSICS_DT);
+        if (game.serverTick % SNAPSHOT_INTERVAL_TICKS === 0) {
+          delayedState.push({
+            deliverAtTick: game.serverTick + 5,
+            snapshot: game.snapshot({ full: false }),
+          });
+        }
+        while (delayedState[0] && delayedState[0].deliverAtTick <= game.serverTick) {
+          predictor.reconcile(delayedState.shift()!.snapshot);
+        }
+
+        const predictedPlayer = predictor.predictedPosition!;
+        const predictedBox = predictor.predictedBody(box.id)!;
+        maximumVisualPenetration = Math.max(
+          maximumVisualPenetration,
+          PLAYER_CAPSULE_RADIUS + boxHalfX - Math.abs(predictedBox.position.x - predictedPlayer.x),
+        );
+      }
+
+      expect(maximumVisualPenetration).toBeLessThan(0.006);
+    } finally {
+      predictor.dispose();
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("keeps authoritative stack support aligned across delayed sparse snapshots", async () => {
     const bundle = compileWorld(await Bun.file(fixturePath).text(), "network-boxes.map");
     const upperEntity = bundle.entities.find(
       (entity) => entity.authoredId === "fixture.stack.upper",

@@ -1,17 +1,19 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RTCPeerConnection, type RTCDataChannel } from "werift";
 import {
+  INPUT_REDUNDANCY,
   LIFECYCLE_TAG,
-  INTERPOLATION_DELAY_TICKS,
   PHYSICS_DT,
   PROTOCOL_VERSION,
-  SNAPSHOT_HISTORY_PACKETS,
+  STATE_EXTRAPOLATION_MAX_TICKS,
   decodeLifecycle,
   decodeServerControl,
   decodeSnapshot,
   decodeWorldBundle,
-  encodeInput,
+  encodeInputBundle,
+  type BodySnapshot,
   type InputCommand,
   type Snapshot,
   type WelcomeMessage,
@@ -22,26 +24,33 @@ import type { ServerMetrics } from "../../../apps/server/src/server";
 import { PlayerPredictor } from "../../../apps/web/src/prediction";
 import { createSnapshotTimeline, type SnapshotTimeline } from "../../../apps/web/src/interpolation";
 import { NETWORK_PROFILES } from "./profiles";
-import { ReliableOrderedLink, type NetworkProfile } from "./reliable-ordered-link";
+import { UnreliableDatagramLink, type NetworkProfile } from "./unreliable-datagram-link";
 
-type WirePayload = string | ArrayBuffer;
 type ClientMetrics = {
   clientId: number;
   profile: string;
   snapshots: number;
+  inputCommands: number;
+  latestAcknowledgedInputSequence: number;
   predictionErrorsMetres: number[];
+  maxPredictionCorrection: {
+    metres: number;
+    serverTick: number;
+    authority: { x: number; y: number; z: number };
+    predicted: { x: number; y: number; z: number };
+  } | null;
   inputLatencyMs: number[];
   snapshotAgeMs: number[];
-  extrapolatedSamples: number;
-  renderSamples: number;
-  inboundRetransmissions: number;
-  outboundRetransmissions: number;
+  contactProxyOverrunSamples: number;
+  contactProxySamples: number;
+  inboundDroppedPackets: number;
+  outboundDroppedPackets: number;
   queueHighWaterBytes: number;
   errors: string[];
 };
 
 export type HarnessReport = {
-  reportVersion: 2;
+  reportVersion: 4;
   seed: number;
   buildRevision: string;
   mapRevision: string;
@@ -56,7 +65,7 @@ export type HarnessReport = {
     predictionErrorMaxMetres: number;
     inputLatencyP95Ms: number;
     snapshotAgeP95Ms: number;
-    extrapolatedPercent: number;
+    contactProxyOverrunPercent: number;
     correctnessErrors: number;
   };
   profiles: Record<string, HarnessReport["aggregate"]>;
@@ -72,9 +81,12 @@ export type HarnessReport = {
 
 type Client = {
   socket: WebSocket;
-  inbound: ReliableOrderedLink<ArrayBuffer>;
-  outbound: ReliableOrderedLink<WirePayload>;
-  predictor: PlayerPredictor;
+  peer: RTCPeerConnection;
+  inputChannel: RTCDataChannel;
+  stateChannel: RTCDataChannel | null;
+  inbound: UnreliableDatagramLink<ArrayBuffer>;
+  outbound: UnreliableDatagramLink<ArrayBuffer>;
+  predictor: PlayerPredictor | null;
   history: SnapshotTimeline;
   welcome: WelcomeMessage | null;
   latestSnapshot: Snapshot | null;
@@ -88,6 +100,8 @@ type Client = {
   predictionTimed: Array<{ atMs: number; value: number }>;
   snapshotAgeTimed: Array<{ atMs: number; value: number }>;
   nextRenderAtMs: number;
+  inputHistory: InputCommand[];
+  bodyLastReceived: Map<string, { serverTick: number; receivedAtMs: number }>;
 };
 
 export async function runRealNetworkHarness(
@@ -121,19 +135,40 @@ export async function runRealNetworkHarness(
   }
   const adminToken = "network-harness-admin-token";
   const server = await launchServer(directory, dynamicBodyCount - 6, adminToken);
-  const startedAt = performance.now();
+  let startedAt = performance.now();
   const clients: Client[] = [];
   try {
-    for (let clientId = 0; clientId < clientCount; clientId += 1) {
-      clients.push(
-        await createClient(
-          clientId,
-          profiles[clientId % profiles.length]!,
-          seed,
-          server.port,
-          startedAt,
+    clients.push(
+      ...(await Promise.all(
+        Array.from({ length: clientCount }, (_, clientId) =>
+          createClient(
+            clientId,
+            profiles[clientId % profiles.length]!,
+            seed,
+            server.port,
+            startedAt,
+          ),
         ),
+      )),
+    );
+    startedAt = performance.now();
+    for (const client of clients) {
+      client.startedAt = startedAt;
+      client.history = createSnapshotTimeline();
+      client.inbound = new UnreliableDatagramLink(
+        client.inbound.profile,
+        seed + client.metrics.clientId * 2,
       );
+      client.outbound = new UnreliableDatagramLink(
+        client.outbound.profile,
+        seed + client.metrics.clientId * 2 + 1,
+      );
+      client.sequence = 0;
+      client.inputHistory = [];
+      client.inputTimes.clear();
+      client.bodyLastReceived.clear();
+      client.nextRenderAtMs = 0;
+      if (Number.isFinite(client.nextInputAtMs)) client.nextInputAtMs = 0;
     }
     for (const clientId of options.outage?.clientIds ?? []) {
       clients[clientId]?.inbound.addOutage(options.outage!.startMs, options.outage!.endMs);
@@ -163,9 +198,12 @@ export async function runRealNetworkHarness(
     const allPrediction = clients.flatMap((client) => client.metrics.predictionErrorsMetres);
     const allInputLatency = clients.flatMap((client) => client.metrics.inputLatencyMs);
     const allSnapshotAge = clients.flatMap((client) => client.metrics.snapshotAgeMs);
-    const renderSamples = clients.reduce((sum, client) => sum + client.metrics.renderSamples, 0);
-    const extrapolated = clients.reduce(
-      (sum, client) => sum + client.metrics.extrapolatedSamples,
+    const contactProxySamples = clients.reduce(
+      (sum, client) => sum + client.metrics.contactProxySamples,
+      0,
+    );
+    const contactProxyOverruns = clients.reduce(
+      (sum, client) => sum + client.metrics.contactProxyOverrunSamples,
       0,
     );
     const recoveryStart = durationMs - 1_000;
@@ -194,7 +232,7 @@ export async function runRealNetworkHarness(
         );
       }
     return {
-      reportVersion: 2,
+      reportVersion: 4,
       seed,
       buildRevision: process.env.BUILD_REVISION ?? "working-tree",
       mapRevision: clients[0]?.welcome?.mapRevision ?? "unknown",
@@ -209,7 +247,9 @@ export async function runRealNetworkHarness(
         predictionErrorMaxMetres: Math.max(0, ...allPrediction),
         inputLatencyP95Ms: percentile(allInputLatency, 0.95),
         snapshotAgeP95Ms: percentile(allSnapshotAge, 0.95),
-        extrapolatedPercent: renderSamples ? (extrapolated / renderSamples) * 100 : 0,
+        contactProxyOverrunPercent: contactProxySamples
+          ? (contactProxyOverruns / contactProxySamples) * 100
+          : 0,
         correctnessErrors: clients.reduce((sum, client) => sum + client.metrics.errors.length, 0),
       },
       profiles: Object.fromEntries(
@@ -218,12 +258,12 @@ export async function runRealNetworkHarness(
           const prediction = selected.flatMap((client) => client.metrics.predictionErrorsMetres);
           const inputLatency = selected.flatMap((client) => client.metrics.inputLatencyMs);
           const snapshotAge = selected.flatMap((client) => client.metrics.snapshotAgeMs);
-          const selectedRenderSamples = selected.reduce(
-            (sum, client) => sum + client.metrics.renderSamples,
+          const selectedContactProxySamples = selected.reduce(
+            (sum, client) => sum + client.metrics.contactProxySamples,
             0,
           );
-          const selectedExtrapolated = selected.reduce(
-            (sum, client) => sum + client.metrics.extrapolatedSamples,
+          const selectedContactProxyOverruns = selected.reduce(
+            (sum, client) => sum + client.metrics.contactProxyOverrunSamples,
             0,
           );
           return [
@@ -234,8 +274,8 @@ export async function runRealNetworkHarness(
               predictionErrorMaxMetres: Math.max(0, ...prediction),
               inputLatencyP95Ms: percentile(inputLatency, 0.95),
               snapshotAgeP95Ms: percentile(snapshotAge, 0.95),
-              extrapolatedPercent: selectedRenderSamples
-                ? (selectedExtrapolated / selectedRenderSamples) * 100
+              contactProxyOverrunPercent: selectedContactProxySamples
+                ? (selectedContactProxyOverruns / selectedContactProxySamples) * 100
                 : 0,
               correctnessErrors: selected.reduce(
                 (sum, client) => sum + client.metrics.errors.length,
@@ -247,8 +287,8 @@ export async function runRealNetworkHarness(
       ),
       clients: clients.map((client) => ({
         ...client.metrics,
-        inboundRetransmissions: client.inbound.metrics.retransmissions,
-        outboundRetransmissions: client.outbound.metrics.retransmissions,
+        inboundDroppedPackets: client.inbound.metrics.droppedPackets,
+        outboundDroppedPackets: client.outbound.metrics.droppedPackets,
         queueHighWaterBytes: Math.max(
           client.inbound.metrics.queueHighWaterBytes,
           client.outbound.metrics.queueHighWaterBytes,
@@ -265,7 +305,8 @@ export async function runRealNetworkHarness(
   } finally {
     for (const client of clients) {
       client.socket.close();
-      client.predictor.dispose();
+      await client.peer.close();
+      client.predictor?.dispose();
     }
     server.process.kill("SIGTERM");
     await Promise.race([server.process.exited, Bun.sleep(3_000)]);
@@ -281,7 +322,11 @@ async function launchServer(
   port: number;
   process: ReturnType<typeof Bun.spawn>;
 }> {
-  const reservation = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+  const reservation = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response(),
+  });
   const port = reservation.port!;
   reservation.stop(true);
   const process = Bun.spawn(["bun", "apps/server/src/index.ts"], {
@@ -294,7 +339,7 @@ async function launchServer(
       DATABASE_PATH: join(directory, "world.sqlite"),
       ADMIN_TOKEN: adminToken,
       EXTRA_DYNAMIC_BODIES: String(extraDynamicBodies),
-      PLAYER_SPAWN: "0,0.9,8",
+      PLAYER_SPAWN: "0,0.9,-18",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -323,13 +368,27 @@ async function createClient(
 ): Promise<Client> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/game`);
   socket.binaryType = "arraybuffer";
+  const peer = new RTCPeerConnection({
+    iceAdditionalHostAddresses: ["127.0.0.1"],
+  });
+  const inputChannel = peer.createDataChannel("gurgur-input-v2", {
+    ordered: false,
+    maxRetransmits: 0,
+  });
+  const predictor =
+    clientId < 4
+      ? new PlayerPredictor((body) => {
+          client.predictedPosition = body?.position ?? null;
+        })
+      : null;
   const client: Client = {
     socket,
-    inbound: new ReliableOrderedLink(profile, seed + clientId * 2),
-    outbound: new ReliableOrderedLink(profile, seed + clientId * 2 + 1),
-    predictor: new PlayerPredictor((body) => {
-      client.predictedPosition = body?.position ?? null;
-    }),
+    peer,
+    inputChannel,
+    stateChannel: null,
+    inbound: new UnreliableDatagramLink(profile, seed + clientId * 2),
+    outbound: new UnreliableDatagramLink(profile, seed + clientId * 2 + 1),
+    predictor,
     history: createSnapshotTimeline(),
     welcome: null,
     latestSnapshot: null,
@@ -341,13 +400,16 @@ async function createClient(
       clientId,
       profile: profile.name,
       snapshots: 0,
+      inputCommands: 0,
+      latestAcknowledgedInputSequence: -1,
       predictionErrorsMetres: [],
+      maxPredictionCorrection: null,
       inputLatencyMs: [],
       snapshotAgeMs: [],
-      extrapolatedSamples: 0,
-      renderSamples: 0,
-      inboundRetransmissions: 0,
-      outboundRetransmissions: 0,
+      contactProxyOverrunSamples: 0,
+      contactProxySamples: 0,
+      inboundDroppedPackets: 0,
+      outboundDroppedPackets: 0,
       queueHighWaterBytes: 0,
       errors: [],
     },
@@ -356,10 +418,69 @@ async function createClient(
     predictionTimed: [],
     snapshotAgeTimed: [],
     nextRenderAtMs: 0,
+    inputHistory: [],
+    bodyLastReceived: new Map(),
+  };
+  const stateChannelReady = new Promise<RTCDataChannel>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(`client ${clientId} state channel timeout`)),
+      5_000,
+    );
+    peer.onDataChannel.subscribe((channel) => {
+      if (channel.label !== "gurgur-state-v2" || client.stateChannel) {
+        channel.close();
+        return;
+      }
+      client.stateChannel = channel;
+      channel.onMessage.subscribe((packet) => {
+        if (typeof packet === "string") {
+          client.metrics.errors.push("state channel delivered text");
+          return;
+        }
+        const payload = Uint8Array.from(packet).buffer;
+        client.outbound.send(performance.now() - client.startedAt, payload.byteLength, payload);
+      });
+      const finish = (): void => {
+        clearTimeout(timeout);
+        resolve(channel);
+      };
+      channel.stateChanged.subscribe((state) => {
+        if (state === "open") finish();
+      });
+      if (channel.readyState === "open") finish();
+    });
+  });
+  let offerStarted = false;
+  const startOffer = async (): Promise<void> => {
+    if (!client.welcome || offerStarted) return;
+    offerStarted = true;
+    await peer.setLocalDescription(await peer.createOffer());
+    if (!peer.localDescription?.sdp) throw new Error(`client ${clientId} RTC offer has no SDP`);
+    socket.send(
+      JSON.stringify({
+        type: "rtc-offer",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: client.welcome.worldEpoch,
+        description: { type: "offer", sdp: peer.localDescription.sdp },
+      }),
+    );
   };
   socket.addEventListener("message", (event) => {
-    const payload = typeof event.data === "string" ? event.data : (event.data as ArrayBuffer);
-    client.outbound.send(performance.now() - startedAt, wireLength(payload), payload);
+    const now = performance.now() - client.startedAt;
+    if (typeof event.data !== "string") {
+      handleOutbound(client, event.data as ArrayBuffer, now);
+      return;
+    }
+    const message = decodeServerControl(event.data);
+    if (message.type === "rtc-answer") {
+      void peer.setRemoteDescription(message.description).catch((error) => {
+        client.metrics.errors.push(String(error));
+      });
+      return;
+    }
+    handleOutbound(client, event.data, now);
+    if (message.type === "welcome")
+      void startOffer().catch((error) => client.metrics.errors.push(String(error)));
   });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`client ${clientId} open timeout`)), 3_000);
@@ -387,56 +508,54 @@ async function createClient(
       { once: true },
     );
   });
+  await stateChannelReady;
+  const worldDeadline = performance.now() + 5_000;
+  while (!Number.isFinite(client.nextInputAtMs) && performance.now() < worldDeadline) {
+    if (client.metrics.errors.length > 0) throw new Error(client.metrics.errors.join("; "));
+    await Bun.sleep(5);
+  }
+  if (!Number.isFinite(client.nextInputAtMs))
+    throw new Error(`client ${clientId} world load timeout`);
   return client;
 }
 
 function advanceClient(client: Client, nowMs: number, generateInput = true): void {
-  const snapshots: Array<{ payload: ArrayBuffer; deliveryAtMs: number; tick: number }> = [];
   for (const packet of client.outbound.advance(nowMs)) {
-    if (
-      typeof packet.payload !== "string" &&
-      new DataView(packet.payload).getUint8(0) !== LIFECYCLE_TAG
-    ) {
-      const tick = new DataView(packet.payload).getUint32(7, true);
-      snapshots.push({ payload: packet.payload, deliveryAtMs: packet.deliveryAtMs, tick });
-    } else {
-      handleOutbound(client, packet.payload, packet.deliveryAtMs);
-    }
-  }
-  const retainedSnapshots = snapshots.slice(-SNAPSHOT_HISTORY_PACKETS);
-  for (const [index, snapshot] of retainedSnapshots.entries()) {
-    handleOutbound(
-      client,
-      snapshot.payload,
-      snapshot.deliveryAtMs,
-      index === retainedSnapshots.length - 1,
-    );
+    handleOutbound(client, packet.payload, packet.deliveryAtMs);
   }
   if (client.welcome && generateInput) {
     while (client.nextInputAtMs <= nowMs) {
       const command = inputCommand(client, client.nextInputAtMs);
-      const encoded = encodeInput(command);
-      client.predictor.pushInput(command);
+      client.metrics.inputCommands += 1;
+      client.inputHistory.push(command);
+      if (client.inputHistory.length > INPUT_REDUNDANCY) client.inputHistory.shift();
+      const encoded = encodeInputBundle(client.inputHistory);
+      client.predictor?.pushInput(command);
       client.inputTimes.set(command.sequence, client.nextInputAtMs);
       client.inbound.send(client.nextInputAtMs, encoded.byteLength, encoded);
       client.nextInputAtMs += 1_000 * PHYSICS_DT;
     }
   }
   for (const packet of client.inbound.advance(nowMs)) {
-    if (client.socket.readyState === WebSocket.OPEN) client.socket.send(packet.payload);
+    if (client.inputChannel.readyState === "open")
+      client.inputChannel.send(Buffer.from(packet.payload));
   }
   while (client.latestSnapshot && client.nextRenderAtMs <= nowMs) {
-    const target = client.history.serverTickAt(client.nextRenderAtMs) - INTERPOLATION_DELAY_TICKS;
+    const target =
+      client.history.serverTickAt(client.nextRenderAtMs) - client.history.interpolationDelayTicks;
     if (client.nextRenderAtMs >= 500) {
-      const sample = client.history.sampleWithMetadata(target);
-      const locallyPresented = new Set([
-        ...(client.welcome ? [idKey(client.welcome.playerId)] : []),
-        ...client.predictor.predictedBodies.map((body) => idKey(body.id)),
-      ]);
-      client.metrics.renderSamples += 1;
-      if (sample.extrapolatedBodyIds.some((id) => !locallyPresented.has(idKey(id)))) {
-        client.metrics.extrapolatedSamples += 1;
-      }
+      client.history.sample(target);
+      const contactBodies = client.predictor?.predictedBodies ?? [];
+      client.metrics.contactProxySamples += contactBodies.length;
+      client.metrics.contactProxyOverrunSamples += contactBodies.filter((body) => {
+        const lastReceived = client.bodyLastReceived.get(idKey(body.id));
+        return (
+          (lastReceived === undefined ||
+            client.nextRenderAtMs - lastReceived.receivedAtMs >
+              STATE_EXTRAPOLATION_MAX_TICKS * PHYSICS_DT * 1_000) &&
+          moving(body)
+        );
+      }).length;
     } else {
       client.history.sample(target);
     }
@@ -444,23 +563,20 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
   }
 }
 
-function handleOutbound(
-  client: Client,
-  payload: WirePayload,
-  nowMs: number,
-  reconcile = true,
-): void {
+function handleOutbound(client: Client, payload: string | ArrayBuffer, nowMs: number): void {
   if (typeof payload === "string") {
     const message = decodeServerControl(payload);
     if (message.type === "welcome") {
       client.welcome = message;
-      client.predictor.setLocalPlayer(message.playerId);
+      client.predictor?.setLocalPlayer(message.playerId);
       client.nextInputAtMs = Number.POSITIVE_INFINITY;
     } else if (message.type === "world") {
       if (client.welcome && message.worldEpoch !== client.welcome.worldEpoch) {
         client.welcome = { ...client.welcome, worldEpoch: message.worldEpoch };
         client.sequence = 0;
+        client.inputHistory = [];
         client.inputTimes.clear();
+        client.bodyLastReceived.clear();
         client.nextInputAtMs = Number.POSITIVE_INFINITY;
       }
       void loadClientWorld(client, message);
@@ -472,22 +588,47 @@ function handleOutbound(
     return;
   }
   const snapshot = decodeSnapshot(payload);
-  const previousTick = client.history.latestTick;
-  if (previousTick !== null && snapshot.serverTick <= previousTick) return;
-  client.latestSnapshot = snapshot;
+  for (const body of snapshot.bodies) {
+    const key = idKey(body.id);
+    const previousTick = client.bodyLastReceived.get(key)?.serverTick ?? -1;
+    if (snapshot.serverTick > previousTick) {
+      client.bodyLastReceived.set(key, {
+        serverTick: snapshot.serverTick,
+        receivedAtMs: nowMs,
+      });
+    }
+  }
   client.metrics.snapshots += 1;
   client.history.push(snapshot, nowMs, client.outbound.profile.roundTripLatencyMs / 2);
-  if (!reconcile) return;
-  client.predictor.reconcile(snapshot);
+  if (client.latestSnapshot && snapshot.serverTick <= client.latestSnapshot.serverTick) return;
+  client.latestSnapshot = snapshot;
+  client.predictor?.reconcile(snapshot);
   if (!client.welcome) return;
   const authority = snapshot.players.find((player) => sameId(player.id, client.welcome!.playerId));
   if (!authority) {
     client.metrics.errors.push(`missing local player at tick ${snapshot.serverTick}`);
     return;
   }
-  if (client.metrics.snapshots > 3) {
-    client.metrics.predictionErrorsMetres.push(client.predictor.lastReconciliationError);
-    client.predictionTimed.push({ atMs: nowMs, value: client.predictor.lastReconciliationError });
+  client.metrics.latestAcknowledgedInputSequence = authority.lastProcessedInputSequence;
+  if (client.predictor && client.metrics.snapshots > 3) {
+    const correction = client.predictor.lastReconciliationError;
+    client.metrics.predictionErrorsMetres.push(correction);
+    client.predictionTimed.push({
+      atMs: nowMs,
+      value: correction,
+    });
+    const predicted = client.predictor.predictedPosition;
+    if (
+      predicted &&
+      (!client.metrics.maxPredictionCorrection ||
+        correction > client.metrics.maxPredictionCorrection.metres)
+    )
+      client.metrics.maxPredictionCorrection = {
+        metres: correction,
+        serverTick: snapshot.serverTick,
+        authority: { ...authority.position },
+        predicted,
+      };
   }
   const sentAt = client.inputTimes.get(authority.lastProcessedInputSequence);
   if (sentAt !== undefined) client.metrics.inputLatencyMs.push(Math.max(0, nowMs - sentAt));
@@ -503,6 +644,10 @@ function handleOutbound(
 }
 
 async function loadClientWorld(client: Client, message: WorldManifestMessage): Promise<void> {
+  if (!client.predictor) {
+    client.nextInputAtMs = performance.now() - client.startedAt;
+    return;
+  }
   try {
     const response = await fetch(`${client.baseUrl}${message.bundleUrl}`);
     const bundle = decodeWorldBundle(await response.arrayBuffer());
@@ -545,12 +690,6 @@ function percentile(values: number[], amount: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * amount))]!;
 }
 
-function wireLength(payload: WirePayload): number {
-  return typeof payload === "string"
-    ? new TextEncoder().encode(payload).byteLength
-    : payload.byteLength;
-}
-
 function sameId(
   a: { index: number; generation: number },
   b: { index: number; generation: number },
@@ -560,4 +699,19 @@ function sameId(
 
 function idKey(id: { index: number; generation: number }): string {
   return `${id.index}:${id.generation}`;
+}
+
+function moving(body: BodySnapshot): boolean {
+  return (
+    Math.hypot(
+      body.linearVelocity?.x ?? 0,
+      body.linearVelocity?.y ?? 0,
+      body.linearVelocity?.z ?? 0,
+    ) > 0.0001 ||
+    Math.hypot(
+      body.angularVelocity?.x ?? 0,
+      body.angularVelocity?.y ?? 0,
+      body.angularVelocity?.z ?? 0,
+    ) > 0.0001
+  );
 }

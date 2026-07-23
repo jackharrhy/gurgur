@@ -4,17 +4,37 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { createGurgurServer, type GurgurServer } from "../apps/server/src/server";
 import worldBundleJson from "../content/generated/systems-garden.json";
-import { PLAYER_CAPSULE_RADIUS, PLAYER_HALF_HEIGHT } from "../packages/physics/src/index";
+import {
+  PLAYER_CAPSULE_HALF_SEGMENT,
+  PLAYER_CAPSULE_RADIUS,
+  PLAYER_HALF_HEIGHT,
+} from "../packages/physics/src/index";
 import type { WorldBundle } from "../packages/shared/src/index";
+import { compileWorld } from "../packages/world-compiler/src/index";
 
 const directory = process.env.GURGUR_URL ? null : await mkdtemp(join(tmpdir(), "gurgur-browser-"));
 const scenario = process.env.SMOKE_SCENARIO ?? "movement";
-const bundle = worldBundleJson as unknown as WorldBundle;
-const heavyEntity = bundle.entities.find((entity) => entity.authoredId === "physics.cube.heavy");
+const interactionScenario = ["dynamic-landing", "dynamic-push", "grab"].includes(scenario);
+const interactionFixture =
+  scenario === "dynamic-push" || scenario === "grab" ? "network-push-corridor" : "network-boxes";
+const bundle = interactionScenario
+  ? compileWorld(
+      await Bun.file(
+        new URL(`../content/maps/fixtures/${interactionFixture}.map`, import.meta.url),
+      ).text(),
+      `${interactionFixture}.map`,
+    )
+  : (worldBundleJson as unknown as WorldBundle);
+const heavyEntity = bundle.entities.find(
+  (entity) =>
+    entity.classname === "func_physics" &&
+    Boolean(entity.authoredId) &&
+    entity.brushIndices.length === 1,
+);
 const heavyBrush =
   heavyEntity?.brushIndices.length === 1 ? bundle.brushes[heavyEntity.brushIndices[0]!] : null;
-if (["dynamic-landing", "dynamic-push", "grab"].includes(scenario) && !heavyBrush)
-  throw new Error("Systems Garden heavy cube fixture is missing");
+if (interactionScenario && !heavyBrush)
+  throw new Error("Systems Garden physics-prop fixture is missing");
 const playerSpawn = heavyBrush
   ? scenario === "grab"
     ? {
@@ -47,9 +67,8 @@ const server: GurgurServer | null = directory
       port: 0,
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
-      playerSpawn: ["dynamic-landing", "dynamic-push", "grab"].includes(scenario)
-        ? playerSpawn
-        : undefined,
+      playerSpawn: interactionScenario ? playerSpawn : undefined,
+      worldBundle: interactionScenario ? bundle : undefined,
     })
   : null;
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
@@ -111,6 +130,7 @@ try {
   await page.locator('body[data-world-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
+  await page.locator('body[data-input-ready="true"]').waitFor({ timeout: 5_000 });
   await page.waitForFunction(() =>
     performance
       .getEntriesByType("resource")
@@ -157,15 +177,59 @@ try {
   await page.waitForFunction(() => Number(document.body.dataset.serverTick) >= 6);
   if (scenario === "dynamic-push") {
     const cubeHalfX = Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.x)));
+    await page.waitForFunction(
+      () => {
+        const playerX = Number(document.body.dataset.renderedX);
+        const cubeX = Number(document.body.dataset.renderedHeavyCubeX);
+        return (
+          Number.isFinite(playerX) && Number.isFinite(cubeX) && Math.abs(cubeX - playerX) > 0.1
+        );
+      },
+      null,
+      { timeout: 5_000 },
+    );
     const samples = page.evaluate(
       () =>
-        new Promise<Array<{ playerX: number; cubeX: number }>>((resolve) => {
-          const values: Array<{ playerX: number; cubeX: number }> = [];
+        new Promise<
+          Array<{
+            player: { x: number; y: number; z: number };
+            predictedCubeX: number;
+            cube: {
+              position: { x: number; y: number; z: number };
+              rotation: { x: number; y: number; z: number; w: number };
+            };
+          }>
+        >((resolve) => {
+          const values: Array<{
+            player: { x: number; y: number; z: number };
+            predictedCubeX: number;
+            cube: {
+              position: { x: number; y: number; z: number };
+              rotation: { x: number; y: number; z: number; w: number };
+            };
+          }> = [];
           const started = performance.now();
           const sample = (now: number): void => {
             values.push({
-              playerX: Number(document.body.dataset.renderedX),
-              cubeX: Number(document.body.dataset.renderedHeavyCubeX),
+              player: {
+                x: Number(document.body.dataset.renderedX),
+                y: Number(document.body.dataset.renderedY),
+                z: Number(document.body.dataset.renderedZ),
+              },
+              predictedCubeX: Number(document.body.dataset.predictedHeavyCubeX),
+              cube: {
+                position: {
+                  x: Number(document.body.dataset.renderedHeavyCubeX),
+                  y: Number(document.body.dataset.renderedHeavyCubeY),
+                  z: Number(document.body.dataset.renderedHeavyCubeZ),
+                },
+                rotation: {
+                  x: Number(document.body.dataset.renderedHeavyCubeQx),
+                  y: Number(document.body.dataset.renderedHeavyCubeQy),
+                  z: Number(document.body.dataset.renderedHeavyCubeQz),
+                  w: Number(document.body.dataset.renderedHeavyCubeQw),
+                },
+              },
             });
             if (now - started >= 1_500) resolve(values);
             else requestAnimationFrame(sample);
@@ -178,18 +242,43 @@ try {
     const presented = await samples;
     await page.keyboard.up("d");
     const presentedCubeEndX =
-      presented.findLast(({ cubeX }) => Number.isFinite(cubeX))?.cubeX ?? cubeStartX;
+      presented.findLast(({ cube }) => Number.isFinite(cube.position.x))?.cube.position.x ??
+      cubeStartX;
     if (presentedCubeEndX < cubeStartX + 0.01) {
       throw new Error(
         `dynamic cube did not visibly respond to the push: ${(presentedCubeEndX - cubeStartX).toFixed(4)}m`,
       );
     }
-    const penetrations = presented
-      .filter(({ playerX, cubeX }) => Number.isFinite(playerX) && Number.isFinite(cubeX))
-      .map(({ playerX, cubeX }) => playerX + PLAYER_CAPSULE_RADIUS - (cubeX - cubeHalfX));
-    const maxPenetration = Math.max(0, ...penetrations);
+    const halfExtents = {
+      x: cubeHalfX,
+      y: Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.y))),
+      z: Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.z))),
+    };
+    const penetrationSamples = presented
+      .filter(({ player, cube }) =>
+        [
+          ...Object.values(player),
+          ...Object.values(cube.position),
+          ...Object.values(cube.rotation),
+        ].every(Number.isFinite),
+      )
+      .map(({ player, predictedCubeX, cube }) => ({
+        player,
+        predictedCubeX,
+        cube: cube.position,
+        penetration: capsuleBoxPenetration(player, cube, halfExtents),
+      }));
+    const worstPenetration = penetrationSamples.toSorted(
+      (left, right) => right.penetration - left.penetration,
+    )[0];
+    const maxPenetration = Math.max(0, worstPenetration?.penetration ?? 0);
     if (maxPenetration > 0.035) {
-      throw new Error(`presented player phased into dynamic cube by ${maxPenetration.toFixed(4)}m`);
+      throw new Error(
+        `presented player phased into dynamic cube by ${maxPenetration.toFixed(4)}m ` +
+          `(player=${JSON.stringify(worstPenetration?.player)}, ` +
+          `cube=${JSON.stringify(worstPenetration?.cube)}, ` +
+          `predictedCubeX=${worstPenetration?.predictedCubeX})`,
+      );
     }
   } else if (scenario === "dynamic-landing") {
     await page.waitForFunction(
@@ -301,6 +390,28 @@ try {
       clientY: 500,
     });
   } else if (scenario === "gamepad") {
+    const groundedY = await waitForStablePlayerHeight();
+    const jumpCounter = Number(await page.evaluate(() => document.body.dataset.inputJumpCounter));
+    await page.evaluate(() => {
+      (
+        window as unknown as { __gurgurSmokePad: { buttons: Array<{ pressed: boolean }> } }
+      ).__gurgurSmokePad.buttons[0]!.pressed = true;
+    });
+    await page.waitForFunction(
+      (previous) => Number(document.body.dataset.inputJumpCounter) > previous,
+      jumpCounter,
+      { timeout: 2_000 },
+    );
+    await page.evaluate(() => {
+      (
+        window as unknown as { __gurgurSmokePad: { buttons: Array<{ pressed: boolean }> } }
+      ).__gurgurSmokePad.buttons[0]!.pressed = false;
+    });
+    await page.waitForFunction(
+      (y) => Number(document.body.dataset.predictedY) > y + 0.08,
+      groundedY,
+    );
+    await waitForStablePlayerHeight();
     const before = await page.evaluate(() => ({
       x: Number(document.body.dataset.predictedX),
       z: Number(document.body.dataset.predictedZ),
@@ -315,26 +426,11 @@ try {
           Number(document.body.dataset.predictedZ) - z,
         ) > 0.4,
       before,
+      { timeout: 5_000 },
     );
     await page.evaluate(() => {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 0;
     });
-    const groundedY = Number(await page.evaluate(() => document.body.dataset.predictedY));
-    await page.evaluate(() => {
-      (
-        window as unknown as { __gurgurSmokePad: { buttons: Array<{ pressed: boolean }> } }
-      ).__gurgurSmokePad.buttons[0]!.pressed = true;
-    });
-    await page.waitForTimeout(40);
-    await page.evaluate(() => {
-      (
-        window as unknown as { __gurgurSmokePad: { buttons: Array<{ pressed: boolean }> } }
-      ).__gurgurSmokePad.buttons[0]!.pressed = false;
-    });
-    await page.waitForFunction(
-      (y) => Number(document.body.dataset.predictedY) > y + 0.08,
-      groundedY,
-    );
   } else {
     await waitForStablePlayerHeight();
     const movementStart = await page.evaluate(() => ({
@@ -460,4 +556,58 @@ try {
   await browser.close();
   server?.stop();
   if (directory) await rm(directory, { recursive: true, force: true });
+}
+
+function capsuleBoxPenetration(
+  player: { x: number; y: number; z: number },
+  box: {
+    position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number; w: number };
+  },
+  halfExtents: { x: number; y: number; z: number },
+): number {
+  let minimumDistance = Number.POSITIVE_INFINITY;
+  const inverse = {
+    x: -box.rotation.x,
+    y: -box.rotation.y,
+    z: -box.rotation.z,
+    w: box.rotation.w,
+  };
+  for (let index = 0; index <= 64; index += 1) {
+    const amount = index / 64;
+    const point = {
+      x: player.x - box.position.x,
+      y:
+        player.y -
+        PLAYER_CAPSULE_HALF_SEGMENT +
+        amount * PLAYER_CAPSULE_HALF_SEGMENT * 2 -
+        box.position.y,
+      z: player.z - box.position.z,
+    };
+    const local = rotateVector(point, inverse);
+    const separation = {
+      x: Math.max(0, Math.abs(local.x) - halfExtents.x),
+      y: Math.max(0, Math.abs(local.y) - halfExtents.y),
+      z: Math.max(0, Math.abs(local.z) - halfExtents.z),
+    };
+    minimumDistance = Math.min(
+      minimumDistance,
+      Math.hypot(separation.x, separation.y, separation.z),
+    );
+  }
+  return Math.max(0, PLAYER_CAPSULE_RADIUS - minimumDistance);
+}
+
+function rotateVector(
+  vector: { x: number; y: number; z: number },
+  rotation: { x: number; y: number; z: number; w: number },
+): { x: number; y: number; z: number } {
+  const tx = 2 * (rotation.y * vector.z - rotation.z * vector.y);
+  const ty = 2 * (rotation.z * vector.x - rotation.x * vector.z);
+  const tz = 2 * (rotation.x * vector.y - rotation.y * vector.x);
+  return {
+    x: vector.x + rotation.w * tx + (rotation.y * tz - rotation.z * ty),
+    y: vector.y + rotation.w * ty + (rotation.z * tx - rotation.x * tz),
+    z: vector.z + rotation.w * tz + (rotation.x * ty - rotation.y * tx),
+  };
 }

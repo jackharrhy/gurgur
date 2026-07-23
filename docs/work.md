@@ -6,112 +6,113 @@ Updated: 2026-07-23.
 
 ## Current state
 
-The production foundation exists end to end but is not release-complete:
+The authoritative multiplayer replacement is complete as an end-to-end vertical
+slice:
 
-- one Bun process serves the vanilla Three.js app, native gameplay WebSocket,
-  authoritative 60 Hz Box3D world, strict SQLite persistence, administration,
-  health/readiness/metrics, and revision-addressed immutable map assets;
-- the Valve 220 compiler validates the typed entity schema, preserves source and
-  UV identity, emits deterministic binary geometry, supports multi-brush moving
-  bodies, and hashes the result as `mapRevision`;
-- protocol v1 has bounded exact JSON control unions and explicit binary input,
-  snapshot, and lifecycle codecs, including multi-brush lifecycle identity;
-- local player and nearby dynamic-body prediction/replay, collision-clamped
-  display correction, 250 ms unrelated-remote interpolation, movement-event
-  dirty replication, generation-safe reconnect, and epoch reset run through the
-  real browser/server path;
-- doors, platforms, buttons, triggers, relays, delayed signals, grabs, player
-  controller state, sleep state, and cooldown/latch state survive clean-start
-  tick-boundary snapshots and process restart;
-- the browser play view is canvas-only with no HUD, reticle, visible cursor,
-  control overlay, voice client, or voice signaling surface;
-- keyboard/mouse and gamepad movement/jump/use/grab paths are wired; touch keeps
-  HUD-free canvas movement and look gestures;
-- pre-release entity/compiler/persistence compatibility machinery is removed;
-  wire and world-bundle boundaries expose one exact v1 contract;
-- the WebGPURenderer/TSL presentation renders through a 480 x 270
-  nearest-neighbour, palette-quantized `RenderPipeline` with vertex-stage Gouraud
-  lighting, vertex snapping, partially affine mapping, mip-stable animated pixel
-  materials, billboard players, and map-authored decorative sprites.
+- one Bun process owns the persistent 60 Hz Box3D world, serves HTTP and reliable
+  WebSocket control, and terminates per-client WebRTC gameplay channels;
+- protocol v2 sends redundant 60 Hz newest-wins intent and 30 Hz self-contained
+  quantized state datagrams; current state is dropped under backpressure rather
+  than queued behind obsolete state;
+- players send intent only. Loose props, stacks, dominoes, constraints, grabs,
+  sleep, persistence, and interaction outcomes exist only in the server world;
+- the browser restores and replays only its geometric player controller.
+  Authoritative moving bodies are kinematic collision proxies, never locally
+  simulated rigid-body truth. Prop motion extrapolates for at most 100 ms, while
+  collision expires only after 100 ms of real client time without an update;
+- per-client 1,200-byte interest selection reserves four closest-prop slots,
+  rotates other near/far state, repeats terminal sleep, and includes the local
+  player, twelve nearest remotes, and three rotating far remotes;
+- independently sorted per-body tracks accept reordered sparse samples, adapt
+  presentation delay from 100 to 250 ms, and cap velocity extrapolation at
+  100 ms;
+- TrenchBroom Valve 220 fixtures now cover light/heavy corridor pushes, stacked
+  support and sleep propagation, and domino wake/contact chains in addition to
+  the original network boxes;
+- browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
+  prediction worker, Box3D Wasm, and Three.js presentation.
+
+The existing compiler, entity schema, mechanisms, persistence, browser input,
+render pipeline, and content-authoring surfaces remain in place. Canonical
+networking and physics documents and AGENTS invariants were revised where the
+former dynamic-prop prediction design was unsound.
+
+`werift@0.23.0` remains pinned. Its packet-lifetime defect is not vendored or
+patched; state uses its working one-retransmission policy and the application
+still drops buffered snapshots. Its transitive `ip@2.0.1` audit advisory is
+accepted without a shim or unrelated replacement, as recorded in decision 0012.
 
 ## Executable evidence
 
-`bun run check` covers the fast/contract tests plus real-server integration and
-shutdown/configuration tests. The browser commands cover ordinary movement,
-300 ms RTT prediction, dynamic-body landing, grab, HUD-free touch navigation,
-gamepad, and stale-session recovery. Failures retain browser state and screenshots.
+`bun run check` owns formatting, lint, types, unit/contract/simulation tests,
+real-server integration, and shutdown/configuration. The real network matrix
+owns 2, 8, 16, and 32 WebRTC peers, 128 dynamic bodies, Local/Typical/Adverse
+quality paths, a deliberately saturated Constrained path, a five-second outage,
+a receiver stall, and a connected epoch reset.
 
-The deterministic network matrix runs real child-process authority with 2, 8,
-16, and 32 clients, 128 dynamic bodies, independently shaped ordered links,
-five-second outage, receiver stall, connected reset, per-profile metrics, and
-canonical budget gates. Reports are generated under ignored `reports/` paths and
-retained only while diagnosing a regression.
+The final 2026-07-23 seeded matrix passed every gate with zero correctness errors,
+zero state drops, zero queued state bytes, and zero contact-proxy extrapolation
+overruns. The gated 16-client run measured:
 
-The 2026-07-22 network-quality slice passes the complete deterministic matrix with
-zero correctness errors. The final gated 16-client run measured server ticks at
-1.68 ms p95 and 2.43 ms p99. Typical measured effectively zero prediction error
-at p95, 0.25 m p99/max, 71.9 ms snapshot age p95, 243.9 ms acknowledgement p95,
-and 0.46% extrapolation. Adverse measured 0.83/1.08/1.33 m prediction p95/p99/max,
-136.7 ms snapshot age, and 415.7 ms acknowledgement. Five-second outage and
-receiver-stall clients recovered to effectively zero prediction error with
-1.0 ms and 79.5 ms snapshot age, respectively, inside the one-second recovery
-window.
+| Profile | Prediction p95/p99/max  | State age p95 | Input ack p95 |
+| ------- | ----------------------- | ------------- | ------------- |
+| Local   | 0.235 / 0.350 / 0.360 m | 1.0 ms        | 33.4 ms       |
+| Typical | 0.457 / 0.540 / 1.487 m | 72.5 ms       | 121.3 ms      |
+| Adverse | 1.573 / 1.835 / 1.881 m | 135.8 ms      | 199.1 ms      |
 
-The mixed aggregate remains intentionally diagnostic rather than a quality gate:
-its large prediction and snapshot-age tail is dominated by continuously saturated
-Constrained clients. Harness terminal summaries now separate Local/Typical/Adverse
-quality profiles from that 256 Kbit/s saturation profile. Unrelated dirty bodies
-replicate at a staggered 10 Hz while players and five-metre prediction state remain
-20 Hz; the remote presentation buffer is 250 ms. The authored push/stack and
-browser presentation regressions continue to own the local-contact gates.
+At 16 peers the server tick cost was 2.47 ms p95 and 4.06 ms p99. At 32
+peers it was 3.94 ms p95 and 5.18 ms p99, still with no transport queue or
+server-side state drop. After the five-second partition, the affected client
+recovered to 0.0001 m prediction correction p95 and 1.0 ms state age p95 in the
+final second. Receiver-stall recovery was 0.535 m and 74.4 ms. Connected reset
+ended on the new epoch at 0.256 m and 68.0 ms, with no stale input, tracks, or
+handles.
 
-Scheduled soaks are first-class commands:
+The map/prediction regressions additionally prove that only the authority moves
+props, latest intent replaces stale queued intent, action counters survive loss,
+terminal sleep repeats, persistence/reset preserve identity rules, stale contact
+proxies stop after six ticks, moving support remains usable, and current
+player/prop presentation does not create the old temporal overlap seam. Physics
+event extraction also drops post-destruction Box3D events rather than resolving
+them through a recycled runtime slot. Prediction treats a state blackout over
+500 ms as a discontinuity, applies its incoming fresh prop state after clearing
+stale proxies, and shares the server's rejection of implausible single-tick
+controller motion. Every sparse body sample in a render batch reaches prediction
+even though player reconciliation runs only for the newest state. Input does not
+arm until the WebRTC state path has delivered current authority.
+Players that fall ten metres below authored static collision respawn
+authoritatively instead of accumulating an unbounded below-map fall. Teleport
+markers repeat for one second so a disposable state loss cannot hide the
+respawn discontinuity.
+
+Scheduled soaks remain first-class commands:
 
 ```sh
-bun run soak:physics      # 10,000 handle cycles; 1,000,000 fixed ticks
-bun run soak:persistence  # 10,000 transactional save/load cycles and reopen
-bun run soak:connections  # 1,000 same-session replacements with epoch resets
+bun run soak:physics
+bun run soak:persistence
+bun run soak:connections
 ```
-
-One-off decision experiments and superseded plans have been removed. Their durable
-conclusions live in `docs/decisions/`, canonical documents, and focused production
-tests.
 
 ## Active focus
 
-- Extend the local-contact region from a distance-bounded set to an explicit
-  contact-connected island if authored mechanisms create cases where five metres
-  includes too much unrelated dynamic work or excludes a coupled body.
-- Continue decomposing lifecycle owners only where a smaller capability boundary
-  appears. Seven TypeScript classes remain after converting browser input to a
-  lexical factory and deleting voice. Five directly guard external resources or
-  durable queues; the broad
-  `AuthoritativeGame` and `PlayerPredictor` coordinators remain the concrete
-  decomposition targets. The cleanup already split map verification,
-  runtime-body construction, and mechanism/signal state out of the authority,
-  and replaced interpolation/presentation constructors with plain-data factories.
-- Treat the entity schema, generated FGD, map compiler, and production map tests
-  as the stable content-authoring surface while controller/network work continues.
-- Replace the player billboard harness's directional placeholder with final
-  character art, then extend its marker/atlas contract with animation rows.
+There is no remaining undecided networking ownership model. Follow-up work is
+deployment and breadth:
 
-## Release/environment gates
-
-These are release checks rather than undecided architecture:
-
-- run the browser suite in Firefox and WebKit on CI hardware that has those
-  engines installed;
-- build the Docker image, run it with a mounted `/data` volume, exercise HTTP,
-  WebSocket, metrics, authenticated reset, restart restore, and SIGTERM on the
-  target container runtime.
+- supply and validate production STUN/TURN configuration and the bounded UDP
+  range on the target host rather than assuming loopback/direct ICE reachability;
+- run the browser suite in Firefox and WebKit on CI hardware with those engines;
+- run the Docker image with a mounted `/data` volume through HTTP, WebSocket,
+  WebRTC, reset, restart restore, and SIGTERM on the target container runtime;
+- extend long-duration soak coverage when production concurrency and map density
+  targets are known;
+- replace the player billboard harness placeholder with final character art and
+  animation rows.
 
 ## Commands
 
 ```sh
 bun run check
 bun run build
-bun run setup:player-harness
-bun run render:player
 bun run harness:matrix
 bun run smoke:browser
 bun run smoke:latency
@@ -121,4 +122,7 @@ bun run smoke:grab
 bun run smoke:touch
 bun run smoke:gamepad
 bun run smoke:reconnect
+bun run soak:physics
+bun run soak:persistence
+bun run soak:connections
 ```

@@ -7,10 +7,12 @@ import {
   type PlayerControllerState,
 } from "@gurgur/physics";
 import {
+  FAR_BODY_SNAPSHOT_STRIDE,
+  FULL_RATE_BODY_RADIUS_METRES,
   MAX_CATCH_UP_TICKS,
   INPUT_INTENT_TIMEOUT_TICKS,
-  LOCAL_PHYSICS_RADIUS_METRES,
   PHYSICS_DT,
+  PHYSICS_HZ,
   PHYSICS_SUBSTEPS,
   PROTOCOL_VERSION,
   SNAPSHOT_INTERVAL_TICKS,
@@ -31,40 +33,28 @@ import type { PersistedWorld, WorldStore } from "./store";
 import { WORLD_BUNDLE } from "./world";
 
 const SAVE_INTERVAL_TICKS = 5 / PHYSICS_DT;
-const UNRELATED_BODY_SNAPSHOT_STRIDE = 2;
+const TERMINAL_BODY_REPEAT_TICKS = PHYSICS_HZ;
+const DISCONTINUITY_REPEAT_TICKS = PHYSICS_HZ;
 const PLAYER_INDEX_BASE = 0x8000_0000;
+type PlayerIntent = Pick<
+  InputCommand,
+  | "moveX"
+  | "moveZ"
+  | "lookYaw"
+  | "lookPitch"
+  | "buttons"
+  | "jumpCounter"
+  | "interactCounter"
+  | "interactTarget"
+  | "primaryCounter"
+>;
 type Player = {
   id: RuntimeId;
   persistentId: string;
   proxy: RuntimeId;
   state: PlayerControllerState;
-  input: Pick<
-    InputCommand,
-    | "moveX"
-    | "moveZ"
-    | "lookYaw"
-    | "lookPitch"
-    | "buttons"
-    | "jumpCounter"
-    | "interactCounter"
-    | "interactTarget"
-    | "primaryCounter"
-  >;
-  pendingInputs: Array<
-    Pick<
-      InputCommand,
-      | "sequence"
-      | "moveX"
-      | "moveZ"
-      | "lookYaw"
-      | "lookPitch"
-      | "buttons"
-      | "jumpCounter"
-      | "interactCounter"
-      | "interactTarget"
-      | "primaryCounter"
-    >
-  >;
+  input: PlayerIntent;
+  pendingInput: (PlayerIntent & { sequence: number }) | null;
   lastSequence: number;
   lastProcessedInputSequence: number;
   lastInputServerTick: number;
@@ -84,6 +74,8 @@ export class AuthoritativeGame {
   #saveRequested = false;
   readonly #replicationState = new Map<string, { position: Vec3; awake: boolean }>();
   readonly #dirtyBodies = new Set<string>();
+  readonly #terminalBodyRepeatUntilTick = new Map<string, number>();
+  readonly #discontinuityRepeatUntilTick = new Map<string, number>();
   readonly #tickDurationsMs: number[] = [];
   #discardedOverloadSeconds = 0;
   readonly #playerSlots: PlayerSlot[] = [];
@@ -94,7 +86,9 @@ export class AuthoritativeGame {
   #accumulator = 0;
   #lastTime = 0;
   #timer: Timer | null = null;
-  readonly #playerSpawn: Vec3 | null;
+  readonly #spawnPosition: Vec3;
+  readonly #spawnYaw: number;
+  readonly #voidY: number;
   #extraDynamicBodyCount = 0;
 
   private constructor(
@@ -114,7 +108,17 @@ export class AuthoritativeGame {
     this.#onWorld = onWorld;
     this.#worldEpoch = worldEpoch;
     this.#serverTick = serverTick;
-    this.#playerSpawn = playerSpawn;
+    const spawn = bundle.entities.find((entity) => entity.classname === "info_player_start");
+    if (!spawn?.origin) throw new Error("map requires an info_player_start");
+    this.#spawnPosition = playerSpawn
+      ? { ...playerSpawn }
+      : {
+          x: spawn.origin.x,
+          y: spawn.origin.y + PLAYER_HALF_HEIGHT,
+          z: spawn.origin.z,
+        };
+    this.#spawnYaw = Number(spawn.runtimeProperties.angle ?? 0);
+    this.#voidY = Math.min(...bundle.staticCollision.vertices.map((vertex) => vertex.y)) - 10;
   }
 
   static async create(
@@ -169,7 +173,7 @@ export class AuthoritativeGame {
   beginInputStream(id: RuntimeId): boolean {
     const resolved = this.#resolvePlayer(id);
     if (!resolved) return false;
-    resolved.player.pendingInputs.length = 0;
+    resolved.player.pendingInput = null;
     resolved.player.lastSequence = -1;
     resolved.player.lastProcessedInputSequence = -1;
     resolved.player.lastInputServerTick = this.#serverTick;
@@ -221,6 +225,7 @@ export class AuthoritativeGame {
     this.#dormantPlayers.set(resolved.player.persistentId, this.#persistPlayer(resolved.player));
     this.#physics.destroy(resolved.player.proxy);
     this.#replicationState.delete(key(id));
+    this.#discontinuityRepeatUntilTick.delete(key(id));
     resolved.slot.player = null;
     resolved.slot.generation += 1;
     this.#freePlayerSlots.push(resolved.slotIndex);
@@ -233,9 +238,8 @@ export class AuthoritativeGame {
     if (!resolved) return false;
     if (command.worldEpoch !== this.#worldEpoch || command.sequence <= resolved.player.lastSequence)
       return true;
-    if (resolved.player.pendingInputs.length >= 120) resolved.player.pendingInputs.length = 0;
     resolved.player.lastSequence = command.sequence;
-    resolved.player.pendingInputs.push({
+    resolved.player.pendingInput = {
       sequence: command.sequence,
       moveX: clamp(command.moveX, -1, 1),
       moveZ: clamp(command.moveZ, -1, 1),
@@ -246,7 +250,7 @@ export class AuthoritativeGame {
       interactCounter: command.interactCounter,
       interactTarget: command.interactTarget ? { ...command.interactTarget } : null,
       primaryCounter: command.primaryCounter,
-    });
+    };
     return true;
   }
 
@@ -296,18 +300,29 @@ export class AuthoritativeGame {
       const identity = key(handle);
       const { awake, ...state } = this.#physics.state(handle);
       const predictionRelevant = players.some(
-        (player) => distance(player.state.position, state.position) <= LOCAL_PHYSICS_RADIUS_METRES,
+        (player) => distance(player.state.position, state.position) <= FULL_RATE_BODY_RADIUS_METRES,
       );
-      const remoteBodyDue = (snapshotIndex + handle.index) % UNRELATED_BODY_SNAPSHOT_STRIDE === 0;
-      if (!full && !predictionRelevant && (!this.#dirtyBodies.has(identity) || !remoteBodyDue))
+      const repeatUntil = this.#terminalBodyRepeatUntilTick.get(identity) ?? -1;
+      const repeatTerminalState = repeatUntil >= this.#serverTick;
+      if (repeatUntil >= 0 && !repeatTerminalState)
+        this.#terminalBodyRepeatUntilTick.delete(identity);
+      const remoteBodyDue = (snapshotIndex + handle.index) % FAR_BODY_SNAPSHOT_STRIDE === 0;
+      if (
+        !full &&
+        !predictionRelevant &&
+        !repeatTerminalState &&
+        (!this.#dirtyBodies.has(identity) || !remoteBodyDue)
+      )
         return [];
       if (!full) this.#dirtyBodies.delete(identity);
       return [
         {
           ...state,
-          flags: discontinuity
-            ? SNAPSHOT_FLAG_TELEPORT
-            : this.#snapshotFlags(handle, state.position, awake),
+          flags:
+            (discontinuity
+              ? SNAPSHOT_FLAG_TELEPORT
+              : this.#snapshotFlags(handle, state.position, awake)) |
+            (!awake && (full || repeatTerminalState) ? SNAPSHOT_FLAG_SLEEP : 0),
         },
       ];
     });
@@ -368,6 +383,8 @@ export class AuthoritativeGame {
     this.#saveRequested = false;
     this.#replicationState.clear();
     this.#dirtyBodies.clear();
+    this.#terminalBodyRepeatUntilTick.clear();
+    this.#discontinuityRepeatUntilTick.clear();
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
@@ -384,7 +401,7 @@ export class AuthoritativeGame {
       player.proxy = replacement.proxy;
       player.state = replacement.state;
       player.input = replacement.input;
-      player.pendingInputs = replacement.pendingInputs;
+      player.pendingInput = replacement.pendingInput;
       player.lastSequence = replacement.lastSequence;
       player.lastProcessedInputSequence = replacement.lastProcessedInputSequence;
       player.lastInputServerTick = replacement.lastInputServerTick;
@@ -463,16 +480,23 @@ export class AuthoritativeGame {
   }
 
   #processPostPhysics(events: PhysicsStepEvents): void {
-    for (const event of events.moved) this.#dirtyBodies.add(key(event.body));
+    for (const event of events.moved) {
+      const identity = key(event.body);
+      this.#dirtyBodies.add(identity);
+      if (event.fellAsleep)
+        this.#terminalBodyRepeatUntilTick.set(
+          identity,
+          this.#serverTick + TERMINAL_BODY_REPEAT_TICKS,
+        );
+    }
     this.#mechanismRuntime.processSensorBegins(events.sensorBegin);
   }
 
   #stepPlayers(): void {
     for (const player of this.#players()) {
-      const coalescing = player.pendingInputs.length > 12;
-      const pending = coalescing ? player.pendingInputs.pop() : player.pendingInputs.shift();
+      const pending = player.pendingInput;
+      player.pendingInput = null;
       if (pending) {
-        if (coalescing) player.pendingInputs.length = 0;
         player.input = {
           moveX: pending.moveX,
           moveZ: pending.moveZ,
@@ -491,6 +515,10 @@ export class AuthoritativeGame {
       }
       const wasCrouched = player.state.crouched;
       player.state = stepPlayerController(this.#physics, player.state, player.input, PHYSICS_DT);
+      if (player.state.position.y < this.#voidY) {
+        this.#respawnPlayer(player);
+        continue;
+      }
       if (player.state.crouched !== wasCrouched) {
         if (player.grab) {
           this.#physics.destroyConstraint(player.grab.constraint);
@@ -602,14 +630,6 @@ export class AuthoritativeGame {
     persistentId: string,
     restored?: PersistedWorld["players"][number],
   ): Player {
-    const spawn = this.#bundle.entities.find(
-      (entity) => entity.classname === "info_player_start",
-    )?.origin;
-    if (!spawn) throw new Error("map requires an info_player_start");
-    const yaw = Number(
-      this.#bundle.entities.find((entity) => entity.classname === "info_player_start")
-        ?.runtimeProperties.angle ?? 0,
-    );
     const state: PlayerControllerState = restored
       ? {
           position: { ...restored.position },
@@ -621,11 +641,9 @@ export class AuthoritativeGame {
           crouched: restored.crouched,
         }
       : {
-          position: this.#playerSpawn
-            ? { ...this.#playerSpawn }
-            : { x: spawn.x, y: spawn.y + PLAYER_HALF_HEIGHT, z: spawn.z },
+          position: { ...this.#spawnPosition },
           verticalVelocity: 0,
-          yaw,
+          yaw: this.#spawnYaw,
           grounded: false,
           lastJumpCounter: 0,
           stepCooldown: 0,
@@ -639,7 +657,7 @@ export class AuthoritativeGame {
       input: {
         moveX: 0,
         moveZ: 0,
-        lookYaw: yaw,
+        lookYaw: this.#spawnYaw,
         lookPitch: 0,
         buttons: 0,
         jumpCounter: 0,
@@ -647,7 +665,7 @@ export class AuthoritativeGame {
         interactTarget: null,
         primaryCounter: 0,
       },
-      pendingInputs: [],
+      pendingInput: null,
       lastSequence: -1,
       lastProcessedInputSequence: -1,
       lastInputServerTick: this.#serverTick,
@@ -687,6 +705,33 @@ export class AuthoritativeGame {
     return player;
   }
 
+  #respawnPlayer(player: Player): void {
+    if (player.grab) {
+      this.#physics.destroyConstraint(player.grab.constraint);
+      player.grab = null;
+    }
+    this.#physics.destroy(player.proxy);
+    player.state = {
+      position: { ...this.#spawnPosition },
+      verticalVelocity: 0,
+      yaw: this.#spawnYaw,
+      grounded: false,
+      lastJumpCounter: player.input.jumpCounter,
+      stepCooldown: 0,
+      crouched: false,
+    };
+    player.input = {
+      ...player.input,
+      moveX: 0,
+      moveZ: 0,
+      lookYaw: this.#spawnYaw,
+      buttons: 0,
+    };
+    player.pendingInput = null;
+    player.proxy = this.#physics.createPlayerProxy(player.state.position);
+    this.#saveRequested = true;
+  }
+
   #persistPlayer(player: Player): PersistedWorld["players"][number] {
     const grabbed = player.grab
       ? this.#runtimeBodies.find((body) => key(body.handle) === key(player.grab!.target))
@@ -722,9 +767,17 @@ export class AuthoritativeGame {
           position.y - previous.position.y,
           position.z - previous.position.z,
         ) >= 2
-      )
+      ) {
         flags |= SNAPSHOT_FLAG_TELEPORT;
+        this.#discontinuityRepeatUntilTick.set(
+          identity,
+          this.#serverTick + DISCONTINUITY_REPEAT_TICKS,
+        );
+      }
     }
+    const repeatUntil = this.#discontinuityRepeatUntilTick.get(identity) ?? -1;
+    if (repeatUntil >= this.#serverTick) flags |= SNAPSHOT_FLAG_TELEPORT;
+    else if (repeatUntil >= 0) this.#discontinuityRepeatUntilTick.delete(identity);
     this.#replicationState.set(identity, { position: { ...position }, awake });
     return flags;
   }

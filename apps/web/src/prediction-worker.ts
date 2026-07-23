@@ -7,7 +7,7 @@ type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }
   | { type: "world"; message: WorldMessage }
   | { type: "input"; command: InputCommand }
-  | { type: "snapshot"; snapshot: Snapshot };
+  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean };
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let predictor: PlayerPredictor;
@@ -33,5 +33,5 @@ scope.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
     });
   } else if (message.type === "input")
     void worldBarrier.then(() => predictor.pushInput(message.command));
-  else void worldBarrier.then(() => predictor.reconcile(message.snapshot));
+  else void worldBarrier.then(() => predictor.reconcile(message.snapshot, message.reconcilePlayer));
 });

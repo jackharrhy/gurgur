@@ -1,6 +1,6 @@
 # 0002: Gameplay transport
 
-Status: accepted on 2026-07-21.
+Status: superseded by 0012 on 2026-07-23.
 
 Use Bun's native server WebSocket and the browser WebSocket API. Control messages
 use bounded JSON; fixed-rate inputs and snapshots use explicit `DataView` codecs.

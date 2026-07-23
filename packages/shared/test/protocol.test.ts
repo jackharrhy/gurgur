@@ -2,15 +2,17 @@ import { describe, expect, test } from "bun:test";
 import {
   PROTOCOL_VERSION,
   decodeInput,
+  decodeInputBundle,
   decodeLifecycle,
   decodeSnapshot,
   encodeInput,
+  encodeInputBundle,
   encodeLifecycle,
   encodeSnapshot,
 } from "../src";
 
 describe("snapshot codec", () => {
-  test("round-trips a v1 body snapshot", () => {
+  test("round-trips an authoritative body snapshot", () => {
     const snapshot = {
       worldEpoch: 4,
       serverTick: 120,
@@ -89,7 +91,7 @@ describe("snapshot codec", () => {
       ],
     };
     const encoded = encodeSnapshot(snapshot);
-    expect(encoded.byteLength).toBe(15 + 41);
+    expect(encoded.byteLength).toBe(15 + 36);
     const decoded = decodeSnapshot(encoded);
     expect(decoded.players).toHaveLength(1);
     expect(decoded.bodies).toHaveLength(1);
@@ -121,7 +123,28 @@ describe("input codec", () => {
   });
 
   test("rejects malformed fixed-rate input", () => {
-    expect(() => decodeInput(new ArrayBuffer(12))).toThrow("length mismatch");
+    expect(() => decodeInput(new ArrayBuffer(12))).toThrow();
+  });
+
+  test("bundles the newest intent with redundant predecessors", () => {
+    const commands = [0, 1, 2].map((sequence) => ({
+      type: "input" as const,
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: 7,
+      sequence,
+      clientTick: sequence + 10,
+      moveX: sequence / 2,
+      moveZ: 0,
+      lookYaw: 0,
+      lookPitch: 0,
+      buttons: 0,
+      jumpCounter: sequence,
+      interactCounter: 0,
+      interactTarget: null,
+      primaryCounter: 0,
+    }));
+    expect(decodeInputBundle(encodeInputBundle(commands))).toEqual(commands);
+    expect(() => decodeInput(encodeInputBundle(commands))).toThrow("more than one");
   });
 
   test("round-trips an absent interaction target", () => {

@@ -26,9 +26,9 @@ describe("predicted display-rate presentation", () => {
     expect(buffer.sample(1000 / 60)?.position.x).toBe(2);
   });
 
-  test("uses locally predicted contact bodies instead of their delayed authoritative poses", () => {
-    const delayed = pose(0);
-    const predicted = pose(0.5);
-    expect(mergeBodySamples([delayed], [predicted])).toEqual([predicted]);
+  test("lets a current authoritative contact proxy override its buffered sample", () => {
+    const authoritative = pose(0);
+    const contactProxy = pose(0.25);
+    expect(mergeBodySamples([authoritative], [contactProxy])).toEqual([contactProxy]);
   });
 });

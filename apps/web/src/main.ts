@@ -38,12 +38,23 @@ const renderer = new WorldRenderer(
     document.body.dataset.renderedHeavyCubeX = String(body.position.x);
     document.body.dataset.renderedHeavyCubeY = String(body.position.y);
     document.body.dataset.renderedHeavyCubeZ = String(body.position.z);
+    document.body.dataset.renderedHeavyCubeQx = String(body.rotation.x);
+    document.body.dataset.renderedHeavyCubeQy = String(body.rotation.y);
+    document.body.dataset.renderedHeavyCubeQz = String(body.rotation.z);
+    document.body.dataset.renderedHeavyCubeQw = String(body.rotation.w);
   },
   materialTextureUrls,
 );
 const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
   renderer.setPredictedBodies(bodies);
+  const predictedHeavyCube = bodies.find(
+    (candidate) => `${candidate.id.index}:${candidate.id.generation}` === heavyCube?.key,
+  );
+  document.body.dataset.predictedBodyCount = String(bodies.length);
+  document.body.dataset.predictedHeavyCubeX = predictedHeavyCube
+    ? String(predictedHeavyCube.position.x)
+    : "";
   document.body.dataset.predictionReady = body ? "true" : "false";
   if (body) {
     document.body.dataset.predictedX = String(body.position.x);
@@ -54,9 +65,26 @@ const predictor = createPredictionClient((body, bodies, correctionMagnitude) => 
 });
 let localPlayerKey: string | null = null;
 let session: GameSession;
+let predictionWorldEpoch: number | null = null;
+let snapshotEpochAfterTransport: number | null = null;
+let stateTransportReady = false;
+const enableInputIfReady = (): void => {
+  if (
+    stateTransportReady &&
+    predictionWorldEpoch !== null &&
+    snapshotEpochAfterTransport === predictionWorldEpoch
+  ) {
+    input.setWorld(predictionWorldEpoch);
+    document.body.dataset.inputReady = "true";
+  }
+};
 const input = createPlayerInput(
   canvas,
   (command) => {
+    document.body.dataset.inputMoveX = String(command.moveX);
+    document.body.dataset.inputMoveZ = String(command.moveZ);
+    document.body.dataset.inputJumpCounter = String(command.jumpCounter);
+    document.body.dataset.inputButtons = String(command.buttons);
     session.sendInput(command);
     predictor.pushInput(command);
   },
@@ -80,9 +108,15 @@ session = new GameSession(
     },
     world(message) {
       renderer.setWorld(message);
-      void predictor.setWorld(message).then(() => input.setWorld(message.worldEpoch));
+      document.body.dataset.inputReady = "false";
+      predictionWorldEpoch = null;
+      snapshotEpochAfterTransport = null;
+      void predictor.setWorld(message).then(() => {
+        predictionWorldEpoch = message.worldEpoch;
+        enableInputIfReady();
+      });
       const runtime = message.runtimeEntities.find(
-        (entity) => entity.authoredId === "physics.cube.heavy",
+        (entity) => entity.classname === "func_physics" && "brushIndex" in entity,
       );
       if (runtime && "brushIndex" in runtime) {
         const brush = message.bundle.brushes[runtime.brushIndex];
@@ -100,8 +134,12 @@ session = new GameSession(
     },
     snapshot(message, latestInFrame) {
       history.push(message);
+      predictor.reconcile(message, latestInFrame);
       if (!latestInFrame) return;
-      predictor.reconcile(message);
+      if (stateTransportReady) {
+        snapshotEpochAfterTransport = message.worldEpoch;
+        enableInputIfReady();
+      }
       document.body.dataset.worldEpoch = String(message.worldEpoch);
       document.body.dataset.serverTick = String(message.serverTick);
       const player = message.bodies.find(
@@ -131,6 +169,12 @@ session = new GameSession(
     network(rttMs, jitterMs) {
       document.body.dataset.rttMs = rttMs.toFixed(1);
       document.body.dataset.jitterMs = jitterMs.toFixed(1);
+    },
+    transport(state) {
+      document.body.dataset.transport = state;
+      stateTransportReady = state === "webrtc";
+      snapshotEpochAfterTransport = null;
+      if (!stateTransportReady) document.body.dataset.inputReady = "false";
     },
   },
   {

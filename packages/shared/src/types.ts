@@ -72,8 +72,22 @@ export type PongMessage = {
   serverTick: number;
 };
 
-export type ClientControlMessage = HelloMessage | PingMessage;
-export type ServerControlMessage = WelcomeMessage | PongMessage;
+export type RtcOfferMessage = {
+  type: "rtc-offer";
+  protocolVersion: number;
+  worldEpoch: number;
+  description: { type: "offer"; sdp: string };
+};
+
+export type RtcAnswerMessage = {
+  type: "rtc-answer";
+  protocolVersion: number;
+  worldEpoch: number;
+  description: { type: "answer"; sdp: string };
+};
+
+export type ClientControlMessage = HelloMessage | PingMessage | RtcOfferMessage;
+export type ServerControlMessage = WelcomeMessage | PongMessage | RtcAnswerMessage;
 
 export type InputCommand = {
   type: "input";

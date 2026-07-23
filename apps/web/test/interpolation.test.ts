@@ -118,11 +118,21 @@ describe("snapshot timeline", () => {
     expect(history.serverTickAt(1_100)).toBe(69);
   });
 
-  test("caps velocity extrapolation at fifty milliseconds", () => {
+  test("caps velocity extrapolation at one hundred milliseconds", () => {
     const history = createSnapshotTimeline();
     history.push(snapshot(60, 1, 1, 2), 1_000);
     expect(history.sample(61)[0]?.position.y).toBeCloseTo(1 + 2 / 60);
-    expect(history.sample(600)[0]?.position.y).toBeCloseTo(1.1);
+    expect(history.sample(600)[0]?.position.y).toBeCloseTo(1.2);
+  });
+
+  test("accepts reordered datagrams and raises its adaptive delay under jitter", () => {
+    const history = createSnapshotTimeline();
+    history.push(snapshot(10, 0), 1_000);
+    history.push(snapshot(14, 4), 1_180);
+    history.push(snapshot(12, 2), 1_190);
+    expect(history.sample(13)[0]?.position.y).toBe(3);
+    expect(history.interpolationDelayTicks).toBeGreaterThan(6);
+    expect(history.interpolationDelayTicks).toBeLessThanOrEqual(15);
   });
 
   test("does not interpolate across an explicit teleport discontinuity", () => {

@@ -100,7 +100,7 @@ function createStressBodies(
     throw new Error("extra dynamic body count must be between 0 and 512");
   }
   if (count === 0) return [];
-  const templateEntity = bundle.entities.find((entity) => entity.authoredId === "physics.stack.01");
+  const templateEntity = bundle.entities.find((entity) => entity.classname === "func_physics");
   const brushIndex = templateEntity?.brushIndices[0];
   const brush = brushIndex === undefined ? null : bundle.brushes[brushIndex];
   if (!templateEntity || brushIndex === undefined || !brush) {

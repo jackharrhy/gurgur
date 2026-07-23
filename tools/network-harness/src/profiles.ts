@@ -1,4 +1,4 @@
-import type { NetworkProfile } from "./reliable-ordered-link";
+import type { NetworkProfile } from "./unreliable-datagram-link";
 
 export const NETWORK_PROFILES = {
   local: {
@@ -6,7 +6,7 @@ export const NETWORK_PROFILES = {
     roundTripLatencyMs: 2,
     jitterMs: 0,
     lossRate: 0,
-    retransmitDelayMs: 4,
+    maxPacketLifetimeMs: 200,
     bandwidthBitsPerSecond: null,
   },
   typical: {
@@ -14,7 +14,7 @@ export const NETWORK_PROFILES = {
     roundTripLatencyMs: 80,
     jitterMs: 20,
     lossRate: 0.01,
-    retransmitDelayMs: 120,
+    maxPacketLifetimeMs: 200,
     bandwidthBitsPerSecond: 10_000_000,
   },
   adverse: {
@@ -22,7 +22,7 @@ export const NETWORK_PROFILES = {
     roundTripLatencyMs: 150,
     jitterMs: 40,
     lossRate: 0.05,
-    retransmitDelayMs: 225,
+    maxPacketLifetimeMs: 200,
     bandwidthBitsPerSecond: 1_000_000,
   },
   constrained: {
@@ -30,7 +30,7 @@ export const NETWORK_PROFILES = {
     roundTripLatencyMs: 250,
     jitterMs: 80,
     lossRate: 0.08,
-    retransmitDelayMs: 375,
+    maxPacketLifetimeMs: 200,
     bandwidthBitsPerSecond: 256_000,
   },
 } as const satisfies Record<string, NetworkProfile>;
