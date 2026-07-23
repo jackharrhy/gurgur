@@ -36,6 +36,7 @@ import {
 import { AuthoritativeGame } from "./game";
 import { loadMaterialTextureAsset, loadMaterialTextureManifest } from "./material-textures";
 import { WorldStore } from "./store";
+import { guardIceUdpSockets } from "./rtc";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -290,6 +291,7 @@ export async function createGurgurServer(
     try {
       await peer.setRemoteDescription(description);
       await peer.setLocalDescription(await peer.createAnswer());
+      guardIceUdpSockets(peer);
       if (socket.data.peerConnection !== peer || !peer.localDescription?.sdp) return;
       socket.data.rtcNegotiating = false;
       socket.send(

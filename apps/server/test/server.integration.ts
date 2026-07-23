@@ -17,6 +17,7 @@ import {
   type WorldManifestMessage,
 } from "@gurgur/shared";
 import { createGurgurServer } from "../src/server";
+import { guardIceUdpSockets } from "../src/rtc";
 
 describe("authoritative server", () => {
   test("serves health and streams advancing binary snapshots", async () => {
@@ -26,6 +27,7 @@ describe("authoritative server", () => {
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
     });
+    let client: TestClient | null = null;
     try {
       expect(await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).text()).toBe("ok");
       expect(await (await fetch(`http://127.0.0.1:${server.port}/readyz`)).text()).toBe("ready");
@@ -55,19 +57,19 @@ describe("authoritative server", () => {
           "content-type",
         ),
       ).toContain("text/html");
-      const client = await connectClient(`ws://127.0.0.1:${server.port}/game`);
-      expect(client.stateChannel.maxRetransmits).toBe(STATE_MAX_RETRANSMITS);
+      const connected = await connectClient(`ws://127.0.0.1:${server.port}/game`);
+      client = connected;
+      expect(connected.stateChannel.maxRetransmits).toBe(STATE_MAX_RETRANSMITS);
       const advanced = await waitForSnapshot(
-        client.stateChannel,
-        (snapshot) => snapshot.serverTick > client.snapshot.serverTick,
+        connected.stateChannel,
+        (snapshot) => snapshot.serverTick > connected.snapshot.serverTick,
       );
-      client.socket.close();
-      const welcome = client.welcome;
-      const world = client.world;
+      const welcome = connected.welcome;
+      const world = connected.world;
       const bundle = decodeWorldBundle(
         await (await fetch(`http://127.0.0.1:${server.port}${world.bundleUrl}`)).arrayBuffer(),
       );
-      const initial = client.snapshot;
+      const initial = connected.snapshot;
       expect(welcome.type).toBe("welcome");
       expect(welcome.playerId.index).toBeGreaterThan(0x7fff_ffff);
       expect(world.type).toBe("world");
@@ -104,6 +106,7 @@ describe("authoritative server", () => {
       expect(metrics.queuedBytes).toBeGreaterThanOrEqual(0);
       expect(metrics.stateTransportClients).toBeGreaterThanOrEqual(0);
     } finally {
+      if (client) await closeClient(client);
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }
@@ -117,12 +120,10 @@ describe("authoritative server", () => {
       databasePath: join(directory, "world.sqlite"),
       extraDynamicBodies: 122,
     });
-    const sockets: WebSocket[] = [];
+    const connections: TestClient[] = [];
     try {
-      const connections = [];
       for (let index = 0; index < 16; index += 1) {
         const connection = await connectClient(`ws://127.0.0.1:${server.port}/game`);
-        sockets.push(connection.socket);
         connections.push(connection);
       }
       const ids = new Set(
@@ -142,7 +143,7 @@ describe("authoritative server", () => {
       );
       expect(encodeSnapshot(state).byteLength).toBeLessThanOrEqual(STATE_DATAGRAM_TARGET_BYTES);
     } finally {
-      for (const socket of sockets) socket.close();
+      await Promise.all(connections.map(closeClient));
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }
@@ -155,23 +156,29 @@ describe("authoritative server", () => {
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
     });
+    let first: TestClient | null = null;
+    let second: TestClient | null = null;
     try {
       const url = `ws://127.0.0.1:${server.port}/game`;
-      const first = await connectClient(url);
+      const firstConnection = await connectClient(url);
+      first = firstConnection;
       const replaced = new Promise<CloseEvent>((resolve) =>
-        first.socket.addEventListener("close", resolve, { once: true }),
+        firstConnection.socket.addEventListener("close", resolve, { once: true }),
       );
-      const second = await connectClient(
+      const secondConnection = await connectClient(
         url,
-        first.welcome.sessionToken,
+        firstConnection.welcome.sessionToken,
         1,
-        first.welcome.mapRevision,
-        first.welcome.worldEpoch,
+        firstConnection.welcome.mapRevision,
+        firstConnection.welcome.worldEpoch,
       );
-      expect(second.welcome.playerId).toEqual(first.welcome.playerId);
+      second = secondConnection;
+      expect(secondConnection.welcome.playerId).toEqual(firstConnection.welcome.playerId);
       expect((await replaced).code).toBe(4001);
+      await closeClient(firstConnection);
       expect(
-        second.world.runtimeEntities.filter((entity) => entity.classname === "player").length,
+        secondConnection.world.runtimeEntities.filter((entity) => entity.classname === "player")
+          .length,
       ).toBe(1);
 
       const stale = new WebSocket(url);
@@ -183,16 +190,17 @@ describe("authoritative server", () => {
           JSON.stringify({
             type: "hello",
             protocolVersion: PROTOCOL_VERSION,
-            mapRevision: first.welcome.mapRevision,
-            worldEpoch: first.welcome.worldEpoch,
-            sessionToken: first.welcome.sessionToken,
+            mapRevision: firstConnection.welcome.mapRevision,
+            worldEpoch: firstConnection.welcome.worldEpoch,
+            sessionToken: firstConnection.welcome.sessionToken,
             socketGeneration: 1,
           }),
         ),
       );
       expect((await closed).code).toBe(1008);
-      second.socket.close();
     } finally {
+      if (second) await closeClient(second);
+      if (first) await closeClient(first);
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }
@@ -238,7 +246,7 @@ describe("authoritative server", () => {
       const movedPlayer = moved.players.find(
         (player) => player.id.index === first!.welcome.playerId.index,
       )!;
-      first.socket.close();
+      await closeClient(first);
       firstServer.stop();
 
       const secondServer = await createGurgurServer({
@@ -246,16 +254,18 @@ describe("authoritative server", () => {
         hostname: "127.0.0.1",
         databasePath,
       });
+      let resumed: TestClient | null = null;
       try {
-        const resumed = await connectClient(
+        const resumedConnection = await connectClient(
           `ws://127.0.0.1:${secondServer.port}/game`,
           first.welcome.sessionToken,
           1,
           first.welcome.mapRevision,
           first.welcome.worldEpoch,
         );
-        const resumedPlayer = resumed.snapshot.players.find(
-          (player) => player.id.index === resumed.welcome.playerId.index,
+        resumed = resumedConnection;
+        const resumedPlayer = resumedConnection.snapshot.players.find(
+          (player) => player.id.index === resumedConnection.welcome.playerId.index,
         )!;
         expect(resumedPlayer.position.x).toBeWithin(
           movedPlayer.position.x - 0.15,
@@ -265,12 +275,12 @@ describe("authoritative server", () => {
           movedPlayer.position.z - 0.15,
           movedPlayer.position.z + 0.15,
         );
-        resumed.socket.close();
       } finally {
+        if (resumed) await closeClient(resumed);
         secondServer.stop();
       }
     } finally {
-      first?.socket.close();
+      if (first) await closeClient(first);
       firstServer.stop();
       await rm(directory, { recursive: true, force: true });
     }
@@ -284,21 +294,23 @@ describe("authoritative server", () => {
       databasePath: join(directory, "world.sqlite"),
       adminToken: "reset-test-token",
     });
+    let client: TestClient | null = null;
     try {
-      const client = await connectClient(`ws://127.0.0.1:${server.port}/game`);
+      const connected = await connectClient(`ws://127.0.0.1:${server.port}/game`);
+      client = connected;
       const oldIds = new Set(
-        client.world.runtimeEntities
+        connected.world.runtimeEntities
           .filter((entity) => entity.classname !== "player")
           .map((entity) => `${entity.id.index}:${entity.id.generation}`),
       );
       const resetWorld = waitForJson(
-        client.socket,
+        connected.socket,
         "world",
-        (message) => message.worldEpoch === client.welcome.worldEpoch + 1,
+        (message) => message.worldEpoch === connected.welcome.worldEpoch + 1,
       );
       const resetSnapshot = waitForSnapshot(
-        client.stateChannel,
-        (snapshot) => snapshot.worldEpoch === client.welcome.worldEpoch + 1,
+        connected.stateChannel,
+        (snapshot) => snapshot.worldEpoch === connected.welcome.worldEpoch + 1,
       );
       const response = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
         method: "POST",
@@ -314,22 +326,16 @@ describe("authoritative server", () => {
               !oldIds.has(`${entity.id.index}:${entity.id.generation}`),
           ),
       ).toBe(true);
-      expect(snapshot.worldEpoch).toBe(client.welcome.worldEpoch + 1);
-      client.socket.close();
+      expect(snapshot.worldEpoch).toBe(connected.welcome.worldEpoch + 1);
     } finally {
+      if (client) await closeClient(client);
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }
   });
 });
 
-function connectClient(
-  url: string,
-  sessionToken: string | null = null,
-  socketGeneration = 0,
-  mapRevision: string | null = null,
-  worldEpoch: number | null = null,
-): Promise<{
+type TestClient = {
   socket: WebSocket;
   peer: RTCPeerConnection;
   inputChannel: RTCDataChannel;
@@ -337,7 +343,20 @@ function connectClient(
   welcome: WelcomeMessage;
   world: WorldManifestMessage;
   snapshot: Snapshot;
-}> {
+};
+
+async function closeClient(client: TestClient): Promise<void> {
+  await client.peer.close();
+  client.socket.close();
+}
+
+function connectClient(
+  url: string,
+  sessionToken: string | null = null,
+  socketGeneration = 0,
+  mapRevision: string | null = null,
+  worldEpoch: number | null = null,
+): Promise<TestClient> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
@@ -389,6 +408,7 @@ function connectClient(
       offerStarted = true;
       try {
         await peer.setLocalDescription(await peer.createOffer());
+        guardIceUdpSockets(peer);
         if (!peer.localDescription?.sdp) throw new Error("test RTC offer has no SDP");
         socket.send(
           JSON.stringify({
