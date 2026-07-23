@@ -74,6 +74,7 @@ const server: GurgurServer | null = directory
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
 const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
 if (simulatedLatencyMs > 0) url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
+if (scenario === "grab") url.searchParams.set("debug", "1");
 const browser = await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 const waitForStablePlayerHeight = async (): Promise<number> =>
@@ -313,9 +314,19 @@ try {
       { timeout: 4_000 },
     );
   } else if (scenario === "grab") {
+    await page.waitForFunction(
+      () => Number(document.body.dataset.physicsDebugPrimitives) > 0,
+      null,
+      { timeout: 5_000 },
+    );
     await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget), null, {
       timeout: 5_000,
     });
+    await page.waitForFunction(
+      () => document.body.dataset.interactionOutline === "available",
+      null,
+      { timeout: 5_000 },
+    );
     const beforeZ = Number(await page.evaluate(() => document.body.dataset.heavyCubeZ));
     await page.evaluate(() => {
       (
@@ -331,6 +342,9 @@ try {
           __gurgurSmokePad: { buttons: Array<{ pressed: boolean; value: number }> };
         }
       ).__gurgurSmokePad.buttons[7]!.pressed = false;
+    });
+    await page.waitForFunction(() => document.body.dataset.interactionOutline === "held", null, {
+      timeout: 5_000,
     });
     await page.evaluate(() => {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 1;

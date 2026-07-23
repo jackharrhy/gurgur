@@ -116,6 +116,22 @@ export function createSpriteNodeMaterial(
   return material;
 }
 
+export function createInteractionOutlineMaterial(held: boolean): THREE.MeshBasicNodeMaterial {
+  const material = new THREE.MeshBasicNodeMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    toneMapped: false,
+  });
+  const base = held ? tsl.vec3(1, 0.48, 0.08) : tsl.vec3(0.12, 1, 0.72);
+  const pulse = tsl
+    .sin(tsl.time.mul(held ? 4.8 : 3.2))
+    .mul(0.14)
+    .add(0.86);
+  material.colorNode = tsl.vec4(base.mul(pulse), 1);
+  return material;
+}
+
 export type RetroRenderPipeline = {
   render(): void;
   resize(width: number, height: number): void;

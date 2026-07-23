@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   STATE_DATAGRAM_TARGET_BYTES,
+  SNAPSHOT_FLAG_LOCAL_GRAB,
   SNAPSHOT_FLAG_TELEPORT,
   decodeSnapshot,
   encodeSnapshot,
@@ -52,6 +53,24 @@ test("player interest keeps local and near records while rotating distant record
     decodeSnapshot(encodeSnapshot(selected[0]!)).bodies.find(({ id }) => key(id) === key(local.id))!
       .flags,
   ).toBe(SNAPSHOT_FLAG_TELEPORT);
+
+  const grabbed = bodies.at(-1)!;
+  const localGrabView = snapshotForPlayer(
+    { worldEpoch: 1, serverTick: 0, players, bodies },
+    local.position,
+    local.id,
+    grabbed.id,
+  );
+  expect(
+    localGrabView.bodies.find(({ id }) => key(id) === key(grabbed.id))!.flags! &
+      SNAPSHOT_FLAG_LOCAL_GRAB,
+  ).toBe(SNAPSHOT_FLAG_LOCAL_GRAB);
+  expect(encodeSnapshot(localGrabView).byteLength).toBeLessThanOrEqual(STATE_DATAGRAM_TARGET_BYTES);
+  expect(
+    decodeSnapshot(encodeSnapshot(localGrabView)).bodies.find(
+      ({ id }) => key(id) === key(grabbed.id),
+    )!.flags! & SNAPSHOT_FLAG_LOCAL_GRAB,
+  ).toBe(SNAPSHOT_FLAG_LOCAL_GRAB);
 });
 
 function player(index: number): PlayerStateSnapshot {

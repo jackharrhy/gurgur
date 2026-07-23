@@ -12,6 +12,7 @@ import {
   decodeWorldBundle,
   encodeInput,
   encodeSnapshot,
+  type PhysicsDebugFrame,
   type Snapshot,
   type WelcomeMessage,
   type WorldManifestMessage,
@@ -31,6 +32,11 @@ describe("authoritative server", () => {
     try {
       expect(await (await fetch(`http://127.0.0.1:${server.port}/healthz`)).text()).toBe("ok");
       expect(await (await fetch(`http://127.0.0.1:${server.port}/readyz`)).text()).toBe("ready");
+      const physicsDebugResponse = await fetch(`http://127.0.0.1:${server.port}/debug/physics`);
+      const physicsDebug = (await physicsDebugResponse.json()) as PhysicsDebugFrame;
+      expect(physicsDebugResponse.headers.get("cache-control")).toBe("no-store");
+      expect(physicsDebug.primitives.some((primitive) => primitive.kind === "bounds")).toBe(true);
+      expect(physicsDebug.truncated).toBe(false);
       const playerBillboard = await fetch(`http://127.0.0.1:${server.port}/player-billboard.png`);
       expect(playerBillboard.headers.get("content-type")).toBe("image/png");
       expect(new Uint8Array(await playerBillboard.arrayBuffer()).slice(0, 8)).toEqual(

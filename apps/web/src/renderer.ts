@@ -2,12 +2,17 @@ import * as THREE from "three/webgpu";
 import {
   FULL_RATE_BODY_RADIUS_METRES,
   MATERIAL_TEXTURE_SIZE,
+  SNAPSHOT_FLAG_GRABBED,
+  SNAPSHOT_FLAG_LOCAL_GRAB,
   STATE_ALWAYS_NEAR_BODY_SLOTS,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
   type CompiledRenderBatch,
+  type PhysicsDebugFrame,
+  type PhysicsDebugPrimitive,
   type RuntimeId,
+  type Vec3,
   type WorldMessage,
 } from "@gurgur/shared";
 import type { SnapshotTimeline } from "./interpolation";
@@ -17,6 +22,7 @@ import {
   type PredictedPoseTimeline,
 } from "./presentation";
 import {
+  createInteractionOutlineMaterial,
   createRetroRenderPipeline,
   createSpriteNodeMaterial,
   createWorldNodeMaterial,
@@ -29,9 +35,100 @@ const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
 const distance = (left: BodySnapshot["position"], right: BodySnapshot["position"]): number =>
   Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
 
+type PickupDebugView = {
+  group: THREE.Group;
+  line: THREE.Line;
+  origin: THREE.Mesh;
+  endpoint: THREE.Mesh;
+  geometry: THREE.BufferGeometry;
+  lineMaterial: THREE.LineBasicNodeMaterial;
+  markerMaterial: THREE.MeshBasicNodeMaterial;
+};
+
+type PhysicsDebugView = {
+  group: THREE.Group;
+  geometry: THREE.BufferGeometry;
+  material: THREE.LineBasicNodeMaterial;
+};
+
+function createPickupDebugView(): PickupDebugView {
+  const group = new THREE.Group();
+  group.name = "pickup-cast-debug";
+  group.renderOrder = 1_000;
+  group.visible = false;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+  const lineMaterial = new THREE.LineBasicNodeMaterial({
+    color: 0xff405c,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+    opacity: 0.95,
+  });
+  const markerMaterial = new THREE.MeshBasicNodeMaterial({
+    color: 0xff405c,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const line = new THREE.Line(geometry, lineMaterial);
+  const markerGeometry = new THREE.SphereGeometry(0.055, 8, 6);
+  const origin = new THREE.Mesh(markerGeometry, markerMaterial);
+  const endpoint = new THREE.Mesh(markerGeometry, markerMaterial);
+  group.add(line, origin, endpoint);
+  return { group, line, origin, endpoint, geometry, lineMaterial, markerMaterial };
+}
+
+function createPhysicsDebugView(): PhysicsDebugView {
+  const group = new THREE.Group();
+  group.name = "authoritative-physics-debug";
+  group.renderOrder = 999;
+  group.visible = false;
+  const geometry = new THREE.BufferGeometry();
+  const material = new THREE.LineBasicNodeMaterial({
+    vertexColors: true,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+    opacity: 0.82,
+    fog: false,
+    toneMapped: false,
+  });
+  group.add(new THREE.LineSegments(geometry, material));
+  return { group, geometry, material };
+}
+
+const DEBUG_BOUNDS_EDGES = [
+  [0, 1],
+  [0, 2],
+  [0, 4],
+  [1, 3],
+  [1, 5],
+  [2, 3],
+  [2, 6],
+  [3, 7],
+  [4, 5],
+  [4, 6],
+  [5, 7],
+  [6, 7],
+] as const;
+
+function debugBoundsCorners(primitive: Extract<PhysicsDebugPrimitive, { kind: "bounds" }>): Vec3[] {
+  const { lower, upper } = primitive;
+  return [
+    { x: lower.x, y: lower.y, z: lower.z },
+    { x: upper.x, y: lower.y, z: lower.z },
+    { x: lower.x, y: upper.y, z: lower.z },
+    { x: upper.x, y: upper.y, z: lower.z },
+    { x: lower.x, y: lower.y, z: upper.z },
+    { x: upper.x, y: lower.y, z: upper.z },
+    { x: lower.x, y: upper.y, z: upper.z },
+    { x: upper.x, y: upper.y, z: upper.z },
+  ];
+}
+
 function disposeOwnedResources(object: THREE.Object3D): void {
   if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
-  if (object instanceof THREE.Mesh) object.geometry.dispose();
+  if (object instanceof THREE.Mesh && !object.userData.sharedGeometry) object.geometry.dispose();
   if (object.userData.ownedMaterial) {
     const materials = Array.isArray(object.material) ? object.material : [object.material];
     for (const material of materials) material.dispose();
@@ -51,8 +148,16 @@ export class WorldRenderer {
   readonly #textures = new Map<string, THREE.Texture>();
   readonly #physicsPropIds = new Set<string>();
   readonly #materialTextureUrls: Readonly<Record<string, string>>;
+  readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
+  readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
+  readonly #pickupDebug: PickupDebugView | null;
+  readonly #physicsDebug: PhysicsDebugView | null;
   #worldRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
+  #interactionCandidate: THREE.Object3D | null = null;
+  #heldTarget: THREE.Object3D | null = null;
+  #outlinedTarget: THREE.Object3D | null = null;
+  #pickupPlayerPosition: THREE.Vector3 | null = null;
   readonly #predictedLocal = createPredictedPoseTimeline();
   readonly #predictedBodies = new Map<string, PredictedPoseTimeline>();
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
@@ -67,6 +172,7 @@ export class WorldRenderer {
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
     onBodyPresentation: (body: BodySnapshot) => void = () => {},
     materialTextureUrls: Readonly<Record<string, string>> = {},
+    debug = false,
   ) {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
@@ -85,6 +191,10 @@ export class WorldRenderer {
     this.#camera.position.set(31, 28, 38);
     this.#camera.lookAt(0, 1.5, 0);
     this.#scene.add(this.#worldRoot);
+    this.#pickupDebug = debug ? createPickupDebugView() : null;
+    if (this.#pickupDebug) this.#scene.add(this.#pickupDebug.group);
+    this.#physicsDebug = debug ? createPhysicsDebugView() : null;
+    if (this.#physicsDebug) this.#scene.add(this.#physicsDebug.group);
     this.#pipeline = createRetroRenderPipeline(this.#renderer, this.#scene, this.#camera);
     this.#resize();
     addEventListener("resize", this.#resize);
@@ -98,6 +208,12 @@ export class WorldRenderer {
     this.#meshes.clear();
     this.#physicsPropIds.clear();
     this.#predictedBodies.clear();
+    this.#interactionCandidate = null;
+    this.#heldTarget = null;
+    this.#outlinedTarget = null;
+    this.#pickupPlayerPosition = null;
+    if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
+    if (this.#physicsDebug) this.#physicsDebug.group.visible = false;
     this.#cameraFollowing = false;
     for (const batch of message.bundle.renderBatches)
       this.#worldRoot.add(this.#meshForBatch(batch));
@@ -124,7 +240,9 @@ export class WorldRenderer {
         mesh.userData.runtimeId = runtime.id;
         mesh.userData.interactable =
           runtime.classname === "func_button" || runtime.classname === "func_physics";
+        mesh.userData.grabbable = runtime.classname === "func_physics";
         mesh.userData.interactionOccluder = true;
+        if (mesh.userData.grabbable) this.#addInteractionOutline(mesh);
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
@@ -173,23 +291,118 @@ export class WorldRenderer {
     }
   }
 
+  applyAuthoritativeInteractionState(bodies: BodySnapshot[]): void {
+    for (const body of bodies) {
+      const mesh = this.#meshes.get(idKey(body.id));
+      if (!mesh) continue;
+      mesh.userData.snapshotFlags = body.flags ?? 0;
+      if ((body.flags ?? 0) & SNAPSHOT_FLAG_LOCAL_GRAB) {
+        this.#heldTarget = mesh;
+      } else if (this.#heldTarget === mesh) {
+        this.#heldTarget = null;
+      }
+    }
+    this.#updateInteractionOutline();
+  }
+
   setViewAngles(yaw: number, pitch: number): void {
     this.#viewYaw = yaw;
     this.#viewPitch = pitch;
   }
 
   interactionTarget(): RuntimeId | null {
+    const playerPosition = this.#pickupPlayerPosition;
+    if (!playerPosition) return null;
+    const horizontal = Math.cos(this.#viewPitch);
+    const direction = new THREE.Vector3(
+      -Math.sin(this.#viewYaw) * horizontal,
+      Math.sin(this.#viewPitch),
+      -Math.cos(this.#viewYaw) * horizontal,
+    );
+    const origin = new THREE.Vector3(playerPosition.x, playerPosition.y + 0.4, playerPosition.z);
     const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(new THREE.Vector2(0, 0), this.#camera);
-    raycaster.far = 7.5;
+    raycaster.set(origin, direction);
+    raycaster.camera = this.#camera;
+    raycaster.far = 3;
     for (const hit of raycaster.intersectObject(this.#worldRoot, true)) {
       const object = hit.object;
       if (object.userData.interactable && object.userData.runtimeId) {
-        return { ...object.userData.runtimeId } as RuntimeId;
+        const target = { ...object.userData.runtimeId } as RuntimeId;
+        const runtimeObject = this.#meshes.get(idKey(target)) ?? null;
+        const flags = Number(runtimeObject?.userData.snapshotFlags ?? 0);
+        this.#interactionCandidate =
+          object.userData.grabbable && (flags & SNAPSHOT_FLAG_GRABBED) === 0 ? runtimeObject : null;
+        this.#updateInteractionOutline();
+        const unavailable = object.userData.grabbable && (flags & SNAPSHOT_FLAG_GRABBED) !== 0;
+        this.#updatePickupDebug(
+          origin,
+          hit.point,
+          unavailable ? 0xff405c : object.userData.grabbable ? 0x31ffc0 : 0x6fc7ff,
+        );
+        if (unavailable) return null;
+        return target;
       }
-      if (object.userData.interactionOccluder !== false) return null;
+      if (object.userData.interactionOccluder !== false) {
+        this.#interactionCandidate = null;
+        this.#updateInteractionOutline();
+        this.#updatePickupDebug(origin, hit.point, 0xff405c);
+        return null;
+      }
     }
+    this.#interactionCandidate = null;
+    this.#updateInteractionOutline();
+    this.#updatePickupDebug(origin, origin.clone().addScaledVector(direction, 3), 0xff405c);
     return null;
+  }
+
+  interactionOutlineState(): "available" | "held" | "none" {
+    if (this.#heldTarget) return "held";
+    return this.#interactionCandidate ? "available" : "none";
+  }
+
+  applyPhysicsDebugFrame(frame: PhysicsDebugFrame): void {
+    if (!this.#physicsDebug) return;
+    const positions: number[] = [];
+    const colors: number[] = [];
+    const color = new THREE.Color();
+    const appendLine = (from: Vec3, to: Vec3, hex: number): void => {
+      positions.push(from.x, from.y, from.z, to.x, to.y, to.z);
+      color.setHex(hex);
+      colors.push(color.r, color.g, color.b, color.r, color.g, color.b);
+    };
+    for (const primitive of frame.primitives) {
+      if (primitive.kind === "segment") {
+        appendLine(primitive.from, primitive.to, primitive.color);
+      } else if (primitive.kind === "bounds") {
+        const corners = debugBoundsCorners(primitive);
+        for (const [from, to] of DEBUG_BOUNDS_EDGES)
+          appendLine(corners[from]!, corners[to]!, primitive.color);
+      } else {
+        const radius = Math.max(0.045, Math.min(0.16, primitive.size * 0.008));
+        appendLine(
+          { x: primitive.position.x - radius, y: primitive.position.y, z: primitive.position.z },
+          { x: primitive.position.x + radius, y: primitive.position.y, z: primitive.position.z },
+          primitive.color,
+        );
+        appendLine(
+          { x: primitive.position.x, y: primitive.position.y - radius, z: primitive.position.z },
+          { x: primitive.position.x, y: primitive.position.y + radius, z: primitive.position.z },
+          primitive.color,
+        );
+        appendLine(
+          { x: primitive.position.x, y: primitive.position.y, z: primitive.position.z - radius },
+          { x: primitive.position.x, y: primitive.position.y, z: primitive.position.z + radius },
+          primitive.color,
+        );
+      }
+    }
+    this.#physicsDebug.geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(positions, 3),
+    );
+    this.#physicsDebug.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    this.#physicsDebug.geometry.computeBoundingSphere();
+    this.#physicsDebug.group.visible = positions.length > 0;
   }
 
   start(): void {
@@ -248,6 +461,18 @@ export class WorldRenderer {
     this.#worldRoot.traverse(disposeOwnedResources);
     for (const material of this.#materials.values()) material.dispose();
     for (const texture of this.#textures.values()) texture.dispose();
+    this.#availableOutlineMaterial.dispose();
+    this.#heldOutlineMaterial.dispose();
+    if (this.#pickupDebug) {
+      this.#pickupDebug.geometry.dispose();
+      this.#pickupDebug.origin.geometry.dispose();
+      this.#pickupDebug.lineMaterial.dispose();
+      this.#pickupDebug.markerMaterial.dispose();
+    }
+    if (this.#physicsDebug) {
+      this.#physicsDebug.geometry.dispose();
+      this.#physicsDebug.material.dispose();
+    }
     this.#pipeline.dispose();
     this.#renderer.dispose();
   }
@@ -497,9 +722,55 @@ export class WorldRenderer {
       }
       this.#onBodyPresentation(body);
     }
+    this.#updateInteractionOutline();
+  }
+
+  #addInteractionOutline(mesh: THREE.Mesh): void {
+    const outline = new THREE.Mesh(mesh.geometry, this.#availableOutlineMaterial);
+    outline.name = `${mesh.name}.interaction-outline`;
+    outline.scale.setScalar(1.045);
+    outline.visible = false;
+    outline.userData.interactionOutline = true;
+    outline.userData.interactionOccluder = false;
+    outline.userData.sharedGeometry = true;
+    outline.raycast = () => {};
+    mesh.add(outline);
+  }
+
+  #updateInteractionOutline(): void {
+    const target = this.#heldTarget ?? this.#interactionCandidate;
+    if (this.#outlinedTarget !== target) {
+      this.#setInteractionOutline(this.#outlinedTarget, false, false);
+      this.#outlinedTarget = target;
+    }
+    this.#setInteractionOutline(target, true, target === this.#heldTarget);
+  }
+
+  #setInteractionOutline(target: THREE.Object3D | null, visible: boolean, held: boolean): void {
+    target?.traverse((object) => {
+      if (!(object instanceof THREE.Mesh) || !object.userData.interactionOutline) return;
+      object.visible = visible;
+      object.material = held ? this.#heldOutlineMaterial : this.#availableOutlineMaterial;
+    });
+  }
+
+  #updatePickupDebug(origin: THREE.Vector3, endpoint: THREE.Vector3, color: number): void {
+    if (!this.#pickupDebug) return;
+    const positions = this.#pickupDebug.geometry.getAttribute("position");
+    positions.setXYZ(0, origin.x, origin.y, origin.z);
+    positions.setXYZ(1, endpoint.x, endpoint.y, endpoint.z);
+    positions.needsUpdate = true;
+    this.#pickupDebug.geometry.computeBoundingSphere();
+    this.#pickupDebug.origin.position.copy(origin);
+    this.#pickupDebug.endpoint.position.copy(endpoint);
+    this.#pickupDebug.group.visible = true;
+    this.#pickupDebug.lineMaterial.color.setHex(color);
+    this.#pickupDebug.markerMaterial.color.setHex(color);
   }
 
   #follow(player: BodySnapshot): void {
+    this.#pickupPlayerPosition ??= new THREE.Vector3();
+    this.#pickupPlayerPosition.set(player.position.x, player.position.y, player.position.z);
     const target = new THREE.Vector3(player.position.x, player.position.y + 0.4, player.position.z);
     const horizontal = Math.cos(this.#viewPitch);
     const forward = new THREE.Vector3(

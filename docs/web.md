@@ -79,6 +79,17 @@ pixel texture language.
 Water, caution, danger, and platform materials animate UVs in TSL; water combines
 two independently moving translucent samples and a slow palette pulse. Decorative
 `env_sprite` point entities and player sprites are camera-facing pixel billboards.
+Targetable physics props use a lightweight inverted-hull toon outline in the same
+low-resolution scene pass: mint means locally available, while amber is driven by
+the server-authoritative local-grab flag. This avoids a separate full-scene
+outline compositor and keeps WebGPU and WebGL fallback presentation identical.
+Appending `?debug` enables the general diagnostic overlay. It renders the client
+pickup cast using the same player-chest origin, view direction, and three-metre
+reach as server validation: mint marks an available prop hit, blue marks an
+interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
+also polls the current authoritative Box3D debug frame at 10 Hz and draws
+broad-phase bounds, joints, and contact points above the scene. The overlay is
+diagnostic only and does not replace authoritative server interaction validation.
 The player billboard source is a committed Blender scene sized to the authoritative
 player collider. A code-defined 120-view latitude-ring rig covers camera elevation
 from -75 through +75 degrees without oversampling the poles. `bun run
@@ -108,6 +119,7 @@ The server exposes a deliberately small surface:
 | `/healthz`                                | process and event-loop health       |
 | `/readyz`                                 | map, Box3D, and SQLite readiness    |
 | `/metrics`                                | simulation and send-queue metrics   |
+| `/debug/physics`                          | bounded current Box3D debug frame   |
 | `/world.bin`                              | immutable compiled map bundle       |
 | `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets           |
 | `/player-billboard.png`                   | generated directional player atlas  |

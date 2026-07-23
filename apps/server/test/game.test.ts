@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { PLAYER_HALF_HEIGHT } from "@gurgur/physics";
 import {
   FAR_BODY_SNAPSHOT_STRIDE,
   FULL_RATE_BODY_RADIUS_METRES,
@@ -7,6 +8,7 @@ import {
   PHYSICS_HZ,
   PROTOCOL_VERSION,
   SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_FLAG_GRABBED,
   SNAPSHOT_FLAG_TELEPORT,
   SNAPSHOT_INTERVAL_TICKS,
   type InputCommand,
@@ -81,6 +83,55 @@ describe("authoritative network physics", () => {
         game.advance(PHYSICS_DT);
       }
       expect(body(game.snapshot(), light).position.x).toBeGreaterThan(before + 0.35);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("replicates authoritative grab ownership until the player releases it", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const heavyEntity = bundle.entities.find(
+      (entity) => entity.authoredId === "corridor.heavy" && entity.classname === "func_physics",
+    )!;
+    const heavyBrush = bundle.brushes[heavyEntity.brushIndices[0]!]!;
+    const store = new WorldStore(":memory:");
+    const game = await AuthoritativeGame.create(
+      store,
+      () => {},
+      () => {},
+      {
+        worldBundle: bundle,
+        playerSpawn: {
+          x: heavyBrush.center.x,
+          y: PLAYER_HALF_HEIGHT,
+          z: heavyBrush.center.z + 2.5,
+        },
+      },
+    );
+    try {
+      const player = game.connectPlayer("grab-player");
+      const heavy = runtimeId(game, "corridor.heavy");
+      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
+
+      game.acceptInput(
+        player,
+        command(game, 0, {
+          lookPitch: -0.18,
+          interactTarget: heavy,
+          primaryCounter: 1,
+        }),
+      );
+      game.advance(PHYSICS_DT);
+      expect(game.grabbedTarget(player)).toEqual(heavy);
+      expect((body(game.snapshot(), heavy).flags ?? 0) & SNAPSHOT_FLAG_GRABBED).toBe(
+        SNAPSHOT_FLAG_GRABBED,
+      );
+
+      game.acceptInput(player, command(game, 1, { primaryCounter: 2 }));
+      game.advance(PHYSICS_DT);
+      expect(game.grabbedTarget(player)).toBeNull();
+      expect((body(game.snapshot(), heavy).flags ?? 0) & SNAPSHOT_FLAG_GRABBED).toBe(0);
     } finally {
       game.stop();
       store.close();

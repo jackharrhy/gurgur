@@ -23,6 +23,14 @@ authenticated administrator can reset the entire world to its authored state.
 - The play view is the world canvas alone, with no HUD, reticle, or visible cursor.
 - Realtime voice is outside the current product scope.
 
+## Interaction feedback
+
+The centered interaction ray provides world-space feedback without adding a HUD.
+An unowned physics prop that is locally targetable has a pulsing mint silhouette.
+After the server accepts a grab, that prop keeps an amber silhouette even when
+the player looks away; the outline clears only when authoritative state reports
+release. Props held by another player are not presented as available.
+
 ## Scope boundaries
 
 Gurgur does not use Redis, microservices, distributed simulation, matchmaking,

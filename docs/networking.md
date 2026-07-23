@@ -101,9 +101,11 @@ uses a 15-byte header, 41-byte quantized rigid-body records, and 36-byte player
 records. A player is serialized once; decoding reconstructs its render-body
 sample. Position remains float32, quaternion components and velocities are
 bounded int16 values, and flags mark create, teleport, wake, and sleep
-discontinuities. A detected teleport marker repeats for one second so losing the
-first disposable state packet cannot turn a respawn into an enormous predicted
-correction.
+discontinuities. Current-state flag bits also report global grab ownership and,
+in each per-player view, whether that player owns the grab. These bits reuse the
+existing body record and do not enlarge snapshots. A detected teleport marker
+repeats for one second so losing the first disposable state packet cannot turn a
+respawn into an enormous predicted correction.
 
 The per-client state packet targets at most 1,200 application bytes:
 

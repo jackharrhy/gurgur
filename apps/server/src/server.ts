@@ -7,9 +7,14 @@ import {
   PHYSICS_HZ,
   PROTOCOL_VERSION,
   SNAPSHOT_BODY_BYTES,
+  SNAPSHOT_FLAG_CREATED,
   SNAPSHOT_HZ,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_INTERVAL_TICKS,
+  SNAPSHOT_FLAG_LOCAL_GRAB,
+  SNAPSHOT_FLAG_SLEEP,
+  SNAPSHOT_FLAG_TELEPORT,
+  SNAPSHOT_FLAG_WAKE,
   SNAPSHOT_PLAYER_BYTES,
   STATE_ALWAYS_NEAR_BODY_SLOTS,
   STATE_DATAGRAM_TARGET_BYTES,
@@ -74,6 +79,12 @@ export type ServerMetrics = ReturnType<AuthoritativeGame["metrics"]> & {
 };
 
 const MAX_STATE_BUFFERED_BYTES = STATE_DATAGRAM_TARGET_BYTES * 2;
+const PRIORITY_BODY_FLAGS =
+  SNAPSHOT_FLAG_CREATED |
+  SNAPSHOT_FLAG_TELEPORT |
+  SNAPSHOT_FLAG_WAKE |
+  SNAPSHOT_FLAG_SLEEP |
+  SNAPSHOT_FLAG_LOCAL_GRAB;
 
 export async function createGurgurServer(
   options: {
@@ -172,7 +183,14 @@ export async function createGurgurServer(
       try {
         channel.send(
           Buffer.from(
-            encodeSnapshot(snapshotForPlayer(snapshot, game.playerPosition(playerId), playerId)),
+            encodeSnapshot(
+              snapshotForPlayer(
+                snapshot,
+                game.playerPosition(playerId),
+                playerId,
+                game.grabbedTarget(playerId),
+              ),
+            ),
           ),
         );
       } catch {
@@ -202,6 +220,21 @@ export async function createGurgurServer(
   });
   const worldBundleBytes = encodeWorldBundle(game.worldMessage().bundle);
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
+  let physicsDebugCache: { serverTick: number; body: string } | null = null;
+  const physicsDebugResponse = (): Response => {
+    if (physicsDebugCache?.serverTick !== game.serverTick) {
+      physicsDebugCache = {
+        serverTick: game.serverTick,
+        body: JSON.stringify(game.physicsDebugFrame()),
+      };
+    }
+    return new Response(physicsDebugCache.body, {
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/json",
+      },
+    });
+  };
   const acceptInputPacket = (
     socket: Bun.ServerWebSocket<ClientData>,
     packet: ArrayBuffer | ArrayBufferView,
@@ -264,6 +297,7 @@ export async function createGurgurServer(
               game.snapshot({ full: true }),
               game.playerPosition(playerId),
               playerId,
+              game.grabbedTarget(playerId),
             ),
           ),
         ),
@@ -321,6 +355,7 @@ export async function createGurgurServer(
         headers: { "content-type": "text/plain" },
       }),
       "/metrics": { GET: () => Response.json(metrics()) },
+      "/debug/physics": { GET: physicsDebugResponse },
       "/box3d.wasm": new Response(box3dWasm, {
         headers: { "content-type": "application/wasm" },
       }),
@@ -647,13 +682,25 @@ export function snapshotForPlayer(
   snapshot: Snapshot,
   localPosition: Vec3 | null,
   localPlayerId: RuntimeId,
+  localGrabbedTarget: RuntimeId | null = null,
 ): Snapshot {
   if (!localPosition) return snapshot;
-  const rotation = Math.floor(snapshot.serverTick / SNAPSHOT_INTERVAL_TICKS);
-  const playerIds = new Set(snapshot.players.map(({ id }) => `${id.index}:${id.generation}`));
+  const playerSnapshot = localGrabbedTarget
+    ? {
+        ...snapshot,
+        bodies: snapshot.bodies.map((body) =>
+          body.id.index === localGrabbedTarget.index &&
+          body.id.generation === localGrabbedTarget.generation
+            ? { ...body, flags: (body.flags ?? 0) | SNAPSHOT_FLAG_LOCAL_GRAB }
+            : body,
+        ),
+      }
+    : snapshot;
+  const rotation = Math.floor(playerSnapshot.serverTick / SNAPSHOT_INTERVAL_TICKS);
+  const playerIds = new Set(playerSnapshot.players.map(({ id }) => `${id.index}:${id.generation}`));
   // Distant players are interest-managed too; at 32 peers, including every
   // player would consume the entire state-datagram budget before any prop.
-  const orderedPlayers = snapshot.players.toSorted((left, right) => {
+  const orderedPlayers = playerSnapshot.players.toSorted((left, right) => {
     const leftIsLocal =
       left.id.index === localPlayerId.index && left.id.generation === localPlayerId.generation;
     const rightIsLocal =
@@ -686,7 +733,7 @@ export function snapshotForPlayer(
   const selectedPlayerIds = new Set(
     selectedPlayers.map(({ id }) => `${id.index}:${id.generation}`),
   );
-  const selectedPlayerBodies = snapshot.bodies.filter((body) =>
+  const selectedPlayerBodies = playerSnapshot.bodies.filter((body) =>
     selectedPlayerIds.has(`${body.id.index}:${body.id.generation}`),
   );
   const bodyCapacity = Math.max(
@@ -698,7 +745,7 @@ export function snapshotForPlayer(
         SNAPSHOT_BODY_BYTES,
     ),
   );
-  const candidates = snapshot.bodies
+  const candidates = playerSnapshot.bodies
     .filter((body) => !playerIds.has(`${body.id.index}:${body.id.generation}`))
     .map((body) => ({
       body,
@@ -710,13 +757,13 @@ export function snapshotForPlayer(
     }));
   if (candidates.length <= bodyCapacity)
     return {
-      ...snapshot,
+      ...playerSnapshot,
       players: selectedPlayers,
       bodies: [...selectedPlayerBodies, ...candidates.map(({ body }) => body)],
     };
 
-  const urgent = candidates.filter(({ body }) => (body.flags ?? 0) !== 0);
-  const ordinary = candidates.filter(({ body }) => (body.flags ?? 0) === 0);
+  const urgent = candidates.filter(({ body }) => ((body.flags ?? 0) & PRIORITY_BODY_FLAGS) !== 0);
+  const ordinary = candidates.filter(({ body }) => ((body.flags ?? 0) & PRIORITY_BODY_FLAGS) === 0);
   const near = ordinary
     .filter(({ distance }) => distance <= FULL_RATE_BODY_RADIUS_METRES)
     .toSorted((left, right) => left.distance - right.distance);
@@ -759,7 +806,7 @@ export function snapshotForPlayer(
     );
   }
   return {
-    ...snapshot,
+    ...playerSnapshot,
     players: selectedPlayers,
     bodies: [...selectedPlayerBodies, ...selected.map(({ body }) => body)],
   };

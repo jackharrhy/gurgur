@@ -17,10 +17,12 @@ import {
   PROTOCOL_VERSION,
   SNAPSHOT_INTERVAL_TICKS,
   SNAPSHOT_FLAG_CREATED,
+  SNAPSHOT_FLAG_GRABBED,
   SNAPSHOT_FLAG_SLEEP,
   SNAPSHOT_FLAG_TELEPORT,
   SNAPSHOT_FLAG_WAKE,
   type InputCommand,
+  type PhysicsDebugFrame,
   type RuntimeId,
   type Snapshot,
   type Vec3,
@@ -167,6 +169,13 @@ export class AuthoritativeGame {
   get mapRevision(): string {
     return this.#bundle.mapRevision;
   }
+  physicsDebugFrame(maxPrimitives?: number): PhysicsDebugFrame {
+    return {
+      worldEpoch: this.#worldEpoch,
+      serverTick: this.#serverTick,
+      ...this.#physics.debugDraw(maxPrimitives),
+    };
+  }
   playerPosition(id: RuntimeId): Vec3 | null {
     return this.#resolvePlayer(id)?.player.state.position ?? null;
   }
@@ -298,6 +307,7 @@ export class AuthoritativeGame {
     const snapshotIndex = Math.floor(this.#serverTick / SNAPSHOT_INTERVAL_TICKS);
     const bodies = this.#runtimeBodies.flatMap(({ handle }) => {
       const identity = key(handle);
+      const grabbed = players.some((player) => player.grab && key(player.grab.target) === identity);
       const { awake, ...state } = this.#physics.state(handle);
       const predictionRelevant = players.some(
         (player) => distance(player.state.position, state.position) <= FULL_RATE_BODY_RADIUS_METRES,
@@ -322,7 +332,8 @@ export class AuthoritativeGame {
             (discontinuity
               ? SNAPSHOT_FLAG_TELEPORT
               : this.#snapshotFlags(handle, state.position, awake)) |
-            (!awake && (full || repeatTerminalState) ? SNAPSHOT_FLAG_SLEEP : 0),
+            (!awake && (full || repeatTerminalState) ? SNAPSHOT_FLAG_SLEEP : 0) |
+            (grabbed ? SNAPSHOT_FLAG_GRABBED : 0),
         },
       ];
     });
@@ -370,6 +381,11 @@ export class AuthoritativeGame {
         })),
       ],
     };
+  }
+
+  grabbedTarget(playerId: RuntimeId): RuntimeId | null {
+    const resolved = this.#resolvePlayer(playerId);
+    return resolved?.player.grab ? { ...resolved.player.grab.target } : null;
   }
 
   reset(): Snapshot {

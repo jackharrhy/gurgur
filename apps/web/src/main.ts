@@ -3,9 +3,12 @@ import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createPredictionClient } from "./prediction-client";
+import type { PhysicsDebugFrame } from "@gurgur/shared";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
+const searchParams = new URLSearchParams(location.search);
+const debugEnabled = searchParams.has("debug") && searchParams.get("debug") !== "0";
 
 const textureManifestResponse = await fetch("/textures.json", { cache: "no-cache" });
 if (!textureManifestResponse.ok)
@@ -44,6 +47,7 @@ const renderer = new WorldRenderer(
     document.body.dataset.renderedHeavyCubeQw = String(body.rotation.w);
   },
   materialTextureUrls,
+  debugEnabled,
 );
 const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
@@ -92,6 +96,7 @@ const input = createPlayerInput(
   () => {
     const target = renderer.interactionTarget();
     document.body.dataset.interactionTarget = target ? `${target.index}:${target.generation}` : "";
+    document.body.dataset.interactionOutline = renderer.interactionOutlineState();
     return target;
   },
 );
@@ -133,6 +138,7 @@ session = new GameSession(
       renderer.applyLifecycle(message);
     },
     snapshot(message, latestInFrame) {
+      renderer.applyAuthoritativeInteractionState(message.bodies);
       history.push(message);
       predictor.reconcile(message, latestInFrame);
       if (!latestInFrame) return;
@@ -178,13 +184,49 @@ session = new GameSession(
     },
   },
   {
-    simulatedLatencyMs: Number(new URLSearchParams(location.search).get("simulatedLatencyMs") ?? 0),
+    simulatedLatencyMs: Number(searchParams.get("simulatedLatencyMs") ?? 0),
   },
 );
+
+let debugPoll: number | null = null;
+let debugRequest: AbortController | null = null;
+if (debugEnabled) {
+  document.body.dataset.debug = "true";
+  const panel = document.createElement("output");
+  panel.id = "debug-status";
+  panel.textContent = "debug · waiting for authoritative physics";
+  document.body.append(panel);
+  const pollPhysics = async (): Promise<void> => {
+    if (debugRequest) return;
+    debugRequest = new AbortController();
+    try {
+      const response = await fetch("/debug/physics", {
+        cache: "no-store",
+        signal: debugRequest.signal,
+      });
+      if (!response.ok) throw new Error(`physics debug request failed (${response.status})`);
+      const frame = (await response.json()) as PhysicsDebugFrame;
+      renderer.applyPhysicsDebugFrame(frame);
+      document.body.dataset.physicsDebugPrimitives = String(frame.primitives.length);
+      panel.textContent = `debug · server tick ${frame.serverTick} · ${frame.primitives.length} physics primitives${frame.truncated ? " · truncated" : ""}`;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        panel.textContent =
+          error instanceof Error ? `debug · ${error.message}` : "debug · unavailable";
+      }
+    } finally {
+      debugRequest = null;
+    }
+  };
+  void pollPhysics();
+  debugPoll = window.setInterval(() => void pollPhysics(), 100);
+}
 
 renderer.start();
 session.connect();
 addEventListener("pagehide", () => {
+  if (debugPoll !== null) clearInterval(debugPoll);
+  debugRequest?.abort();
   session.close();
   input.dispose();
   predictor.dispose();

@@ -22,6 +22,18 @@ export type Snapshot = {
   players: PlayerStateSnapshot[];
 };
 
+export type PhysicsDebugPrimitive =
+  | { kind: "bounds"; lower: Vec3; upper: Vec3; color: number }
+  | { kind: "segment"; from: Vec3; to: Vec3; color: number }
+  | { kind: "point"; position: Vec3; size: number; color: number };
+
+export type PhysicsDebugFrame = {
+  worldEpoch: number;
+  serverTick: number;
+  primitives: PhysicsDebugPrimitive[];
+  truncated: boolean;
+};
+
 export type PlayerStateSnapshot = {
   id: RuntimeId;
   position: Vec3;

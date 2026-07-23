@@ -9,6 +9,27 @@ import {
 } from "../src";
 
 describe("PhysicsWorld", () => {
+  test("extracts bounded Box3D debug bounds without exposing Wasm state", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      world.createBox({
+        type: "dynamic",
+        position: { x: 1, y: 2, z: 3 },
+        halfExtents: { x: 0.5, y: 0.6, z: 0.7 },
+      });
+      const debug = world.debugDraw();
+      const bounds = debug.primitives.find((primitive) => primitive.kind === "bounds");
+      expect(bounds?.kind).toBe("bounds");
+      if (bounds?.kind !== "bounds") throw new Error("expected Box3D bounds");
+      expect(bounds.lower.x).toBeLessThan(0.5);
+      expect(bounds.upper.z).toBeGreaterThan(3.7);
+      expect(debug.truncated).toBe(false);
+      expect(world.debugDraw(0)).toEqual({ primitives: [], truncated: true });
+    } finally {
+      world.dispose();
+    }
+  });
+
   test("steps a dynamic body onto the ground", async () => {
     const world = await PhysicsWorld.create();
     try {

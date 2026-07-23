@@ -46,7 +46,10 @@ Browser scenarios run the actual Bun server, WebSocket signaling, WebRTC data
 channels, codecs, prediction worker, Box3D Wasm, Three.js renderer, and input
 path. `smoke:dynamic` covers moving support, `smoke:push` covers visible prop
 response under shaped latency, `smoke:latency` covers held input, and the other
-smokes cover grab, touch, gamepad, reconnect, and ordinary movement.
+smokes cover grab, touch, gamepad, reconnect, and ordinary movement. The grab
+smoke enables the general `?debug` view and requires a non-empty authoritative
+Box3D debug frame, covering the server callback, JSON route, browser polling, and
+Three.js overlay together.
 
 ## Multiplayer harness
 

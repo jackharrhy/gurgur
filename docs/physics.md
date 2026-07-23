@@ -17,6 +17,13 @@ Application code imports only Gurgur's physics adapter. The adapter exposes worl
 body, shape, constraint, query, mover, and event operations required by the game;
 raw Embind objects and Wasm views do not cross that boundary.
 
+The adapter's bounded debug extraction uses `b3World_Draw` only on demand. The
+installed binding emits broad-phase bounds, joint segments, and live contact
+points. Its shape callback is deliberately disabled upstream, and its mass
+transform callback is not safe in this release, so neither is presented as
+available. `?debug` polls a cached current frame at 10 Hz; this diagnostic JSON is
+separate from gameplay replication and never serializes Wasm pointers or IDs.
+
 ## Resource ownership
 
 Runtime Box3D IDs are wrapped in `{ index, generation }` handles and validated on

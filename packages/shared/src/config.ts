@@ -22,5 +22,7 @@ export const SNAPSHOT_FLAG_CREATED = 1 << 0;
 export const SNAPSHOT_FLAG_TELEPORT = 1 << 1;
 export const SNAPSHOT_FLAG_WAKE = 1 << 2;
 export const SNAPSHOT_FLAG_SLEEP = 1 << 3;
+export const SNAPSHOT_FLAG_GRABBED = 1 << 4;
+export const SNAPSHOT_FLAG_LOCAL_GRAB = 1 << 5;
 export const MAX_CATCH_UP_TICKS = 4;
 export const INPUT_INTENT_TIMEOUT_TICKS = Math.ceil(0.25 / PHYSICS_DT);

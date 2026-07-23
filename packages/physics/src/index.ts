@@ -12,7 +12,7 @@ import createBox3D, {
   type PlaneResultBuffer,
   type SensorTouchEvent,
 } from "box3d.js";
-import type { BodySnapshot, Quat, RuntimeId, Vec3 } from "@gurgur/shared";
+import type { BodySnapshot, PhysicsDebugPrimitive, Quat, RuntimeId, Vec3 } from "@gurgur/shared";
 
 type BodySlot = {
   generation: number;
@@ -56,6 +56,11 @@ export type PhysicsStepEvents = {
     approachSpeed: number;
   }>;
   moved: Array<{ body: RuntimeId; position: Vec3; rotation: Quat; fellAsleep: boolean }>;
+};
+
+export type PhysicsDebugDraw = {
+  primitives: PhysicsDebugPrimitive[];
+  truncated: boolean;
 };
 
 export class PhysicsWorld {
@@ -610,6 +615,35 @@ export class PhysicsWorld {
       for (const index of this.#pendingDestroy) this.#destroySlot(index);
       this.#pendingDestroy.clear();
     }
+  }
+
+  debugDraw(maxPrimitives = 4_096): PhysicsDebugDraw {
+    this.#assertLive();
+    if (this.#stepping) throw new Error("cannot debug draw during a physics step");
+    const limit = Math.max(0, Math.floor(maxPrimitives));
+    const primitives: PhysicsDebugPrimitive[] = [];
+    let truncated = false;
+    const append = (primitive: PhysicsDebugPrimitive): void => {
+      if (primitives.length < limit) primitives.push(primitive);
+      else truncated = true;
+    };
+    this.#box3d.b3World_Draw(this.#world, {
+      // In box3d.js@0.0.2 the drawBounds callback also enables bound drawing.
+      drawBounds: (bounds: { lowerBound: Vec3; upperBound: Vec3 }, color: number) =>
+        append({
+          kind: "bounds",
+          lower: { ...bounds.lowerBound },
+          upper: { ...bounds.upperBound },
+          color,
+        }),
+      drawJoints: true,
+      drawContacts: true,
+      drawSegment: (from: Vec3, to: Vec3, color: number) =>
+        append({ kind: "segment", from: { ...from }, to: { ...to }, color }),
+      drawPoint: (position: Vec3, size: number, color: number) =>
+        append({ kind: "point", position: { ...position }, size, color }),
+    });
+    return { primitives, truncated };
   }
 
   moveCapsule(start: Vec3, desired: Vec3, options: { halfSegment?: number } = {}): Vec3 {
