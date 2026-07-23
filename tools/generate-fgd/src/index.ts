@@ -1,47 +1,4 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { deflateSync } from "node:zlib";
 import { entityDefinitions, type PropertyDefinition } from "@gurgur/entity-schema";
-import { MATERIAL_TEXTURE_SIZE, createMaterialTextureRgba } from "@gurgur/shared";
-
-const crcTable = Array.from({ length: 256 }, (_, value) => {
-  let crc = value;
-  for (let bit = 0; bit < 8; bit += 1) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
-  return crc >>> 0;
-});
-
-const pngChunk = (type: string, data: Uint8Array): Buffer => {
-  const typeBytes = Buffer.from(type, "ascii");
-  const payload = Buffer.concat([typeBytes, data]);
-  let crc = 0xffffffff;
-  for (const byte of payload) crc = crcTable[(crc ^ byte) & 0xff]! ^ (crc >>> 8);
-  const chunk = Buffer.alloc(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0);
-  typeBytes.copy(chunk, 4);
-  Buffer.from(data).copy(chunk, 8);
-  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, 8 + data.length);
-  return chunk;
-};
-
-const encodePng = (rgba: Uint8ClampedArray): Buffer => {
-  const size = MATERIAL_TEXTURE_SIZE;
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(size, 0);
-  header.writeUInt32BE(size, 4);
-  header.set([8, 6, 0, 0, 0], 8);
-  const rows = Buffer.alloc(size * (size * 4 + 1));
-  for (let y = 0; y < size; y += 1) {
-    const rowStart = y * (size * 4 + 1);
-    rows[rowStart] = 0;
-    rows.set(rgba.subarray(y * size * 4, (y + 1) * size * 4), rowStart + 1);
-  }
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    pngChunk("IHDR", header),
-    pngChunk("IDAT", deflateSync(rows)),
-    pngChunk("IEND", new Uint8Array()),
-  ]);
-};
 
 const fgdType = (property: PropertyDefinition): string =>
   ({
@@ -102,7 +59,7 @@ const gameConfig = {
     ],
     brushface: [],
   },
-  faceattribs: { defaults: { scale: [0.25, 0.25] }, surfaceflags: [], contentflags: [] },
+  faceattribs: { defaults: { scale: [0.5, 0.5] }, surfaceflags: [], contentflags: [] },
   softMapBounds: "-4096 -4096 -4096 4096 4096 4096",
   compilationTools: [
     { name: "gurgur-compile-map", description: "Gurgur deterministic Valve 220 compiler" },
@@ -119,9 +76,10 @@ for await (const path of mapFiles.scan({ dot: false })) {
 }
 for (const material of [...materialNames].toSorted()) {
   const texturePath = `content/textures/${material}.png`;
-  await mkdir(dirname(texturePath), { recursive: true });
-  await Bun.write(texturePath, encodePng(createMaterialTextureRgba(material)));
+  if (!(await Bun.file(texturePath).exists())) {
+    throw new Error(`missing authored material texture: ${texturePath}`);
+  }
 }
 console.log(
-  `generated TrenchBroom FGD/game config (${Object.keys(entityDefinitions).length} classes, ${materialNames.size} textures)`,
+  `generated TrenchBroom FGD/game config (${Object.keys(entityDefinitions).length} classes, ${materialNames.size} authored textures)`,
 );

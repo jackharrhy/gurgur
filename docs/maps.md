@@ -7,23 +7,27 @@ authored world truth. Maps contain geometry, materials, entity instances, and
 authored defaults. The TypeScript schema defines legal classnames, properties,
 types, defaults, and runtime construction behavior.
 
-Generated meshes, collision data, FGD files, TrenchBroom game configuration, and
-runtime bundles are reproducible build artifacts. They are never edited by hand.
+Material PNGs under `content/textures` are authored assets. Generated meshes,
+collision data, FGD files, TrenchBroom game configuration, and runtime bundles are
+reproducible build artifacts. They are never edited by hand.
 
 ## TrenchBroom setup
 
 Run `bun run setup:trenchbroom` after cloning or whenever the entity schema or
-procedural material language changes. The command regenerates the FGD, game
-configuration, and PNG editor previews, installs the game configuration in the
-current operating system's TrenchBroom user-data directory, and configures this
-repository's `content` directory as the Gurgur game path without discarding other
-TrenchBroom preferences. Restart TrenchBroom after installation.
+game configuration changes. The command regenerates the FGD and game
+configuration, validates the authored material collection, installs the game
+configuration in the current operating system's TrenchBroom user-data directory,
+and configures this repository's `content` directory as the Gurgur game path
+without discarding other TrenchBroom preferences. Restart TrenchBroom after
+installation.
 
 Gurgur maps identify themselves with `// Game: Gurgur` and `// Format: Valve`
 header comments so TrenchBroom selects the installed game and Valve 220 format
-automatically. Runtime and editor textures share the deterministic palette and
-pixel-pattern generator. TrenchBroom loads its generated PNG previews from
-`content/textures/GURGUR` through the configured game path.
+automatically. Runtime and editor rendering use the same authored 64 x 64 PNGs,
+and new TrenchBroom faces use a 0.5 texture scale. TrenchBroom loads the texture
+collection from `content/textures/GURGUR` through the configured game path.
+Configuration generation validates that every mapped material has an authored
+PNG and never creates or overwrites artwork.
 
 The installer follows TrenchBroom's platform user-data locations. Set
 `TRENCHBROOM_USER_DATA_PATH` only for a portable or otherwise nonstandard

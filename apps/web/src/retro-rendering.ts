@@ -1,5 +1,6 @@
 import * as THREE from "three/webgpu";
 import * as TSL from "three/tsl";
+import { RETRO_COLOR_INTERVALS } from "./retro-color";
 
 // The public TSL declarations recursively encode complete shader graphs. Keeping
 // graph composition behind this boundary prevents TypeScript 7 from attempting
@@ -132,11 +133,23 @@ export function createRetroRenderPipeline(
   scenePass.renderTarget.texture.minFilter = THREE.NearestFilter;
 
   const sceneColor = scenePass;
-  const lifted = tsl.max(sceneColor.rgb, tsl.vec3(0)).mul(1.05).clamp(0, 1);
-  const levels = tsl.vec3(10, 10, 9);
-  const quantized = tsl.floor(lifted.mul(levels).add(0.5)).div(levels);
   const vignette = tsl.smoothstep(0.35, 1.05, tsl.distance(tsl.screenUV, tsl.vec2(0.5))).oneMinus();
-  const output = tsl.vec4(quantized.mul(tsl.mix(0.76, 1, vignette)), sceneColor.a);
+  const shaded = tsl
+    .max(sceneColor.rgb, tsl.vec3(0))
+    .mul(1.05)
+    .mul(tsl.mix(0.76, 1, vignette))
+    .clamp(0, 1);
+  const retroResolution = tsl.uniform(new THREE.Vector2(480, 270));
+  const ditherCell = tsl.floor(tsl.screenUV.mul(retroResolution)).mod(4);
+  const bayer2 = (x: any, y: any) => x.mul(2).add(y.mul(3)).sub(x.mul(y).mul(4));
+  const bayerIndex = bayer2(ditherCell.x.mod(2), ditherCell.y.mod(2))
+    .mul(4)
+    .add(bayer2(ditherCell.x.div(2).floor(), ditherCell.y.div(2).floor()));
+  const bayerThreshold = tsl.mix(0.5, bayerIndex.add(0.5).div(16), 0.35);
+  const levels = tsl.vec3(...RETRO_COLOR_INTERVALS);
+  const displayColor = tsl.sRGBTransferOETF(shaded);
+  const quantizedDisplay = tsl.floor(displayColor.mul(levels).add(bayerThreshold)).div(levels);
+  const output = tsl.vec4(tsl.sRGBTransferEOTF(quantizedDisplay), sceneColor.a);
   const pipeline = new THREE.RenderPipeline(renderer, output);
 
   return {
@@ -144,6 +157,10 @@ export function createRetroRenderPipeline(
     resize(width, height) {
       const scale = Math.min(1, 480 / Math.max(1, width), 270 / Math.max(1, height));
       scenePass.setResolutionScale(scale);
+      retroResolution.value.set(
+        Math.max(1, Math.round(width * scale)),
+        Math.max(1, Math.round(height * scale)),
+      );
     },
     dispose() {
       scenePass.dispose();

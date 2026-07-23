@@ -20,6 +20,7 @@ import {
   type WorldManifestMessage,
 } from "@gurgur/shared";
 import { AuthoritativeGame } from "./game";
+import { loadMaterialTextureAsset, loadMaterialTextureManifest } from "./material-textures";
 import { WorldStore } from "./store";
 
 type ClientData = {
@@ -91,6 +92,7 @@ export async function createGurgurServer(
   );
   if (!(await playerBillboard.exists()))
     throw new Error("missing generated player billboard; run bun run render:player");
+  const materialTextureRoot = new URL("../../../content/textures/", import.meta.url);
   const store = new WorldStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "./data/gurgur.sqlite",
   );
@@ -183,6 +185,39 @@ export async function createGurgurServer(
           "cache-control": "public, max-age=31536000, immutable",
         },
       }),
+      "/textures.json": {
+        async GET(request: Request) {
+          const manifest = await loadMaterialTextureManifest(materialTextureRoot);
+          const headers = {
+            "cache-control": "no-cache",
+            "content-type": "application/json",
+            etag: manifest.etag,
+          };
+          if (request.headers.get("if-none-match") === manifest.etag) {
+            return new Response(null, { status: 304, headers });
+          }
+          return Response.json(manifest.textures, { headers });
+        },
+      },
+      "/textures/*": {
+        async GET(request: Request) {
+          const url = new URL(request.url);
+          const asset = await loadMaterialTextureAsset(materialTextureRoot, url.pathname);
+          if (!asset) return new Response("texture not found", { status: 404 });
+          if (url.searchParams.get("v") !== asset.hash) {
+            url.search = "";
+            url.searchParams.set("v", asset.hash);
+            return Response.redirect(url, 307);
+          }
+          return new Response(asset.file, {
+            headers: {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "image/png",
+              etag: `"${asset.hash}"`,
+            },
+          });
+        },
+      },
       "/favicon.ico": new Response(null, { status: 204 }),
       "/world.bin": {
         GET: () =>

@@ -60,15 +60,18 @@ Three.js `WebGPURenderer` remains the scene and presentation backend, using its
 WebGL 2 fallback when WebGPU is unavailable. `RenderPipeline` and TSL own the
 shader graph; handwritten GLSL and the legacy post-processing stack are excluded.
 The world renders into a nearest-neighbour target capped at 480 x 270, then a TSL
-resolve applies coarse channel quantization and a restrained vignette. Surface
-textures retain nearest-neighbour magnification but use mip levels under
-minification to prevent screen-scale moire patterns.
+resolve applies display-space RGB565 color quantization, a restrained
+low-resolution-anchored 4 x 4 Bayer dither, and a pre-quantization vignette. This
+preserves authored color detail while retaining the structured banding of a
+late-1990s 16-bit software framebuffer. Surface textures retain nearest-neighbour
+magnification but use mip levels under minification to prevent screen-scale moire
+patterns.
 The CSS canvas fills the viewport independently, preserving low-resolution pixels
 without tying gameplay layout to a fixed window size.
 
-World materials use compact authored palettes, pixel-magnified 32 x 32 procedural
-textures and shadow-map-free Gouraud lighting explicitly evaluated in TSL's vertex
-stage. Clip-space vertex snapping and partially affine UV interpolation provide
+World materials use authored, pixel-magnified 64 x 64 PNG textures and
+shadow-map-free Gouraud lighting explicitly evaluated in TSL's vertex stage.
+Clip-space vertex snapping and partially affine UV interpolation provide
 controlled software-renderer instability without sacrificing texture mip levels.
 Large concrete and stone surfaces use deterministic irregular aggregate instead
 of periodic line grids, preventing grazing-angle moire without smoothing away the
@@ -108,6 +111,7 @@ The server exposes a deliberately small surface:
 | `/world.bin`                              | immutable compiled map bundle      |
 | `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets          |
 | `/player-billboard.png`                   | generated directional player atlas |
+| `/textures.json` and `/textures/*`        | hashed authored material textures  |
 | `/admin/reset`                            | authenticated world reset request  |
 
 Browser assets and gameplay share an origin, so no application CORS layer is
@@ -125,3 +129,8 @@ persistent path. Production configuration uses `PORT`, `HOST`, `DATABASE_PATH`,
 `PUBLIC_ORIGIN`, and `ADMIN_TOKEN`. Startup validates ranges, URL schemes, and
 production administration-token length before binding the port. Secrets are
 never bundled into browser assets.
+
+GitHub Actions builds this Dockerfile on pushes to `main`, version tags, and
+manual dispatches, then publishes it to `ghcr.io/<owner>/<repository>`. The
+default branch publishes `latest`; all builds retain source-ref and commit-SHA
+tags, while version tags also publish normalized semantic-version tags.

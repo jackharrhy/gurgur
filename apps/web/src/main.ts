@@ -7,6 +7,22 @@ import { createPredictionClient } from "./prediction-client";
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
 
+const textureManifestResponse = await fetch("/textures.json", { cache: "no-cache" });
+if (!textureManifestResponse.ok)
+  throw new Error("authored material texture manifest is unavailable");
+const textureManifest = (await textureManifestResponse.json()) as unknown;
+if (!textureManifest || typeof textureManifest !== "object" || Array.isArray(textureManifest)) {
+  throw new Error("authored material texture manifest is invalid");
+}
+const materialTextureUrls = Object.fromEntries(
+  Object.entries(textureManifest).map(([name, url]) => {
+    if (typeof url !== "string" || !url.startsWith("/textures/")) {
+      throw new Error(`authored material texture URL is invalid: ${name}`);
+    }
+    return [name, url];
+  }),
+);
+
 const history = createSnapshotTimeline();
 let heavyCube: { key: string; localTop: number } | null = null;
 const renderer = new WorldRenderer(
@@ -23,6 +39,7 @@ const renderer = new WorldRenderer(
     document.body.dataset.renderedHeavyCubeY = String(body.position.y);
     document.body.dataset.renderedHeavyCubeZ = String(body.position.z);
   },
+  materialTextureUrls,
 );
 const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);

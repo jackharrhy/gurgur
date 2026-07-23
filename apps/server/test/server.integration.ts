@@ -30,6 +30,22 @@ describe("authoritative server", () => {
       expect(new Uint8Array(await playerBillboard.arrayBuffer()).slice(0, 8)).toEqual(
         new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
       );
+      const textureManifestResponse = await fetch(`http://127.0.0.1:${server.port}/textures.json`);
+      expect(textureManifestResponse.headers.get("cache-control")).toBe("no-cache");
+      const textureManifest = (await textureManifestResponse.json()) as Record<string, string>;
+      expect(textureManifest["GURGUR/CONCRETE"]).toMatch(
+        /^\/textures\/GURGUR\/CONCRETE\.png\?v=[0-9a-f]{64}$/,
+      );
+      const concreteTexture = await fetch(
+        `http://127.0.0.1:${server.port}${textureManifest["GURGUR/CONCRETE"]}`,
+      );
+      expect(concreteTexture.headers.get("content-type")).toBe("image/png");
+      expect(concreteTexture.headers.get("cache-control")).toBe(
+        "public, max-age=31536000, immutable",
+      );
+      expect(new Uint8Array(await concreteTexture.arrayBuffer()).slice(0, 8)).toEqual(
+        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+      );
       expect(
         (await fetch(`http://127.0.0.1:${server.port}/some/client/route`)).headers.get(
           "content-type",

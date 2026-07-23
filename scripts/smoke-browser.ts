@@ -75,9 +75,13 @@ const waitForStablePlayerHeight = async (): Promise<number> =>
       }),
   );
 const worldBundleRequests: string[] = [];
+const materialTextureRequests: string[] = [];
 page.on("request", (request) => {
   const requestUrl = new URL(request.url());
   if (requestUrl.pathname === "/world.bin") worldBundleRequests.push(requestUrl.href);
+  if (requestUrl.pathname.startsWith("/textures/") && requestUrl.pathname.endsWith(".png")) {
+    materialTextureRequests.push(requestUrl.href);
+  }
 });
 if (scenario === "grab" || scenario === "gamepad")
   await page.addInitScript(() => {
@@ -107,6 +111,11 @@ try {
   await page.locator('body[data-world-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
+  await page.waitForFunction(() =>
+    performance
+      .getEntriesByType("resource")
+      .some((entry) => new URL(entry.name).pathname.startsWith("/textures/")),
+  );
   const shell = await page.evaluate(() => {
     const canvas = document.querySelector("#world");
     const main = document.querySelector("main");
@@ -133,6 +142,16 @@ try {
   if (!requestedRevision || !/^[0-9a-f]{64}$/.test(requestedRevision)) {
     throw new Error(
       `world bundle request is not revision-addressed: ${worldBundleRequests.at(-1) ?? "missing"}`,
+    );
+  }
+  if (
+    materialTextureRequests.length === 0 ||
+    materialTextureRequests.some(
+      (requestUrl) => !/^[0-9a-f]{64}$/.test(new URL(requestUrl).searchParams.get("v") ?? ""),
+    )
+  ) {
+    throw new Error(
+      `material textures are not content-addressed: ${materialTextureRequests.join(", ") || "missing"}`,
     );
   }
   await page.waitForFunction(() => Number(document.body.dataset.serverTick) >= 6);

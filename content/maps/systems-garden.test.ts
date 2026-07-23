@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { entityDefinitions, type EntityClassname } from "@gurgur/entity-schema";
 import { compileWorld } from "@gurgur/world-compiler";
-import { decodeWorldBundle, encodeWorldBundle } from "../../packages/shared/src";
+import {
+  MATERIAL_TEXTURE_SIZE,
+  decodeWorldBundle,
+  encodeWorldBundle,
+} from "../../packages/shared/src";
 
 type ParsedEntity = {
   properties: Record<string, string>;
@@ -54,6 +58,11 @@ function parseFixture(source: string): ParsedEntity[] {
 const source = await Bun.file(new URL("./systems-garden.map", import.meta.url)).text();
 const entities = parseFixture(source);
 const compiledWorld = compileWorld(source, "systems-garden.map");
+const gameConfig = (await Bun.file(
+  new URL("../trenchbroom/GameConfig.cfg", import.meta.url),
+).json()) as {
+  faceattribs: { defaults: { scale: [number, number] } };
+};
 
 type Tuple3 = [number, number, number];
 const subtract = (a: Tuple3, b: Tuple3): Tuple3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -74,6 +83,21 @@ function facePoints(brush: string): Array<[Tuple3, Tuple3, Tuple3]> {
 }
 
 describe("Systems Garden map", () => {
+  test("uses the same enlarged material scale as TrenchBroom", () => {
+    expect(MATERIAL_TEXTURE_SIZE).toBe(64);
+    expect(gameConfig.faceattribs.defaults.scale).toEqual([0.5, 0.5]);
+    for (const brush of entities.flatMap((entity) => entity.brushes)) {
+      for (const line of brush.split("\n").filter((candidate) => candidate.startsWith("("))) {
+        expect(
+          line
+            .match(/\s([-+\d.eE]+)\s+([-+\d.eE]+)$/)
+            ?.slice(1)
+            .map(Number),
+        ).toEqual([0.5, 0.5]);
+      }
+    }
+  });
+
   test("declares Valve 220 and uses globally consistent face winding per brush", () => {
     expect(source.startsWith("// Game: Gurgur\n// Format: Valve\n")).toBe(true);
     expect(entities[0]?.properties.mapversion).toBe("220");

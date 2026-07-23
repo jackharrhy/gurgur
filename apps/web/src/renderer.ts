@@ -2,7 +2,6 @@ import * as THREE from "three/webgpu";
 import {
   INTERPOLATION_DELAY_TICKS,
   MATERIAL_TEXTURE_SIZE,
-  createMaterialTextureRgba,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
@@ -47,6 +46,7 @@ export class WorldRenderer {
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
+  readonly #materialTextureUrls: Readonly<Record<string, string>>;
   #worldRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
   readonly #predictedLocal = createPredictedPoseTimeline();
@@ -62,10 +62,12 @@ export class WorldRenderer {
     history: SnapshotTimeline,
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
     onBodyPresentation: (body: BodySnapshot) => void = () => {},
+    materialTextureUrls: Readonly<Record<string, string>> = {},
   ) {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
     this.#onBodyPresentation = onBodyPresentation;
+    this.#materialTextureUrls = materialTextureUrls;
     this.#renderer = new THREE.WebGPURenderer({
       canvas,
       antialias: false,
@@ -240,7 +242,10 @@ export class WorldRenderer {
         const vertex = vertices[triangle[corner]!]!;
         positions.push(vertex.x, vertex.y, vertex.z);
         normals.push(normal.x, normal.y, normal.z);
-        uvs.push(triangleUvs[corner]!.x / 64, triangleUvs[corner]!.y / 64);
+        uvs.push(
+          triangleUvs[corner]!.x / MATERIAL_TEXTURE_SIZE,
+          triangleUvs[corner]!.y / MATERIAL_TEXTURE_SIZE,
+        );
       }
     }
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
@@ -285,7 +290,7 @@ export class WorldRenderer {
     geometry.setAttribute(
       "uv",
       new THREE.Float32BufferAttribute(
-        batch.uvs.flatMap((v) => [v.x / 64, v.y / 64]),
+        batch.uvs.flatMap((v) => [v.x / MATERIAL_TEXTURE_SIZE, v.y / MATERIAL_TEXTURE_SIZE]),
         2,
       ),
     );
@@ -348,16 +353,9 @@ export class WorldRenderer {
   #texture(name: string): THREE.Texture {
     const cached = this.#textures.get(name);
     if (cached) return cached;
-    const canvas = document.createElement("canvas");
-    canvas.width = MATERIAL_TEXTURE_SIZE;
-    canvas.height = MATERIAL_TEXTURE_SIZE;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("2D canvas is unavailable for material textures");
-    context.imageSmoothingEnabled = false;
-    const image = context.createImageData(MATERIAL_TEXTURE_SIZE, MATERIAL_TEXTURE_SIZE);
-    image.data.set(createMaterialTextureRgba(name));
-    context.putImageData(image, 0, 0);
-    const texture = new THREE.CanvasTexture(canvas);
+    const url = this.#materialTextureUrls[name];
+    if (!url) throw new Error(`missing authored material texture: ${name}`);
+    const texture = new THREE.TextureLoader().load(url);
     texture.name = name;
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
