@@ -18,7 +18,6 @@ ENV NODE_ENV=production \
     DATABASE_PATH=/data/gurgur.sqlite
 RUN mkdir -p /data && chown bun:bun /data
 COPY --from=build --chown=bun:bun /app/dist ./
-USER bun
 EXPOSE 3000
 VOLUME ["/data"]
 CMD ["bun", "apps/server/src/index.js"]
