@@ -39,7 +39,7 @@ import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/
 import { AuthoritativeGame } from "./game";
 import { loadAssetManifest, loadMaterialTextureAsset, loadSpriteAsset } from "./material-textures";
 import { WorldStore } from "./store";
-import { guardIceUdpSockets, resolveMdnsCandidates } from "./rtc";
+import { guardIceUdpSockets, omitMdnsHostCandidates } from "./rtc";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -350,7 +350,7 @@ export async function createGurgurServer(
       return;
     }
     try {
-      await peer.setRemoteDescription(await resolveMdnsCandidates(description));
+      await peer.setRemoteDescription(omitMdnsHostCandidates(description));
       if (socket.data.peerConnection === peer) socket.data.rtcNegotiating = false;
     } catch {
       if (socket.data.peerConnection === peer) {

@@ -180,12 +180,14 @@ epoch boundary.
 
 The same Bun process terminates HTTP/WebSocket and a `werift@0.23.0` WebRTC peer
 per client. The server sends the offer and the browser returns the answer. This
-ordering lets Firefox publish its mDNS-obfuscated host candidate after applying
-the server offer; the server resolves that candidate before Werift starts its
-eager ICE checks. The client creates `gurgur-input-v1` as unordered with no
-retransmissions. The server creates `gurgur-state-v1` as unordered with at most
-one retransmission. Creating a channel at its sender is mandatory: partial
-reliability is a sender policy.
+ordering lets Firefox begin checks against the server's public candidate. Browser
+mDNS host candidates are not resolvable from the remote server and are omitted
+from the answer before Werift consumes it; incoming checks still establish the
+peer-reflexive path, while server-reflexive and relay candidates remain intact.
+The client creates `gurgur-input-v1` as unordered with no retransmissions. The
+server creates `gurgur-state-v1` as unordered with at most one retransmission.
+Creating a channel at its sender is mandatory: partial reliability is a sender
+policy.
 
 The server does not enqueue another state packet once the channel has two target
 datagrams buffered. It drops that sample and continues with the next current

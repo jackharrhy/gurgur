@@ -1,27 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import type { RTCPeerConnection } from "werift";
-import { guardIceUdpSockets, resolveMdnsCandidates } from "../src/rtc";
+import { guardIceUdpSockets, omitMdnsHostCandidates } from "../src/rtc";
 
 describe("Firefox mDNS ICE candidates", () => {
-  test("resolves obfuscated host candidates before werift starts connectivity checks", async () => {
+  test("omits unreachable obfuscated host candidates without losing routable candidates", () => {
     const description = {
       type: "answer" as const,
       sdp: [
         "v=0",
         "a=candidate:0 1 UDP 2122252543 browser-host.local 54788 typ host",
         "a=candidate:1 1 TCP 2105524479 browser-host.local 9 typ host tcptype active",
+        "a=candidate:2 1 UDP 1686052607 198.51.100.8 62000 typ srflx raddr 0.0.0.0 rport 0",
+        "a=candidate:3 1 UDP 1677734911 203.0.113.9 3478 typ relay raddr 0.0.0.0 rport 0",
         "a=end-of-candidates",
         "",
       ].join("\r\n"),
     };
-    const resolved = await resolveMdnsCandidates(description, async (hostname) => {
-      expect(hostname).toBe("browser-host.local");
-      return "192.0.2.8";
-    });
-    expect(resolved.sdp).toContain("a=candidate:0 1 UDP 2122252543 192.0.2.8 54788 typ host");
-    expect(resolved.sdp).toContain(
-      "a=candidate:1 1 TCP 2105524479 192.0.2.8 9 typ host tcptype active",
-    );
+    const sanitized = omitMdnsHostCandidates(description);
+    expect(sanitized.sdp).not.toContain("browser-host.local");
+    expect(sanitized.sdp).toContain("198.51.100.8 62000 typ srflx");
+    expect(sanitized.sdp).toContain("203.0.113.9 3478 typ relay");
+    expect(sanitized.sdp).toContain("a=end-of-candidates");
+  });
+
+  test("preserves descriptions without mDNS candidates byte-for-byte", () => {
+    const description = {
+      type: "answer" as const,
+      sdp: "v=0\r\na=candidate:0 1 UDP 2122252543 192.0.2.8 54788 typ host\r\n",
+    };
+    expect(omitMdnsHostCandidates(description)).toEqual(description);
   });
 });
 

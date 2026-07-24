@@ -1,4 +1,3 @@
-import { lookup } from "node:dns/promises";
 import type { RTCPeerConnection } from "werift";
 
 type IceSocket = {
@@ -14,33 +13,18 @@ type IceProtocol = {
 const guardedSockets = new WeakSet<object>();
 const unreachableCodes = new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"]);
 
-export async function resolveMdnsCandidates<T extends "offer" | "answer">(
-  description: { type: T; sdp: string },
-  resolve: (hostname: string) => Promise<string> = async (hostname) =>
-    (await lookup(hostname, { family: 4 })).address,
-): Promise<{ type: T; sdp: string }> {
-  const lines = description.sdp.split("\r\n");
-  const hostnames = new Set<string>();
-  for (const line of lines) {
-    if (!line.startsWith("a=candidate:")) continue;
-    const hostname = line.split(/\s+/)[4];
-    if (hostname?.endsWith(".local")) hostnames.add(hostname);
-  }
-  if (hostnames.size === 0) return description;
-  const addresses = new Map(
-    await Promise.all(
-      [...hostnames].map(async (hostname) => [hostname, await resolve(hostname)] as const),
-    ),
-  );
+export function omitMdnsHostCandidates<T extends "offer" | "answer">(description: {
+  type: T;
+  sdp: string;
+}): { type: T; sdp: string } {
   return {
     type: description.type,
-    sdp: lines
-      .map((line) => {
-        if (!line.startsWith("a=candidate:")) return line;
+    sdp: description.sdp
+      .split("\r\n")
+      .filter((line) => {
+        if (!line.startsWith("a=candidate:")) return true;
         const fields = line.split(/\s+/);
-        const address = addresses.get(fields[4] ?? "");
-        if (address) fields[4] = address;
-        return fields.join(" ");
+        return !fields[4]?.toLowerCase().endsWith(".local");
       })
       .join("\r\n"),
   };
