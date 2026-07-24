@@ -4,6 +4,7 @@ import createBox3D, {
   type b3HeightFieldData,
   type b3JointId,
   type b3MeshData,
+  type b3ShapeId,
   type Box3DModule,
   type BodyMoveEvent,
   type ContactHitEvent,
@@ -548,6 +549,85 @@ export class PhysicsWorld {
     return true;
   }
 
+  driveBodyToTarget(
+    id: RuntimeId,
+    options: {
+      targetPosition: Vec3;
+      targetRotation: Quat;
+      linearGain: number;
+      maxLinearSpeed: number;
+      maxLinearAcceleration: number;
+      angularGain: number;
+      maxAngularSpeed: number;
+      maxAngularAcceleration: number;
+      seconds: number;
+    },
+  ): boolean {
+    const body = this.#resolve(id);
+    if (this.#box3d.b3Body_GetType(body) !== this.#box3d.b3BodyType.b3_dynamicBody) return false;
+    const limits = [
+      options.maxLinearSpeed,
+      options.maxLinearAcceleration,
+      options.linearGain,
+      options.maxAngularSpeed,
+      options.maxAngularAcceleration,
+      options.angularGain,
+      options.seconds,
+    ];
+    if (limits.some((value) => !Number.isFinite(value) || value <= 0))
+      throw new Error("body target drive limits must be finite and positive");
+    if (
+      !Object.values(options.targetPosition).every(Number.isFinite) ||
+      !Object.values(options.targetRotation).every(Number.isFinite)
+    )
+      throw new Error("body target drive pose must be finite");
+    const targetRotationLength = Math.hypot(
+      options.targetRotation.x,
+      options.targetRotation.y,
+      options.targetRotation.z,
+      options.targetRotation.w,
+    );
+    if (targetRotationLength <= Number.EPSILON)
+      throw new Error("body target drive rotation must be nonzero");
+    const targetRotation = {
+      x: options.targetRotation.x / targetRotationLength,
+      y: options.targetRotation.y / targetRotationLength,
+      z: options.targetRotation.z / targetRotationLength,
+      w: options.targetRotation.w / targetRotationLength,
+    };
+
+    const positionError = subtract(options.targetPosition, this.#box3d.b3Body_GetPosition(body));
+    const desiredLinear = limitVector(
+      multiply(positionError, options.linearGain),
+      options.maxLinearSpeed,
+    );
+    const linearVelocity = this.#box3d.b3Body_GetLinearVelocity(body);
+    const linearDelta = limitVector(
+      subtract(desiredLinear, linearVelocity),
+      options.maxLinearAcceleration * options.seconds,
+    );
+    const mass = this.#box3d.b3Body_GetMass(body);
+    this.#box3d.b3Body_ApplyLinearImpulseToCenter(body, multiply(linearDelta, mass), true);
+
+    const currentRotation = this.#rotation(body);
+    const rotationError = shortestRotation(targetRotation, currentRotation);
+    const desiredAngular = limitVector(
+      multiply(rotationError.axis, rotationError.angle * options.angularGain),
+      options.maxAngularSpeed,
+    );
+    const angularVelocity = this.#box3d.b3Body_GetAngularVelocity(body);
+    const nextAngular = add(
+      angularVelocity,
+      limitVector(
+        subtract(desiredAngular, angularVelocity),
+        options.maxAngularAcceleration * options.seconds,
+      ),
+    );
+    this.#box3d.b3Body_SetAngularVelocity(body, nextAngular);
+    this.#box3d.b3Body_SetAwake(body, true);
+    return true;
+  }
+
   createDistanceConstraint(options: {
     bodyA: RuntimeId;
     bodyB: RuntimeId;
@@ -735,11 +815,34 @@ export class PhysicsWorld {
   raycastClosest(
     origin: Vec3,
     translation: Vec3,
-    options: { includePlayerProxies?: boolean } = {},
+    options: { includePlayerProxies?: boolean; ignoreBodies?: readonly RuntimeId[] } = {},
   ): { point: Vec3; normal: Vec3; fraction: number; body: RuntimeId } | null {
     this.#assertLive();
     const filter = this.#box3d.b3DefaultQueryFilter();
     if (!options.includePlayerProxies) filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    if (options.ignoreBodies?.length) {
+      const ignored = new Set(options.ignoreBodies.map(runtimeKey));
+      let closest: { point: Vec3; normal: Vec3; fraction: number; body: RuntimeId } | null = null;
+      this.#box3d.b3World_CastRay(
+        this.#world,
+        origin,
+        translation,
+        filter,
+        (shape: b3ShapeId, point: Vec3, normal: Vec3, fraction: number) => {
+          const body = this.#runtimeIdForBody(this.#box3d.b3Shape_GetBody(shape));
+          if (ignored.has(runtimeKey(body)) || (closest && fraction >= closest.fraction))
+            return true;
+          closest = {
+            point: { ...point },
+            normal: { ...normal },
+            fraction,
+            body,
+          };
+          return true;
+        },
+      );
+      return closest;
+    }
     const result = this.#box3d.b3World_CastRayClosest(this.#world, origin, translation, filter);
     return result.hit
       ? {
@@ -968,6 +1071,47 @@ function add(a: Vec3, b: Vec3): Vec3 {
 
 function subtract(a: Vec3, b: Vec3): Vec3 {
   return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+function runtimeKey(id: RuntimeId): string {
+  return `${id.index}:${id.generation}`;
+}
+
+function limitVector(value: Vec3, maximum: number): Vec3 {
+  const length = Math.hypot(value.x, value.y, value.z);
+  return length <= maximum || length <= Number.EPSILON
+    ? { ...value }
+    : multiply(value, maximum / length);
+}
+
+function shortestRotation(target: Quat, current: Quat): { axis: Vec3; angle: number } {
+  const inverseCurrent = {
+    x: -current.x,
+    y: -current.y,
+    z: -current.z,
+    w: current.w,
+  };
+  let delta = multiplyQuat(target, inverseCurrent);
+  if (delta.w < 0) delta = { x: -delta.x, y: -delta.y, z: -delta.z, w: -delta.w };
+  const vectorLength = Math.hypot(delta.x, delta.y, delta.z);
+  if (vectorLength <= Number.EPSILON) return { axis: { x: 0, y: 0, z: 0 }, angle: 0 };
+  return {
+    axis: {
+      x: delta.x / vectorLength,
+      y: delta.y / vectorLength,
+      z: delta.z / vectorLength,
+    },
+    angle: 2 * Math.atan2(vectorLength, Math.max(-1, Math.min(1, delta.w))),
+  };
+}
+
+function multiplyQuat(a: Quat, b: Quat): Quat {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
 }
 
 function multiply(value: Vec3, amount: number): Vec3 {

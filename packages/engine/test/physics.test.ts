@@ -536,6 +536,109 @@ describe("PhysicsWorld", () => {
     }
   });
 
+  test("drives light and heavy bodies to a target without mass-dependent lag", async () => {
+    const world = await PhysicsWorld.create({ gravity: { x: 0, y: 0, z: 0 } });
+    try {
+      const bodies = [1, 8].map((density, index) =>
+        world.createBox({
+          type: "dynamic",
+          position: { x: 3, y: index * 2, z: 0 },
+          halfExtents: { x: 0.3, y: 0.3, z: 0.3 },
+          density,
+        }),
+      );
+      for (let tick = 0; tick < 60; tick += 1) {
+        for (const [index, body] of bodies.entries())
+          world.driveBodyToTarget(body, {
+            targetPosition: { x: 0, y: index * 2, z: 0 },
+            targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+            linearGain: 10,
+            maxLinearSpeed: 12,
+            maxLinearAcceleration: 50,
+            angularGain: 8,
+            maxAngularSpeed: Math.PI * 2,
+            maxAngularAcceleration: Math.PI * 8,
+            seconds: PHYSICS_DT,
+          });
+        world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      }
+      const errors = bodies.map((body) => Math.abs(world.state(body).position.x));
+      expect(errors[0]!).toBeLessThan(0.08);
+      expect(errors[1]!).toBeLessThan(0.08);
+      expect(Math.abs(errors[0]! - errors[1]!)).toBeLessThan(0.02);
+
+      expect(
+        world.driveBodyToTarget(bodies[0]!, {
+          targetPosition: { x: -1, y: 0, z: 0 },
+          targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+          linearGain: 10,
+          maxLinearSpeed: 12,
+          maxLinearAcceleration: 50,
+          angularGain: 8,
+          maxAngularSpeed: Math.PI * 2,
+          maxAngularAcceleration: Math.PI * 8,
+          seconds: PHYSICS_DT,
+        }),
+      ).toBe(true);
+      for (let tick = 0; tick < 30; tick += 1) {
+        world.driveBodyToTarget(bodies[0]!, {
+          targetPosition: { x: -1, y: 0, z: 0 },
+          targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+          linearGain: 10,
+          maxLinearSpeed: 12,
+          maxLinearAcceleration: 50,
+          angularGain: 8,
+          maxAngularSpeed: Math.PI * 2,
+          maxAngularAcceleration: Math.PI * 8,
+          seconds: PHYSICS_DT,
+        });
+        world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      }
+      expect(world.state(bodies[0]!).position.x).toBeLessThan(-0.9);
+      expect(() =>
+        world.driveBodyToTarget(bodies[0]!, {
+          targetPosition: { x: Number.NaN, y: 0, z: 0 },
+          targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+          linearGain: 10,
+          maxLinearSpeed: 12,
+          maxLinearAcceleration: 50,
+          angularGain: 8,
+          maxAngularSpeed: Math.PI * 2,
+          maxAngularAcceleration: Math.PI * 8,
+          seconds: PHYSICS_DT,
+        }),
+      ).toThrow("pose must be finite");
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("raycasts past an ignored dynamic body to the nearest obstruction", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      const wall = world.createBox({
+        type: "static",
+        position: { x: 2, y: 1, z: 0 },
+        halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+      });
+      const ignored = world.createBox({
+        type: "dynamic",
+        position: { x: 1, y: 1, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const hit = world.raycastClosest(
+        { x: 0, y: 1, z: 0 },
+        { x: 4, y: 0, z: 0 },
+        { ignoreBodies: [ignored] },
+      );
+      expect(hit?.body).toEqual(wall);
+      expect(hit?.fraction).toBeWithin(0.37, 0.38);
+      expect(hit?.point.x).toBeWithin(1.49, 1.51);
+    } finally {
+      world.dispose();
+    }
+  });
+
   test("reports allocation-free sensor lifecycle against player proxies", async () => {
     const world = await PhysicsWorld.create();
     try {

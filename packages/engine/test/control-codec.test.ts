@@ -14,10 +14,10 @@ describe("bounded client control union", () => {
       },
       { type: "ping", protocolVersion: PROTOCOL_VERSION, worldEpoch: 1, nonce: 2, sentAtMs: 3.5 },
       {
-        type: "rtc-offer",
+        type: "rtc-answer",
         protocolVersion: PROTOCOL_VERSION,
         worldEpoch: 1,
-        description: { type: "offer", sdp: "v=0\r\n" },
+        description: { type: "answer", sdp: "v=0\r\n" },
       },
     ];
     for (const message of messages) {
@@ -106,10 +106,11 @@ describe("bounded server control union", () => {
         serverTick: 4,
       },
       {
-        type: "rtc-answer",
+        type: "rtc-offer",
         protocolVersion: PROTOCOL_VERSION,
         worldEpoch: 1,
-        description: { type: "answer", sdp: "v=0\r\n" },
+        description: { type: "offer", sdp: "v=0\r\n" },
+        iceServers: [{ urls: "turn:relay.example", username: "u", credential: "p" }],
       },
     ];
     for (const message of messages) {

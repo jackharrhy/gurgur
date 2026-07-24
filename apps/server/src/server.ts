@@ -39,7 +39,7 @@ import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/
 import { AuthoritativeGame } from "./game";
 import { loadAssetManifest, loadMaterialTextureAsset, loadSpriteAsset } from "./material-textures";
 import { WorldStore } from "./store";
-import { guardIceUdpSockets } from "./rtc";
+import { guardIceUdpSockets, resolveMdnsCandidates } from "./rtc";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -262,10 +262,7 @@ export async function createGurgurServer(
     socket.data.peerConnection = null;
     socket.data.rtcNegotiating = false;
   };
-  const negotiateRtc = async (
-    socket: Bun.ServerWebSocket<ClientData>,
-    description: { type: "offer"; sdp: string },
-  ): Promise<void> => {
+  const startRtcOffer = async (socket: Bun.ServerWebSocket<ClientData>): Promise<void> => {
     if (socket.data.rtcNegotiating) {
       socket.close(1008, "RTC negotiation already in progress");
       return;
@@ -324,23 +321,41 @@ export async function createGurgurServer(
       channel.close();
     });
     try {
-      await peer.setRemoteDescription(description);
-      await peer.setLocalDescription(await peer.createAnswer());
+      await peer.setLocalDescription(await peer.createOffer());
       guardIceUdpSockets(peer);
       if (socket.data.peerConnection !== peer || !peer.localDescription?.sdp) return;
-      socket.data.rtcNegotiating = false;
       socket.send(
         JSON.stringify({
-          type: "rtc-answer",
+          type: "rtc-offer",
           protocolVersion: PROTOCOL_VERSION,
           worldEpoch: game.worldEpoch,
-          description: { type: "answer", sdp: peer.localDescription.sdp },
+          description: { type: "offer", sdp: peer.localDescription.sdp },
+          iceServers: rtcIceServers,
         }),
       );
     } catch {
       if (socket.data.peerConnection === peer) {
         closeRtc(socket);
-        socket.close(1007, "invalid RTC offer");
+        socket.close(1013, "RTC offer failed");
+      }
+    }
+  };
+  const acceptRtcAnswer = async (
+    socket: Bun.ServerWebSocket<ClientData>,
+    description: { type: "answer"; sdp: string },
+  ): Promise<void> => {
+    const peer = socket.data.peerConnection;
+    if (!peer || !socket.data.rtcNegotiating || peer.signalingState !== "have-local-offer") {
+      socket.close(1008, "unexpected RTC answer");
+      return;
+    }
+    try {
+      await peer.setRemoteDescription(await resolveMdnsCandidates(description));
+      if (socket.data.peerConnection === peer) socket.data.rtcNegotiating = false;
+    } catch {
+      if (socket.data.peerConnection === peer) {
+        closeRtc(socket);
+        socket.close(1007, "invalid RTC answer");
       }
     }
   };
@@ -555,6 +570,7 @@ export async function createGurgurServer(
             socket.send(JSON.stringify(welcome));
             socket.send(JSON.stringify(toManifest(game.worldMessage())));
             socket.send(encodeSnapshot(game.snapshot()));
+            void startRtcOffer(socket);
             if (createdPlayer) {
               const created = game
                 .worldMessage()
@@ -597,11 +613,11 @@ export async function createGurgurServer(
             return;
           }
           if (
-            control.type === "rtc-offer" &&
+            control.type === "rtc-answer" &&
             socket.data.playerId &&
             control.worldEpoch === game.worldEpoch
           ) {
-            void negotiateRtc(socket, control.description);
+            void acceptRtcAnswer(socket, control.description);
             return;
           }
           socket.close(1007, "invalid control packet");

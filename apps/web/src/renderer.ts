@@ -1,7 +1,6 @@
 import * as THREE from "three/webgpu";
 import {
   FULL_RATE_BODY_RADIUS_METRES,
-  MATERIAL_TEXTURE_SIZE,
   SNAPSHOT_FLAG_GRABBED,
   SNAPSHOT_FLAG_LOCAL_GRAB,
   STATE_ALWAYS_NEAR_BODY_SLOTS,
@@ -15,7 +14,7 @@ import {
   type RuntimeId,
   type Vec3,
 } from "@gurgur/engine";
-import type { WorldMessage } from "@gurgur/game";
+import { PLAYER_GRAB_REACH, type WorldMessage } from "@gurgur/game";
 import type { SnapshotTimeline } from "./interpolation";
 import {
   createPredictedPoseTimeline,
@@ -24,13 +23,33 @@ import {
 } from "./presentation";
 import {
   createInteractionOutlineMaterial,
+  createInteractionOutlineMaskMaterial,
+  createRealityNodeMaterial,
   createRetroRenderPipeline,
   createSpriteNodeMaterial,
   createWorldNodeMaterial,
+  INTERACTION_OUTLINE_MASK_RENDER_ORDER,
+  INTERACTION_OUTLINE_RENDER_ORDER,
+  INTERACTION_OUTLINE_SCALE,
+  PLAYER_RENDER_ORDER,
   type RetroRenderPipeline,
 } from "./retro-rendering";
 import playerBillboardLayout from "../../../content/generated/player-billboard/player-billboard.json";
 import { playerBillboardAtlasOffset, playerBillboardView } from "./player-billboard";
+
+type MaterialTextureInfo = {
+  url: string;
+  width: number;
+  height: number;
+  renderMode: "retro" | "reality";
+};
+
+export function normalizeMaterialUv(
+  uv: { x: number; y: number },
+  texture: Pick<MaterialTextureInfo, "width" | "height">,
+): [number, number] {
+  return [uv.x / texture.width, -uv.y / texture.height];
+}
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
 const distance = (left: BodySnapshot["position"], right: BodySnapshot["position"]): number =>
@@ -142,19 +161,22 @@ export class WorldRenderer {
   readonly #renderer: THREE.WebGPURenderer;
   readonly #pipeline: RetroRenderPipeline;
   readonly #scene = new THREE.Scene();
+  readonly #realityScene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
   readonly #history: SnapshotTimeline;
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
   readonly #physicsPropIds = new Set<string>();
-  readonly #materialTextureUrls: Readonly<Record<string, string>>;
+  readonly #materialTextures: Readonly<Record<string, MaterialTextureInfo>>;
   readonly #spriteAssetUrls: Readonly<Record<string, string>>;
+  readonly #outlineMaskMaterial = createInteractionOutlineMaskMaterial();
   readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
   readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
   readonly #pickupDebug: PickupDebugView | null;
   readonly #physicsDebug: PhysicsDebugView | null;
   #worldRoot = new THREE.Group();
+  #realityRoot = new THREE.Group();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
   #heldTarget: THREE.Object3D | null = null;
@@ -173,14 +195,14 @@ export class WorldRenderer {
     history: SnapshotTimeline,
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
     onBodyPresentation: (body: BodySnapshot) => void = () => {},
-    materialTextureUrls: Readonly<Record<string, string>> = {},
+    materialTextures: Readonly<Record<string, MaterialTextureInfo>> = {},
     spriteAssetUrls: Readonly<Record<string, string>> = {},
     debug = false,
   ) {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
     this.#onBodyPresentation = onBodyPresentation;
-    this.#materialTextureUrls = materialTextureUrls;
+    this.#materialTextures = materialTextures;
     this.#spriteAssetUrls = spriteAssetUrls;
     this.#renderer = new THREE.WebGPURenderer({
       canvas,
@@ -188,6 +210,7 @@ export class WorldRenderer {
       powerPreference: "high-performance",
     });
     this.#renderer.setPixelRatio(1);
+    this.#renderer.setClearAlpha(0);
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.#renderer.shadowMap.enabled = false;
     this.#scene.background = new THREE.Color(0x17111f);
@@ -195,20 +218,29 @@ export class WorldRenderer {
     this.#camera.position.set(31, 28, 38);
     this.#camera.lookAt(0, 1.5, 0);
     this.#scene.add(this.#worldRoot);
+    this.#realityScene.add(this.#realityRoot);
     this.#pickupDebug = debug ? createPickupDebugView() : null;
     if (this.#pickupDebug) this.#scene.add(this.#pickupDebug.group);
     this.#physicsDebug = debug ? createPhysicsDebugView() : null;
     if (this.#physicsDebug) this.#scene.add(this.#physicsDebug.group);
-    this.#pipeline = createRetroRenderPipeline(this.#renderer, this.#scene, this.#camera);
+    this.#pipeline = createRetroRenderPipeline(
+      this.#renderer,
+      this.#scene,
+      this.#realityScene,
+      this.#camera,
+    );
     this.#resize();
     addEventListener("resize", this.#resize);
   }
 
   setWorld(message: WorldMessage): void {
     this.#scene.remove(this.#worldRoot);
+    this.#realityScene.remove(this.#realityRoot);
     this.#worldRoot.traverse(disposeOwnedResources);
     this.#worldRoot = new THREE.Group();
+    this.#realityRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
+    this.#realityRoot.name = `reality-${message.worldEpoch}`;
     this.#meshes.clear();
     this.#physicsPropIds.clear();
     this.#predictedBodies.clear();
@@ -223,8 +255,12 @@ export class WorldRenderer {
     const skyColor = new THREE.Color(sky.r, sky.g, sky.b);
     this.#scene.background = skyColor;
     this.#scene.fog = new THREE.Fog(skyColor, 34, 82);
-    for (const batch of message.bundle.renderBatches)
-      this.#worldRoot.add(this.#meshForBatch(batch));
+    for (const batch of message.bundle.renderBatches) {
+      const mesh = this.#meshForBatch(batch);
+      this.#worldRoot.add(mesh);
+      if (this.#isRealityMaterial(batch.material))
+        this.#realityRoot.add(this.#realityClone(mesh, batch.material));
+    }
     for (const entity of message.bundle.entities) {
       if (entity.kind !== "sprite") continue;
       this.#worldRoot.add(this.#mapSprite(entity));
@@ -261,6 +297,7 @@ export class WorldRenderer {
     for (const player of message.runtimeEntities.filter((entity) => entity.kind === "player"))
       this.#addPlayer(player);
     this.#scene.add(this.#worldRoot);
+    this.#realityScene.add(this.#realityRoot);
   }
 
   applyLifecycle(message: LifecycleMessage): void {
@@ -331,7 +368,7 @@ export class WorldRenderer {
     const raycaster = new THREE.Raycaster();
     raycaster.set(origin, direction);
     raycaster.camera = this.#camera;
-    raycaster.far = 3;
+    raycaster.far = PLAYER_GRAB_REACH;
     for (const hit of raycaster.intersectObject(this.#worldRoot, true)) {
       const object = hit.object;
       if (object.userData.interactable && object.userData.runtimeId) {
@@ -359,7 +396,11 @@ export class WorldRenderer {
     }
     this.#interactionCandidate = null;
     this.#updateInteractionOutline();
-    this.#updatePickupDebug(origin, origin.clone().addScaledVector(direction, 3), 0xff405c);
+    this.#updatePickupDebug(
+      origin,
+      origin.clone().addScaledVector(direction, PLAYER_GRAB_REACH),
+      0xff405c,
+    );
     return null;
   }
 
@@ -469,6 +510,7 @@ export class WorldRenderer {
     this.#worldRoot.traverse(disposeOwnedResources);
     for (const material of this.#materials.values()) material.dispose();
     for (const texture of this.#textures.values()) texture.dispose();
+    this.#outlineMaskMaterial.dispose();
     this.#availableOutlineMaterial.dispose();
     this.#heldOutlineMaterial.dispose();
     if (this.#pickupDebug) {
@@ -499,10 +541,8 @@ export class WorldRenderer {
         const vertex = vertices[triangle[corner]!]!;
         positions.push(vertex.x, vertex.y, vertex.z);
         normals.push(normal.x, normal.y, normal.z);
-        uvs.push(
-          triangleUvs[corner]!.x / MATERIAL_TEXTURE_SIZE,
-          triangleUvs[corner]!.y / MATERIAL_TEXTURE_SIZE,
-        );
+        const texture = this.#materialInfo(brush.triangleMaterials[triangleIndex]!);
+        uvs.push(...normalizeMaterialUv(triangleUvs[corner]!, texture));
       }
     }
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
@@ -547,7 +587,10 @@ export class WorldRenderer {
     geometry.setAttribute(
       "uv",
       new THREE.Float32BufferAttribute(
-        batch.uvs.flatMap((v) => [v.x / MATERIAL_TEXTURE_SIZE, v.y / MATERIAL_TEXTURE_SIZE]),
+        batch.uvs.flatMap((v) => {
+          const texture = this.#materialInfo(batch.material);
+          return normalizeMaterialUv(v, texture);
+        }),
         2,
       ),
     );
@@ -585,6 +628,7 @@ export class WorldRenderer {
       1,
     );
     mesh.name = `player.${idKey(player.id)}`;
+    mesh.renderOrder = PLAYER_RENDER_ORDER;
     mesh.userData.ownedMaterial = true;
     mesh.userData.ownedTexture = texture;
     mesh.userData.playerDirection = 0;
@@ -603,21 +647,50 @@ export class WorldRenderer {
     return material;
   }
 
+  #realityMaterial(name: string): THREE.Material {
+    const key = `${name}:reality`;
+    const cached = this.#materials.get(key);
+    if (cached) return cached;
+    const material = createRealityNodeMaterial(this.#texture(name));
+    this.#materials.set(key, material);
+    return material;
+  }
+
+  #realityClone(mesh: THREE.Mesh, materialName: string): THREE.Mesh {
+    const clone = new THREE.Mesh(mesh.geometry, this.#realityMaterial(materialName));
+    clone.name = `${mesh.name}.reality`;
+    clone.userData.sharedGeometry = true;
+    clone.raycast = () => {};
+    return clone;
+  }
+
+  #isRealityMaterial(name: string): boolean {
+    return this.#materialInfo(name).renderMode === "reality";
+  }
+
   #texture(name: string): THREE.Texture {
     const cached = this.#textures.get(name);
     if (cached) return cached;
-    const url = this.#materialTextureUrls[name];
-    if (!url) throw new Error(`missing authored material texture: ${name}`);
-    const texture = new THREE.TextureLoader().load(url);
+    const info = this.#materialInfo(name);
+    const texture = new THREE.TextureLoader().load(info.url);
     texture.name = name;
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
-    texture.magFilter = THREE.NearestFilter;
-    texture.minFilter = THREE.NearestMipmapLinearFilter;
+    texture.magFilter = info.renderMode === "reality" ? THREE.LinearFilter : THREE.NearestFilter;
+    texture.minFilter =
+      info.renderMode === "reality"
+        ? THREE.LinearMipmapLinearFilter
+        : THREE.NearestMipmapLinearFilter;
     texture.generateMipmaps = true;
     texture.colorSpace = THREE.SRGBColorSpace;
     this.#textures.set(name, texture);
     return texture;
+  }
+
+  #materialInfo(name: string): MaterialTextureInfo {
+    const info = this.#materialTextures[name];
+    if (!info) throw new Error(`missing authored material texture: ${name}`);
+    return info;
   }
 
   #mapSprite(
@@ -684,15 +757,25 @@ export class WorldRenderer {
   }
 
   #addInteractionOutline(mesh: THREE.Mesh): void {
+    const mask = new THREE.Mesh(mesh.geometry, this.#outlineMaskMaterial);
+    mask.name = `${mesh.name}.interaction-outline-mask`;
+    mask.renderOrder = INTERACTION_OUTLINE_MASK_RENDER_ORDER;
+    mask.visible = false;
+    mask.userData.interactionOutlineMask = true;
+    mask.userData.interactionOccluder = false;
+    mask.userData.sharedGeometry = true;
+    mask.raycast = () => {};
+
     const outline = new THREE.Mesh(mesh.geometry, this.#availableOutlineMaterial);
     outline.name = `${mesh.name}.interaction-outline`;
-    outline.scale.setScalar(1.045);
+    outline.scale.setScalar(INTERACTION_OUTLINE_SCALE);
+    outline.renderOrder = INTERACTION_OUTLINE_RENDER_ORDER;
     outline.visible = false;
     outline.userData.interactionOutline = true;
     outline.userData.interactionOccluder = false;
     outline.userData.sharedGeometry = true;
     outline.raycast = () => {};
-    mesh.add(outline);
+    mesh.add(mask, outline);
   }
 
   #updateInteractionOutline(): void {
@@ -706,7 +789,12 @@ export class WorldRenderer {
 
   #setInteractionOutline(target: THREE.Object3D | null, visible: boolean, held: boolean): void {
     target?.traverse((object) => {
-      if (!(object instanceof THREE.Mesh) || !object.userData.interactionOutline) return;
+      if (!(object instanceof THREE.Mesh)) return;
+      if (object.userData.interactionOutlineMask) {
+        object.visible = visible;
+        return;
+      }
+      if (!object.userData.interactionOutline) return;
       object.visible = visible;
       object.material = held ? this.#heldOutlineMaterial : this.#availableOutlineMaterial;
     });

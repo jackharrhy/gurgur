@@ -52,9 +52,11 @@ reenact obsolete movement. If no new intent arrives for 250 ms, held movement
 axes clear. Monotonic action counters preserve jump/use/grab edges across loss
 and redundant delivery without repeating them.
 
-Interaction targets carry generation-bearing runtime identity. The server
-validates generation, distance, line of sight, rate, and authorization before
-changing constraints or mechanisms.
+Interaction targets carry generation-bearing runtime identity. For grabs the
+server uses that identity as a hint only and independently chooses the first body
+on the authoritative view ray. For use interactions it validates the supplied
+generation against its own ray. Distance, line of sight, ownership, and capability
+remain authoritative in both cases.
 
 ## Physics-prop authority and prediction
 
@@ -177,7 +179,10 @@ epoch boundary.
 ## Gameplay transport
 
 The same Bun process terminates HTTP/WebSocket and a `werift@0.23.0` WebRTC peer
-per client. The client creates `gurgur-input-v1` as unordered with no
+per client. The server sends the offer and the browser returns the answer. This
+ordering lets Firefox publish its mDNS-obfuscated host candidate after applying
+the server offer; the server resolves that candidate before Werift starts its
+eager ICE checks. The client creates `gurgur-input-v1` as unordered with no
 retransmissions. The server creates `gurgur-state-v1` as unordered with at most
 one retransmission. Creating a channel at its sender is mandatory: partial
 reliability is a sender policy.
@@ -190,6 +195,8 @@ current-time contact proxy continues moving beyond its 100 ms extrapolation cap.
 
 Production binds a configured UDP range with `RTC_PORT_MIN` and `RTC_PORT_MAX`.
 `RTC_ADDITIONAL_HOST_IPS` adds explicit bindable host candidates.
-`RTC_ICE_SERVERS_JSON` supplies validated STUN/TURN configuration for deployments
-that require relay. Docker exposes UDP 40000-40100 by default in addition to the
-HTTP port.
+`RTC_ICE_SERVERS_JSON` supplies validated STUN/TURN configuration to both peers
+for deployments that require server-reflexive or relay candidates. The server
+sends this bounded configuration with the authenticated RTC offer; it is not
+compiled into browser assets. Docker exposes UDP 40000-40100 by default in
+addition to the HTTP port.

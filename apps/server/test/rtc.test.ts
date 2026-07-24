@@ -1,6 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import type { RTCPeerConnection } from "werift";
-import { guardIceUdpSockets } from "../src/rtc";
+import { guardIceUdpSockets, resolveMdnsCandidates } from "../src/rtc";
+
+describe("Firefox mDNS ICE candidates", () => {
+  test("resolves obfuscated host candidates before werift starts connectivity checks", async () => {
+    const description = {
+      type: "answer" as const,
+      sdp: [
+        "v=0",
+        "a=candidate:0 1 UDP 2122252543 browser-host.local 54788 typ host",
+        "a=candidate:1 1 TCP 2105524479 browser-host.local 9 typ host tcptype active",
+        "a=end-of-candidates",
+        "",
+      ].join("\r\n"),
+    };
+    const resolved = await resolveMdnsCandidates(description, async (hostname) => {
+      expect(hostname).toBe("browser-host.local");
+      return "192.0.2.8";
+    });
+    expect(resolved.sdp).toContain("a=candidate:0 1 UDP 2122252543 192.0.2.8 54788 typ host");
+    expect(resolved.sdp).toContain(
+      "a=candidate:1 1 TCP 2105524479 192.0.2.8 9 typ host tcptype active",
+    );
+  });
+});
 
 describe("werift ICE UDP socket guard", () => {
   test("absorbs unreachable endpoints, reports unexpected errors, and installs once", () => {

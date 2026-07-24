@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright-core";
+import { chromium, firefox } from "playwright-core";
 import { createGurgurServer, type GurgurServer } from "../apps/server/src/server";
 import worldBundleJson from "../content/generated/systems-garden.json";
 import {
@@ -73,9 +73,23 @@ const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/
 const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
 if (simulatedLatencyMs > 0) url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
 if (process.env.GURGUR_TEST_MODE === "1") url.searchParams.set("test", "1");
-if (scenario === "grab") url.searchParams.set("debug", "1");
-const browser = await chromium.launch({ executablePath, headless: true });
+if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1")
+  url.searchParams.set("debug", "1");
+const browserName = process.env.SMOKE_BROWSER === "firefox" ? "firefox" : "chromium";
+const browser =
+  browserName === "firefox"
+    ? await firefox.launch({ headless: true })
+    : await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+if (process.env.SMOKE_RTC_TRACE === "1")
+  page.on("websocket", (socket) => {
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string" && payload.includes('"rtc-answer"')) console.log(payload);
+    });
+    socket.on("framereceived", ({ payload }) => {
+      if (typeof payload === "string" && payload.includes('"rtc-offer"')) console.log(payload);
+    });
+  });
 const waitForStablePlayerHeight = async (): Promise<number> =>
   page.evaluate(
     () =>
@@ -111,6 +125,13 @@ if (scenario === "grab" || scenario === "gamepad")
     };
     Object.defineProperty(window, "__gurgurSmokePad", { value: pad });
     Object.defineProperty(navigator, "getGamepads", { value: () => [pad] });
+  });
+if (process.env.SMOKE_DENY_POINTER_LOCK === "1")
+  await page.addInitScript(() => {
+    Object.defineProperty(HTMLCanvasElement.prototype, "requestPointerLock", {
+      configurable: true,
+      value: () => Promise.reject(new DOMException("denied by smoke test", "NotAllowedError")),
+    });
   });
 if (scenario === "stale-session")
   await page.addInitScript(() => {
@@ -393,11 +414,12 @@ try {
       { timeout: 4_000 },
     );
   } else if (scenario === "grab") {
-    await page.waitForFunction(
-      () => Number(document.body.dataset.physicsDebugPrimitives) > 0,
-      null,
-      { timeout: 5_000 },
-    );
+    if (process.env.SMOKE_DISABLE_DEBUG !== "1")
+      await page.waitForFunction(
+        () => Number(document.body.dataset.physicsDebugPrimitives) > 0,
+        null,
+        { timeout: 5_000 },
+      );
     await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget), null, {
       timeout: 5_000,
     });
@@ -406,6 +428,53 @@ try {
       null,
       { timeout: 5_000 },
     );
+    if (process.env.SMOKE_OUTLINE_SCREENSHOT)
+      await page.screenshot({ path: process.env.SMOKE_OUTLINE_SCREENSHOT });
+    if (process.env.SMOKE_OUTLINE_PLAYER_SCREENSHOT) {
+      await page.dispatchEvent("canvas", "pointerdown", {
+        pointerId: 91,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 360,
+      });
+      await page.dispatchEvent("canvas", "pointermove", {
+        pointerId: 91,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 388,
+      });
+      await page.dispatchEvent("canvas", "pointerup", {
+        pointerId: 91,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 388,
+      });
+      await page.waitForTimeout(120);
+      await page.screenshot({ path: process.env.SMOKE_OUTLINE_PLAYER_SCREENSHOT });
+      await page.dispatchEvent("canvas", "pointerdown", {
+        pointerId: 92,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 388,
+      });
+      await page.dispatchEvent("canvas", "pointermove", {
+        pointerId: 92,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 360,
+      });
+      await page.dispatchEvent("canvas", "pointerup", {
+        pointerId: 92,
+        pointerType: "touch",
+        clientX: 960,
+        clientY: 360,
+      });
+      await page.waitForFunction(
+        () => document.body.dataset.interactionOutline === "available",
+        null,
+        { timeout: 5_000 },
+      );
+    }
     const beforeZ = await page.evaluate(
       (entityIndex) =>
         (
@@ -556,6 +625,15 @@ try {
     });
   } else {
     await waitForStablePlayerHeight();
+    if (process.env.SMOKE_DENY_POINTER_LOCK === "1") {
+      await page.locator("#world").click();
+      await page.waitForFunction(
+        () =>
+          document.body.dataset.pointerLockFailed === "true" &&
+          document.activeElement === document.querySelector("#world") &&
+          document.pointerLockElement === null,
+      );
+    }
     const movementStart = await page.evaluate(() => ({
       x: Number(document.body.dataset.predictedX),
       z: Number(document.body.dataset.predictedZ),

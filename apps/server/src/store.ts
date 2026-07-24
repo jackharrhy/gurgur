@@ -61,7 +61,7 @@ type PlayerRow = {
   step_cooldown: number;
   crouched: number;
   grabbed_authored_id: string | null;
-  grab_length: number;
+  grab_distance: number;
 };
 
 export class WorldStore {
@@ -103,7 +103,7 @@ export class WorldStore {
         step_cooldown INTEGER NOT NULL CHECK (step_cooldown >= 0),
         crouched INTEGER NOT NULL CHECK (crouched IN (0, 1)),
         grabbed_authored_id TEXT,
-        grab_length REAL NOT NULL CHECK (grab_length >= 0)
+        grab_distance REAL NOT NULL CHECK (grab_distance >= 0)
       ) STRICT
     `);
   }
@@ -125,7 +125,7 @@ export class WorldStore {
     const players = this.#database
       .query<PlayerRow, []>(`
         SELECT persistent_id, px, py, pz, yaw, vertical_velocity, grounded,
-               last_jump_counter, step_cooldown, crouched, grabbed_authored_id, grab_length
+               last_jump_counter, step_cooldown, crouched, grabbed_authored_id, grab_distance
         FROM player_state ORDER BY persistent_id
       `)
       .all();
@@ -151,7 +151,7 @@ export class WorldStore {
         stepCooldown: player.step_cooldown,
         crouched: player.crouched === 1,
         grabbedAuthoredId: player.grabbed_authored_id,
-        grabLength: player.grab_length,
+        grabDistance: player.grab_distance,
       })),
     };
   }
@@ -208,10 +208,10 @@ export class WorldStore {
       const insertPlayer = this.#database.query(`
         INSERT INTO player_state (
           persistent_id, px, py, pz, yaw, vertical_velocity, grounded,
-          last_jump_counter, step_cooldown, crouched, grabbed_authored_id, grab_length
+          last_jump_counter, step_cooldown, crouched, grabbed_authored_id, grab_distance
         ) VALUES (
           $persistentId, $px, $py, $pz, $yaw, $verticalVelocity, $grounded,
-          $lastJumpCounter, $stepCooldown, $crouched, $grabbedAuthoredId, $grabLength
+          $lastJumpCounter, $stepCooldown, $crouched, $grabbedAuthoredId, $grabDistance
         )
       `);
       for (const player of world.players)
@@ -227,7 +227,7 @@ export class WorldStore {
           stepCooldown: player.stepCooldown,
           crouched: Number(player.crouched),
           grabbedAuthoredId: player.grabbedAuthoredId,
-          grabLength: player.grabLength,
+          grabDistance: player.grabDistance,
         });
     });
     transaction();

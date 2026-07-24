@@ -10,7 +10,7 @@ import {
   type InputCommand,
   type HelloMessage,
   type LifecycleMessage,
-  type RtcAnswerMessage,
+  type RtcOfferMessage,
   type Snapshot,
   type WelcomeMessage,
   type WorldManifestMessage,
@@ -18,7 +18,10 @@ import {
 import { decodeWorldBundle, type WorldMessage } from "@gurgur/game";
 
 export type SessionCallbacks = {
-  status(state: "connecting" | "connected" | "disconnected"): void;
+  status(
+    state: "connecting" | "connected" | "disconnected",
+    close?: { code: number; reason: string },
+  ): void;
   welcome(message: WelcomeMessage): void;
   world(message: WorldMessage): void;
   lifecycle(message: LifecycleMessage): void;
@@ -91,7 +94,7 @@ export class GameSession {
         this.#worldEpoch = null;
         clearSessionToken();
       }
-      this.#callbacks.status("disconnected");
+      this.#callbacks.status("disconnected", { code: event.code, reason: event.reason });
       this.#stopPings();
       this.#closeRtc();
       if (!this.#closed) {
@@ -123,7 +126,6 @@ export class GameSession {
         this.#retryAttempt = 0;
         this.#callbacks.welcome(message);
         this.#startPings();
-        void this.#startRtc(socket, message);
       } else if (message.type === "world") {
         if (
           message.protocolVersion !== PROTOCOL_VERSION ||
@@ -148,8 +150,8 @@ export class GameSession {
         this.#jitterMs += (Math.abs(sample - previous) - this.#jitterMs) * 0.25;
         this.#callbacks.clock?.(message.serverTick, now, sample / 2);
         this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
-      } else if (message.type === "rtc-answer") {
-        void this.#acceptRtcAnswer(socket, message);
+      } else if (message.type === "rtc-offer") {
+        void this.#acceptRtcOffer(socket, message);
       }
       return;
     }
@@ -196,10 +198,12 @@ export class GameSession {
     });
   }
 
-  async #startRtc(socket: WebSocket, welcome: WelcomeMessage): Promise<void> {
+  async #acceptRtcOffer(socket: WebSocket, message: RtcOfferMessage): Promise<void> {
+    if (this.#socket !== socket || message.worldEpoch !== this.#worldEpoch || this.#peerConnection)
+      return;
     this.#closeRtc();
     this.#callbacks.transport?.("negotiating");
-    const peer = new RTCPeerConnection({ iceServers: [] });
+    const peer = new RTCPeerConnection({ iceServers: message.iceServers });
     let receivedState = false;
     const input = peer.createDataChannel("gurgur-input-v1", {
       ordered: false,
@@ -217,11 +221,12 @@ export class GameSession {
       }
       this.#stateChannel = state;
       state.binaryType = "arraybuffer";
-      state.addEventListener("message", (message) => {
-        if (this.#peerConnection !== peer || !(message.data instanceof ArrayBuffer)) return;
+      state.addEventListener("message", (stateMessageEvent) => {
+        if (this.#peerConnection !== peer || !(stateMessageEvent.data instanceof ArrayBuffer))
+          return;
         this.#defer(() => {
           if (this.#peerConnection !== peer) return;
-          this.#handleBinary(message.data as ArrayBuffer);
+          this.#handleBinary(stateMessageEvent.data as ArrayBuffer);
           if (!receivedState) {
             receivedState = true;
             this.#callbacks.transport?.("webrtc");
@@ -236,7 +241,8 @@ export class GameSession {
     this.#peerConnection = peer;
     this.#inputChannel = input;
     try {
-      await peer.setLocalDescription(await peer.createOffer());
+      await peer.setRemoteDescription(message.description);
+      await peer.setLocalDescription(await peer.createAnswer());
       await waitForIceGathering(peer);
       if (
         this.#peerConnection !== peer ||
@@ -245,33 +251,17 @@ export class GameSession {
       )
         return;
       const description = peer.localDescription;
-      if (!description?.sdp) throw new Error("RTC offer is missing SDP");
+      if (!description?.sdp) throw new Error("RTC answer is missing SDP");
       socket.send(
         JSON.stringify({
-          type: "rtc-offer",
+          type: "rtc-answer",
           protocolVersion: PROTOCOL_VERSION,
-          worldEpoch: welcome.worldEpoch,
-          description: { type: "offer", sdp: description.sdp },
+          worldEpoch: message.worldEpoch,
+          description: { type: "answer", sdp: description.sdp },
         }),
       );
     } catch {
       if (this.#peerConnection === peer) socket.close(4012, "state transport negotiation failed");
-    }
-  }
-
-  async #acceptRtcAnswer(socket: WebSocket, message: RtcAnswerMessage): Promise<void> {
-    const peer = this.#peerConnection;
-    if (
-      !peer ||
-      this.#socket !== socket ||
-      message.worldEpoch !== this.#worldEpoch ||
-      peer.signalingState !== "have-local-offer"
-    )
-      return;
-    try {
-      await peer.setRemoteDescription(message.description);
-    } catch {
-      socket.close(4012, "invalid RTC answer");
     }
   }
 

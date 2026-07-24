@@ -384,17 +384,16 @@ export class AuthoritativeGame {
       setKinematicTarget: (id, position) =>
         this.#physics.setKinematicTarget(id, position, PHYSICS_DT),
       setBodyAwake: (id, awake) => this.#physics.setBodyAwake(id, awake),
-      raycast: (origin, displacement) => this.#physics.raycastClosest(origin, displacement),
+      raycast: (origin, displacement, options) =>
+        this.#physics.raycastClosest(origin, displacement, options),
       createPlayerProxy: (position, shape) => this.#physics.createPlayerProxy(position, shape),
       updatePlayerProxy: (id, position, yaw) =>
         this.#physics.setBodyTransform(id, position, yawRotation(yaw)),
       destroyBody: (id) => {
         this.#physics.destroy(id);
       },
-      createGrabConstraint: (options) => this.#physics.createDistanceConstraint(options),
-      destroyConstraint: (id) => {
-        this.#physics.destroyConstraint(id);
-      },
+      driveBodyToTarget: (id, options) =>
+        this.#physics.driveBodyToTarget(id, { ...options, seconds: PHYSICS_DT }),
       requestSave: () => {
         this.#saveRequested = true;
       },

@@ -72,7 +72,10 @@ const gameConfig = {
     brush: [
       { name: "Trigger", attribs: ["transparent"], match: "classname", pattern: "trigger_*" },
     ],
-    brushface: [],
+    brushface: [
+      { name: "Reality", attribs: [], match: "material", pattern: "GURGUR/REAL/*" },
+      { name: "Reality (Dylan)", attribs: [], match: "material", pattern: "GURGUR/dylans*" },
+    ],
   },
   faceattribs: { defaults: { scale: [0.5, 0.5] }, surfaceflags: [], contentflags: [] },
   softMapBounds: "-4096 -4096 -4096 4096 4096 4096",

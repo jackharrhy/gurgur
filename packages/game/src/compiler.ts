@@ -268,17 +268,11 @@ function valveUv(point: Vec3, face: MapBrush["faces"][number]): Vec2 {
   }
   return {
     x:
-      (point.x * face.uAxis[0] +
-        point.y * face.uAxis[1] +
-        point.z * face.uAxis[2] +
-        face.uAxis[3]) /
-      uScale,
+      (point.x * face.uAxis[0] + point.y * face.uAxis[1] + point.z * face.uAxis[2]) / uScale +
+      face.uAxis[3],
     y:
-      (point.x * face.vAxis[0] +
-        point.y * face.vAxis[1] +
-        point.z * face.vAxis[2] +
-        face.vAxis[3]) /
-      vScale,
+      (point.x * face.vAxis[0] + point.y * face.vAxis[1] + point.z * face.vAxis[2]) / vScale +
+      face.vAxis[3],
   };
 }
 

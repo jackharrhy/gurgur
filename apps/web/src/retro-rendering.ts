@@ -7,6 +7,13 @@ import { RETRO_COLOR_INTERVALS } from "./retro-color";
 // unbounded structural expansion while application-facing types remain precise.
 const tsl: Record<string, any> = TSL;
 
+// Exact silhouettes accumulate stencil coverage before the expanded hull draws.
+// Players render afterward against the original world depth.
+export const INTERACTION_OUTLINE_SCALE = 1.08;
+export const INTERACTION_OUTLINE_MASK_RENDER_ORDER = 900;
+export const INTERACTION_OUTLINE_RENDER_ORDER = 1_000;
+export const PLAYER_RENDER_ORDER = 2_000;
+
 const affineUv = tsl.varying(tsl.vec2());
 const clipW = tsl.varying(tsl.float());
 
@@ -99,6 +106,15 @@ export function createWorldNodeMaterial(
   return material;
 }
 
+export function createRealityNodeMaterial(textureMap: THREE.Texture): THREE.MeshBasicNodeMaterial {
+  return new THREE.MeshBasicNodeMaterial({
+    map: textureMap,
+    side: THREE.DoubleSide,
+    fog: false,
+    toneMapped: false,
+  });
+}
+
 export function createSpriteNodeMaterial(
   textureMap: THREE.Texture,
   glow: boolean,
@@ -119,7 +135,14 @@ export function createSpriteNodeMaterial(
 export function createInteractionOutlineMaterial(held: boolean): THREE.MeshBasicNodeMaterial {
   const material = new THREE.MeshBasicNodeMaterial({
     side: THREE.BackSide,
+    depthTest: false,
     depthWrite: false,
+    transparent: true,
+    stencilWrite: true,
+    stencilWriteMask: 0,
+    stencilFuncMask: 0xff,
+    stencilRef: 0,
+    stencilFunc: THREE.EqualStencilFunc,
     fog: false,
     toneMapped: false,
   });
@@ -132,6 +155,23 @@ export function createInteractionOutlineMaterial(held: boolean): THREE.MeshBasic
   return material;
 }
 
+export function createInteractionOutlineMaskMaterial(): THREE.MeshBasicNodeMaterial {
+  return new THREE.MeshBasicNodeMaterial({
+    side: THREE.FrontSide,
+    colorWrite: false,
+    depthTest: false,
+    depthWrite: false,
+    stencilWrite: true,
+    stencilWriteMask: 0xff,
+    stencilFuncMask: 0xff,
+    stencilRef: 0,
+    stencilFunc: THREE.AlwaysStencilFunc,
+    stencilZPass: THREE.IncrementStencilOp,
+    fog: false,
+    toneMapped: false,
+  });
+}
+
 export type RetroRenderPipeline = {
   render(): void;
   resize(width: number, height: number): void;
@@ -141,12 +181,20 @@ export type RetroRenderPipeline = {
 export function createRetroRenderPipeline(
   renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
+  realityScene: THREE.Scene,
   camera: THREE.Camera,
 ): RetroRenderPipeline {
-  const scenePass = tsl.pass(scene, camera);
+  const scenePass = tsl.pass(scene, camera, { stencilBuffer: true });
+  scenePass.renderTarget.depthTexture.format = THREE.DepthStencilFormat;
+  scenePass.renderTarget.depthTexture.type = THREE.UnsignedInt248Type;
   scenePass.renderTarget.texture.type = THREE.UnsignedByteType;
   scenePass.renderTarget.texture.magFilter = THREE.NearestFilter;
   scenePass.renderTarget.texture.minFilter = THREE.NearestFilter;
+  const occlusionPass = tsl.pass(scene, camera);
+  const realityPass = tsl.pass(realityScene, camera);
+  realityPass.renderTarget.texture.type = THREE.UnsignedByteType;
+  realityPass.renderTarget.texture.magFilter = THREE.LinearFilter;
+  realityPass.renderTarget.texture.minFilter = THREE.LinearFilter;
 
   const sceneColor = scenePass;
   const vignette = tsl.smoothstep(0.35, 1.05, tsl.distance(tsl.screenUV, tsl.vec2(0.5))).oneMinus();
@@ -165,7 +213,13 @@ export function createRetroRenderPipeline(
   const levels = tsl.vec3(...RETRO_COLOR_INTERVALS);
   const displayColor = tsl.sRGBTransferOETF(shaded);
   const quantizedDisplay = tsl.floor(displayColor.mul(levels).add(bayerThreshold)).div(levels);
-  const output = tsl.vec4(tsl.sRGBTransferEOTF(quantizedDisplay), sceneColor.a);
+  const retroOutput = tsl.vec4(tsl.sRGBTransferEOTF(quantizedDisplay), sceneColor.a);
+  const realityColor = realityPass;
+  const realityVisible = realityPass
+    .getLinearDepthNode()
+    .lessThanEqual(occlusionPass.getLinearDepthNode().add(0.002));
+  const realityAlpha = realityVisible.select(realityColor.a, 0);
+  const output = tsl.mix(retroOutput, realityColor, realityAlpha);
   const pipeline = new THREE.RenderPipeline(renderer, output);
 
   return {
@@ -173,6 +227,7 @@ export function createRetroRenderPipeline(
     resize(width, height) {
       const scale = Math.min(1, 480 / Math.max(1, width), 270 / Math.max(1, height));
       scenePass.setResolutionScale(scale);
+      occlusionPass.setResolutionScale(scale);
       retroResolution.value.set(
         Math.max(1, Math.round(width * scale)),
         Math.max(1, Math.round(height * scale)),
@@ -180,6 +235,8 @@ export function createRetroRenderPipeline(
     },
     dispose() {
       scenePass.dispose();
+      occlusionPass.dispose();
+      realityPass.dispose();
       pipeline.dispose();
     },
   };

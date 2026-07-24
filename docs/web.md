@@ -69,8 +69,11 @@ patterns.
 The CSS canvas fills the viewport independently, preserving low-resolution pixels
 without tying gameplay layout to a fixed window size.
 
-World materials use authored, pixel-magnified 64 x 64 PNG textures and
-shadow-map-free Gouraud lighting explicitly evaluated in TSL's vertex stage.
+World materials use authored, pixel-magnified PNG textures and shadow-map-free
+Gouraud lighting explicitly evaluated in TSL's vertex stage. The hashed asset
+manifest carries each material's real PNG width and height so Valve 220
+pixel-space UVs normalize identically for default 64 x 64 tiles and larger
+TrenchBroom-fitted artwork.
 Clip-space vertex snapping and partially affine UV interpolation provide
 controlled software-renderer instability without sacrificing texture mip levels.
 Large concrete and stone surfaces use deterministic irregular aggregate instead
@@ -80,12 +83,25 @@ Authored sky color sets both scene background and fog. Water, caution, danger,
 and platform materials animate UVs in TSL; water combines
 two independently moving translucent samples and a slow palette pulse. Decorative
 `env_sprite` point entities and player sprites are camera-facing pixel billboards.
+Static world faces whose asset manifest mode is `reality` are mirrored into a
+second scene and rendered at the canvas's native resolution with linear mip
+sampling, no fog, no vertex snapping, no retro lighting, and no palette resolve.
+The result is intentionally uncanny: photographic detail remains conspicuously
+real inside the otherwise software-rendered world. A separate low-resolution
+occlusion pass supplies depth for the composite, so ordinary world geometry and
+player billboards still cover reality surfaces correctly without requiring a
+second full-resolution world render.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
 low-resolution scene pass: mint means locally available, while amber is driven by
 the server-authoritative local-grab flag. This avoids a separate full-scene
 outline compositor and keeps WebGPU and WebGL fallback presentation identical.
+Exact, colorless silhouettes first accumulate stencil coverage without testing
+or changing world depth. The expanded hull then ignores world depth but draws
+only where coverage remains zero, and player billboards render afterward against
+the original world depth. Outlines therefore remain legible through level
+geometry without filling the prop interior or drawing over a visible player.
 Appending `?debug` enables the general diagnostic overlay. It renders the client
-pickup cast using the same player-chest origin, view direction, and three-metre
+pickup cast using the same player-chest origin, view direction, and 3.25-metre
 reach as server validation: mint marks an available prop hit, blue marks an
 interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls the current authoritative Box3D debug frame at 10 Hz and draws
@@ -148,6 +164,11 @@ HTTP/UDP ranges, IPs, ICE server schemes, URL schemes, and production
 administration-token length before binding. The deployment publishes the
 configured UDP range and supplies TURN when direct candidates are not reachable.
 Secrets are never bundled into browser assets.
+
+The world canvas is keyboard-focusable. Movement remains available when pointer
+lock is denied or unavailable; pointer lock controls relative mouse look, not
+whether keyboard intent is sampled. The browser accepts the server RTC offer and
+uses the dynamically supplied ICE configuration when creating its peer.
 
 GitHub Actions builds this Dockerfile on pushes to `main`, version tags, and
 manual dispatches, then publishes it to `ghcr.io/<owner>/<repository>`. The

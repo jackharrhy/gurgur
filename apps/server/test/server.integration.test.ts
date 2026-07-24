@@ -48,16 +48,23 @@ describe("authoritative server", () => {
       const textureManifestResponse = await fetch(`http://127.0.0.1:${server.port}/assets.json`);
       expect(textureManifestResponse.headers.get("cache-control")).toBe("no-cache");
       const textureManifest = (await textureManifestResponse.json()) as {
-        materials: Record<string, string>;
+        materials: Record<
+          string,
+          { url: string; width: number; height: number; renderMode: "retro" | "reality" }
+        >;
         sprites: Record<string, string>;
       };
-      expect(textureManifest.materials["GURGUR/CONCRETE"]).toMatch(
-        /^\/textures\/GURGUR\/CONCRETE\.png\?v=[0-9a-f]{64}$/,
-      );
+      const concreteManifest = textureManifest.materials["GURGUR/CONCRETE"]!;
+      expect(concreteManifest.url).toMatch(/^\/textures\/GURGUR\/CONCRETE\.png\?v=[0-9a-f]{64}$/);
+      expect({ width: concreteManifest.width, height: concreteManifest.height }).toEqual({
+        width: 64,
+        height: 64,
+      });
+      expect(concreteManifest.renderMode).toBe("retro");
       expect(textureManifest.sprites.fern).toMatch(/^\/sprites\/fern\.png\?v=[0-9a-f]{64}$/);
-      const concreteTexture = await fetch(
-        `http://127.0.0.1:${server.port}${textureManifest.materials["GURGUR/CONCRETE"]}`,
-      );
+      const concreteTextureUrl = new URL(concreteManifest.url, `http://127.0.0.1:${server.port}`);
+      expect(concreteTextureUrl.pathname).toBe("/textures/GURGUR/CONCRETE.png");
+      const concreteTexture = await fetch(concreteTextureUrl.href);
       expect(concreteTexture.headers.get("content-type")).toBe("image/png");
       expect(concreteTexture.headers.get("cache-control")).toBe(
         "public, max-age=31536000, immutable",
@@ -376,7 +383,7 @@ function connectClient(
     let world: WorldManifestMessage | null = null;
     let snapshot: Snapshot | null = null;
     let stateReady = false;
-    let offerStarted = false;
+    let answerStarted = false;
     const done = (): void => {
       if (!welcome || !world || !snapshot || !stateReady || !stateChannel) return;
       clearTimeout(timeout);
@@ -407,19 +414,20 @@ function connectClient(
         done();
       }
     });
-    const startOffer = async (): Promise<void> => {
-      if (!welcome || offerStarted) return;
-      offerStarted = true;
+    const acceptOffer = async (description: { type: "offer"; sdp: string }): Promise<void> => {
+      if (!welcome || answerStarted) return;
+      answerStarted = true;
       try {
-        await peer.setLocalDescription(await peer.createOffer());
+        await peer.setRemoteDescription(description);
+        await peer.setLocalDescription(await peer.createAnswer());
         guardIceUdpSockets(peer);
-        if (!peer.localDescription?.sdp) throw new Error("test RTC offer has no SDP");
+        if (!peer.localDescription?.sdp) throw new Error("test RTC answer has no SDP");
         socket.send(
           JSON.stringify({
-            type: "rtc-offer",
+            type: "rtc-answer",
             protocolVersion: PROTOCOL_VERSION,
             worldEpoch: welcome.worldEpoch,
-            description: { type: "offer", sdp: peer.localDescription.sdp },
+            description: { type: "answer", sdp: peer.localDescription.sdp },
           }),
         );
       } catch (error) {
@@ -448,12 +456,14 @@ function connectClient(
       const message = JSON.parse(event.data) as
         | WelcomeMessage
         | WorldManifestMessage
-        | { type: "rtc-answer"; description: { type: "answer"; sdp: string } };
+        | {
+            type: "rtc-offer";
+            description: { type: "offer"; sdp: string };
+            iceServers: RTCIceServer[];
+          };
       if (message.type === "welcome") welcome = message;
       if (message.type === "world") world = message;
-      if (message.type === "rtc-answer")
-        void peer.setRemoteDescription(message.description).catch(reject);
-      void startOffer();
+      if (message.type === "rtc-offer") void acceptOffer(message.description);
       done();
     });
     socket.addEventListener("error", () => reject(new Error("test client websocket failed")));

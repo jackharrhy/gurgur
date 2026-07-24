@@ -37,8 +37,10 @@ schema:
 
 Simulation tests settle each map, assert finite state throughout, verify that
 only the authority moves props, exercise latest-wins intent and action counters,
-measure near/far cadence, drop terminal sleep samples, persist/restart, and reset
-runtime generations. Prediction tests restore and replay only the player against
+measure near/far cadence, prove that grab targets converge across prop masses and
+remain camera-forward through a turn, verify filtered obstruction rays, drop
+terminal sleep samples, persist/restart, and reset runtime generations.
+Prediction tests restore and replay only the player against
 authoritative kinematic prop proxies; current contact presentation may use those
 proxies, but player contact cannot apply local rigid-body motion to them.
 
@@ -50,6 +52,11 @@ scenarios cover grab, touch, gamepad, reconnect, and ordinary movement. Browser
 automation appends `?test`; the grab scenario also enables the general `?debug`
 view and requires a non-empty authoritative Box3D debug frame, covering the server
 callback, JSON route, browser polling, and Three.js overlay together.
+
+`SMOKE_BROWSER=firefox bun run test:browser -- movement` runs the same movement
+contract in Playwright Firefox, including server-offer signaling and mDNS ICE
+candidate handling. `SMOKE_DENY_POINTER_LOCK=1 bun run test:browser -- movement`
+proves keyboard movement remains armed when pointer lock is rejected.
 
 ## Multiplayer harness
 

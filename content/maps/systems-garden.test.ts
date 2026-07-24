@@ -6,7 +6,7 @@ import {
   entityDefinitions,
   type EntityClassname,
 } from "@gurgur/game";
-import { MATERIAL_TEXTURE_SIZE } from "../../packages/engine/src";
+import { MATERIAL_TEXTURE_SIZE, parseValve220 } from "../../packages/engine/src";
 
 type ParsedEntity = {
   properties: Record<string, string>;
@@ -63,6 +63,9 @@ const gameConfig = (await Bun.file(
   new URL("../trenchbroom/GameConfig.cfg", import.meta.url),
 ).json()) as {
   faceattribs: { defaults: { scale: [number, number] } };
+  tags: {
+    brushface: Array<{ name: string; match: string; pattern: string }>;
+  };
 };
 
 type Tuple3 = [number, number, number];
@@ -84,19 +87,65 @@ function facePoints(brush: string): Array<[Tuple3, Tuple3, Tuple3]> {
 }
 
 describe("Systems Garden map", () => {
-  test("uses the same enlarged material scale as TrenchBroom", () => {
+  test("uses the same default material scale as TrenchBroom", () => {
     expect(MATERIAL_TEXTURE_SIZE).toBe(64);
     expect(gameConfig.faceattribs.defaults.scale).toEqual([0.5, 0.5]);
-    for (const brush of entities.flatMap((entity) => entity.brushes)) {
-      for (const line of brush.split("\n").filter((candidate) => candidate.startsWith("("))) {
-        expect(
-          line
-            .match(/\s([-+\d.eE]+)\s+([-+\d.eE]+)$/)
-            ?.slice(1)
-            .map(Number),
-        ).toEqual([0.5, 0.5]);
-      }
-    }
+  });
+
+  test("exposes reality-break materials as native TrenchBroom brush-face tags", () => {
+    expect(gameConfig.tags.brushface).toEqual([
+      { name: "Reality", attribs: [], match: "material", pattern: "GURGUR/REAL/*" },
+      {
+        name: "Reality (Dylan)",
+        attribs: [],
+        match: "material",
+        pattern: "GURGUR/dylans*",
+      },
+    ]);
+  });
+
+  test("preserves authored Valve 220 face axes, offsets, and non-default scales", () => {
+    const map = parseValve220(source, "systems-garden.map");
+    const authored = map.entities
+      .flatMap((entity) =>
+        entity.brushes.flatMap((brush) => brush.faces.map((face) => ({ entity, brush, face }))),
+      )
+      .find(
+        ({ face }) =>
+          face.material.startsWith("GURGUR/dylans") &&
+          (face.scale[0] !== 0.5 || face.scale[1] !== 0.5),
+      );
+    expect(authored).toBeDefined();
+    const compiled = compiledWorld.brushes.find(
+      (brush) => brush.entityIndex === -1 && brush.sourceBrushIndex === authored!.brush.brushIndex,
+    )!;
+    const triangleIndex = compiled.triangleSourceFaces.indexOf(authored!.face.faceIndex);
+    expect(triangleIndex).toBeGreaterThanOrEqual(0);
+    const vertexIndex = compiled.triangles[triangleIndex]![0]!;
+    const point =
+      map.entities[authored!.entity.entityIndex]!.brushes[authored!.brush.brushIndex]!.faces[
+        authored!.face.faceIndex
+      ]!;
+    const mapVertex = compiled.worldVertices[vertexIndex]!;
+    const valvePoint = {
+      x: mapVertex.x / 0.0254,
+      y: -mapVertex.z / 0.0254,
+      z: mapVertex.y / 0.0254,
+    };
+    expect(compiled.triangleUvs[triangleIndex]![0]!.x).toBeCloseTo(
+      (valvePoint.x * point.uAxis[0] +
+        valvePoint.y * point.uAxis[1] +
+        valvePoint.z * point.uAxis[2]) /
+        point.scale[0] +
+        point.uAxis[3],
+    );
+    expect(compiled.triangleUvs[triangleIndex]![0]!.y).toBeCloseTo(
+      (valvePoint.x * point.vAxis[0] +
+        valvePoint.y * point.vAxis[1] +
+        valvePoint.z * point.vAxis[2]) /
+        point.scale[1] +
+        point.vAxis[3],
+    );
   });
 
   test("declares Valve 220 and uses globally consistent face winding per brush", () => {

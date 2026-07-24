@@ -31,6 +31,12 @@ After the server accepts a grab, that prop keeps an amber silhouette even when
 the player looks away; the outline clears only when authoritative state reports
 release. Props held by another player are not presented as available.
 
+A held prop is pulled to a stable point in front of the player rather than
+tethered at its pickup distance. Turning moves that point with the view without
+letting the prop orbit the player; walls shorten the carry position, and bounded
+linear and angular response keeps collisions physical. A persistently blocked or
+lost prop releases instead of accumulating unbounded force.
+
 ## Scope boundaries
 
 Gurgur does not use Redis, microservices, distributed simulation, matchmaking,

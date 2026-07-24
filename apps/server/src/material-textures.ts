@@ -9,6 +9,13 @@ export type MaterialTextureAsset = {
   url: string;
 };
 
+export type MaterialTextureManifestEntry = {
+  url: string;
+  width: number;
+  height: number;
+  renderMode: "retro" | "reality";
+};
+
 const hashFile = async (file: Bun.BunFile): Promise<string> =>
   createHash("sha256")
     .update(await file.bytes())
@@ -21,10 +28,34 @@ const encodedSpritePath = (relativePath: string): string =>
 
 export async function loadMaterialTextureManifest(
   rootUrl: URL,
-): Promise<{ etag: string; textures: Record<string, string> }> {
-  const textures = await loadLogicalPngManifest(rootUrl, encodedTexturePath);
+): Promise<{ etag: string; textures: Record<string, MaterialTextureManifestEntry> }> {
+  const root = fileURLToPath(rootUrl);
+  const assets: Array<[string, MaterialTextureManifestEntry]> = [];
+  for await (const path of new Bun.Glob("**/*.png").scan({ cwd: root, dot: false })) {
+    const relativePath = path.replaceAll("\\", "/");
+    const file = Bun.file(join(root, path));
+    const bytes = await file.bytes();
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const { width, height } = pngDimensions(bytes, relativePath);
+    assets.push([
+      relativePath.slice(0, -4),
+      {
+        url: `${encodedTexturePath(relativePath)}?v=${hash}`,
+        width,
+        height,
+        renderMode: materialRenderMode(relativePath.slice(0, -4)),
+      },
+    ]);
+  }
+  const textures = Object.fromEntries(
+    assets.toSorted(([left], [right]) => left.localeCompare(right)),
+  );
   const etag = `"${createHash("sha256").update(JSON.stringify(textures)).digest("hex")}"`;
   return { etag, textures };
+}
+
+export function materialRenderMode(name: string): "retro" | "reality" {
+  return /^GURGUR\/dylans[^/]*$/i.test(name) || /^GURGUR\/REAL\//i.test(name) ? "reality" : "retro";
 }
 
 export async function loadAssetManifest(
@@ -32,7 +63,7 @@ export async function loadAssetManifest(
   spriteRoot: URL,
 ): Promise<{
   etag: string;
-  materials: Record<string, string>;
+  materials: Record<string, MaterialTextureManifestEntry>;
   sprites: Record<string, string>;
 }> {
   const materials = (await loadMaterialTextureManifest(materialRoot)).textures;
@@ -71,6 +102,22 @@ async function loadLogicalPngManifest(
     assets.push([relativePath.slice(0, -4), `${encodePath(relativePath)}?v=${hash}`]);
   }
   return Object.fromEntries(assets.toSorted(([left], [right]) => left.localeCompare(right)));
+}
+
+function pngDimensions(bytes: Uint8Array, relativePath: string): { width: number; height: number } {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (
+    bytes.length < 24 ||
+    signature.some((value, index) => bytes[index] !== value) ||
+    String.fromCharCode(...bytes.slice(12, 16)) !== "IHDR"
+  )
+    throw new Error(`authored material is not a valid PNG: ${relativePath}`);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const width = view.getUint32(16);
+  const height = view.getUint32(20);
+  if (width === 0 || height === 0 || width > 16_384 || height > 16_384)
+    throw new Error(`authored material PNG dimensions are invalid: ${relativePath}`);
+  return { width, height };
 }
 
 async function loadPngAsset(

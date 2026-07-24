@@ -118,6 +118,7 @@ export type RtcOfferMessage = {
   protocolVersion: 1;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
+  iceServers: Array<{ urls: string; username?: string; credential?: string }>;
 };
 
 export type RtcAnswerMessage = {
@@ -127,8 +128,8 @@ export type RtcAnswerMessage = {
   description: { type: "answer"; sdp: string };
 };
 
-export type ClientControlMessage = HelloMessage | PingMessage | RtcOfferMessage;
-export type ServerControlMessage = WelcomeMessage | PongMessage | RtcAnswerMessage;
+export type ClientControlMessage = HelloMessage | PingMessage | RtcAnswerMessage;
+export type ServerControlMessage = WelcomeMessage | PongMessage | RtcOfferMessage;
 
 export type InputCommand = {
   type: "input";

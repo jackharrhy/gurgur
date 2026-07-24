@@ -48,7 +48,7 @@ describe("WorldStore", () => {
             stepCooldown: 2,
             crouched: true,
             grabbedAuthoredId: "physics.crate.1",
-            grabLength: 1.75,
+            grabDistance: 1.75,
           },
         ],
       };

@@ -27,14 +27,14 @@ export function decodeClientControl(text: string): ClientControlMessage {
     throw new Error("control protocol version mismatch");
   if (value.type === "hello") return hello(value);
   if (value.type === "ping") return ping(value);
-  if (value.type === "rtc-offer") return rtcOffer(value);
+  if (value.type === "rtc-answer") return rtcAnswer(value);
   throw new Error("unknown control packet type");
 }
 
 export type ServerTextMessage =
   | WelcomeMessage
   | PongMessage
-  | RtcAnswerMessage
+  | RtcOfferMessage
   | WorldManifestMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
@@ -42,7 +42,7 @@ export function decodeServerControl(text: string): ServerTextMessage {
   if (value.type === "welcome") return welcome(value);
   if (value.type === "world") return world(value);
   if (value.type === "pong") return pong(value);
-  if (value.type === "rtc-answer") return rtcAnswer(value);
+  if (value.type === "rtc-offer") return rtcOffer(value);
   throw new Error("unknown control packet type");
 }
 
@@ -155,11 +155,33 @@ function ping(value: RecordValue): PingMessage {
 }
 
 function rtcOffer(value: RecordValue): RtcOfferMessage {
-  exact(value, ["type", "protocolVersion", "worldEpoch", "description"]);
-  if (!safeInteger(value.worldEpoch, 0) || !sessionDescription(value.description, "offer")) {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "description", "iceServers"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !sessionDescription(value.description, "offer") ||
+    !iceServers(value.iceServers)
+  ) {
     throw new Error("RTC offer fields are invalid");
   }
   return value as RtcOfferMessage;
+}
+
+function iceServers(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 8) return false;
+  return value.every((server) => {
+    if (!record(server)) return false;
+    exact(server, [
+      "urls",
+      ...("username" in server ? ["username"] : []),
+      ...("credential" in server ? ["credential"] : []),
+    ]);
+    return (
+      string(server.urls, 2_048, 1) &&
+      /^(?:stun|stuns|turn|turns):/.test(server.urls) &&
+      (!("username" in server) || string(server.username, 1_024)) &&
+      (!("credential" in server) || string(server.credential, 1_024))
+    );
+  });
 }
 
 function rtcAnswer(value: RecordValue): RtcAnswerMessage {

@@ -2,7 +2,7 @@
 
 This is the only status document. Canonical behavior lives in the sibling docs.
 
-Updated: 2026-07-23.
+Updated: 2026-07-24.
 
 ## Current state
 
@@ -29,6 +29,9 @@ slice:
 - TrenchBroom Valve 220 fixtures now cover light/heavy corridor pushes, stacked
   support and sleep propagation, and domino wake/contact chains in addition to
   the original network boxes;
+- prop pickup uses a camera-forward, obstruction-aware target controller with
+  mass-scaled bounded impulses and yaw-relative angular stabilization instead of
+  the former fixed-length orbiting distance joint;
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
   prediction worker, Box3D Wasm, and Three.js presentation.
 

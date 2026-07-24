@@ -16,7 +16,8 @@ The dependency is pinned as a pair:
 Host and prediction code import Gurgur's physics adapter from `packages/engine`.
 Raw Embind objects and Wasm views do not cross that boundary. Gameplay simulation
 instead receives the narrower `GameEngine` capability: body lookup/state,
-kinematic targets, raycasts, player proxies, grab constraints, and save requests.
+kinematic targets, filtered raycasts, player proxies, bounded dynamic-body target
+drives, and save requests.
 It cannot step or dispose the world, construct arbitrary bodies, or extract
 debug data.
 
@@ -146,3 +147,25 @@ A kinematic proxy capsule follows the geometric mover after resolution. The prox
 exists for sensors, raycasts, projectiles, and contact identity; it does not drive
 player movement. Teleport, respawn, crouch-size change, and epoch reset update the
 mover and proxy atomically and clear prediction/interpolation history.
+
+## Prop carry controller
+
+Grabbing is a game-owned target controller, not a rope or distance constraint.
+The server chooses the first grabbable body on its authoritative 3.25 m view ray;
+the client runtime ID is presentation feedback rather than trusted acquisition
+state. The controller derives a stable carry distance from compiled prop extent,
+then advances a target point toward the player’s chest-forward view at a bounded
+speed. A filtered ray that excludes the held body shortens that target before
+world geometry.
+
+The engine converts position error into a capped desired velocity and applies a
+mass-scaled impulse with a maximum acceleration. This gives light and heavy props
+the same bounded response without changing authored mass. Angular velocity is
+driven toward the orientation captured relative to player yaw at acquisition,
+with bounded angular speed and acceleration. Driving the center of mass avoids
+off-axis torque from an arbitrary face hit.
+
+The game owns exclusivity, target smoothing, obstruction clearance, persistence,
+and release. It drops a body that becomes invalid, exceeds maximum range, or
+remains more than 1.75 m behind its controller target for one second. Transport
+continues to replicate only authoritative body state and grab ownership.

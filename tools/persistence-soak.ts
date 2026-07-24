@@ -55,7 +55,7 @@ try {
           stepCooldown: tick % 5,
           crouched: tick % 2 === 0,
           grabbedAuthoredId: tick % 4 === 0 ? "body" : null,
-          grabLength: 1.5,
+          grabDistance: 1.5,
         },
       ],
     };

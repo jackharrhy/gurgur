@@ -134,6 +134,63 @@ describe("authoritative network physics", () => {
     }
   });
 
+  test("pulls a grabbed prop to the view target and keeps it in front through a turn", async () => {
+    const bundle = await fixture("network-boxes");
+    const heavyEntity = bundle.entities.find(
+      (entity) => entity.authoredId === "fixture.push" && entity.kind === "physics-prop",
+    )!;
+    const heavyBrush = bundle.brushes[heavyEntity.body!.brushIndices[0]!]!;
+    const spawn = {
+      x: heavyBrush.center.x,
+      y: PLAYER_HALF_HEIGHT,
+      z: heavyBrush.center.z + 2.5,
+    };
+    const store = new WorldStore(":memory:");
+    const game = await AuthoritativeGame.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle, playerSpawn: spawn },
+    );
+    try {
+      const player = game.connectPlayer("tracking-grab-player");
+      const heavy = runtimeId(game, "fixture.push");
+      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
+      const startingDistance = Math.abs(body(game.snapshot(), heavy).position.z - spawn.z);
+
+      game.acceptInput(
+        player,
+        command(game, 0, {
+          lookPitch: -0.18,
+          interactTarget: heavy,
+          primaryCounter: 1,
+        }),
+      );
+      for (let tick = 0; tick < 60; tick += 1) game.advance(PHYSICS_DT);
+      const held = body(game.snapshot(), heavy).position;
+      expect(game.grabbedTarget(player)).toEqual(heavy);
+      expect(Math.abs(held.z - spawn.z)).toBeLessThan(startingDistance - 0.3);
+
+      game.acceptInput(
+        player,
+        command(game, 1, {
+          lookYaw: Math.PI / 2,
+          lookPitch: 0,
+          interactTarget: heavy,
+          primaryCounter: 1,
+        }),
+      );
+      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
+      const turned = body(game.snapshot(), heavy).position;
+      expect(game.grabbedTarget(player)).toEqual(heavy);
+      expect(turned.x).toBeLessThan(spawn.x - 0.65);
+      expect(Math.abs(turned.z - spawn.z)).toBeLessThan(0.8);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
   test("applies only the newest intent in a burst and preserves monotonic action counters", async () => {
     const store = new WorldStore(":memory:");
     const game = await AuthoritativeGame.create(

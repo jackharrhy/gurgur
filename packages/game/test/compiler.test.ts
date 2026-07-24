@@ -79,6 +79,25 @@ describe("Valve geometry conformance fixtures", () => {
     expect(brush.triangles).toHaveLength(12);
   });
 
+  test("applies Valve 220 scale before adding the authored texture shift", () => {
+    const brush = compileWorld(
+      mapWithBrush((point) => point),
+      "uv.map",
+    ).brushes[0]!;
+    const triangleIndex = brush.triangleSourceFaces.indexOf(0);
+    expect(triangleIndex).toBeGreaterThanOrEqual(0);
+    const vertexIndex = brush.triangles[triangleIndex]![0]!;
+    const world = brush.worldVertices[vertexIndex]!;
+    const mapPoint = {
+      x: world.x / 0.0254,
+      y: -world.z / 0.0254,
+    };
+    expect(brush.triangleUvs[triangleIndex]![0]).toEqual({
+      x: mapPoint.x / 0.25 + 8,
+      y: mapPoint.y / 0.5 + 16,
+    });
+  });
+
   test("keeps every convex child of a multi-brush moving entity", () => {
     const source = `${mapWithBrush(([x, y, z]) => [x - 512, y - 512, z - 128])}
 {

@@ -26,11 +26,20 @@ installation.
 
 Gurgur maps identify themselves with `// Game: Gurgur` and `// Format: Valve`
 header comments so TrenchBroom selects the installed game and Valve 220 format
-automatically. Runtime and editor rendering use the same authored 64 x 64 PNGs,
-and new TrenchBroom faces use a 0.5 texture scale. TrenchBroom loads the texture
-collection from `content/textures/GURGUR` through the configured game path.
+automatically. Runtime and editor rendering use the same authored PNGs; default
+materials are 64 x 64 and new TrenchBroom faces use a 0.5 texture scale, but
+materials and per-face scales may use other dimensions. TrenchBroom loads the
+texture collection from `content/textures/GURGUR` through the configured game path.
 Configuration generation validates that every mapped material has an authored
 PNG and never creates or overwrites artwork.
+
+Materials under `GURGUR/REAL/*` opt static world faces into the native-resolution
+reality-break presentation described in `docs/web.md`. Existing
+`GURGUR/dylans*` materials use the same mode as a temporary compatibility
+convention. The generated TrenchBroom configuration exposes both patterns as
+brush-face smart tags so authors can select and filter them in the editor. Valve
+220 itself has no arbitrary per-face presentation metadata, so the material
+namespace is the authored contract; new content should use `GURGUR/REAL/*`.
 
 The installer follows TrenchBroom's platform user-data locations. Set
 `TRENCHBROOM_USER_DATA_PATH` only for a portable or otherwise nonstandard
@@ -68,10 +77,13 @@ The compiler applies the canonical transform and unit scale exactly once:
 map (x, y, z) -> world (x, z, -y) * 0.0254 metres
 ```
 
-Valve 220 UV projection remains in authored map space. Render vertices, collision
-vertices, entity origins, directions, rotations, and dimensions all derive from
-the same validated brush representation. Every generated triangle retains its
-source entity, brush, face, and material identity.
+Valve 220 UV projection remains in authored map space. Each component is
+`dot(axis, point) / scale + shift`; the renderer then normalizes U by the
+authored PNG width and negates and normalizes V by its height. Non-default
+TrenchBroom axes, offsets, rotations, and scales are preserved per face. Render
+vertices, collision vertices, entity origins, directions, rotations, and
+dimensions all derive from the same validated brush representation. Every
+generated triangle retains its source entity, brush, face, and material identity.
 
 ## Runtime bundle
 

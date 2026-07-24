@@ -449,18 +449,19 @@ async function createClient(
       if (channel.readyState === "open") finish();
     });
   });
-  let offerStarted = false;
-  const startOffer = async (): Promise<void> => {
-    if (!client.welcome || offerStarted) return;
-    offerStarted = true;
-    await peer.setLocalDescription(await peer.createOffer());
-    if (!peer.localDescription?.sdp) throw new Error(`client ${clientId} RTC offer has no SDP`);
+  let answerStarted = false;
+  const acceptOffer = async (description: { type: "offer"; sdp: string }): Promise<void> => {
+    if (!client.welcome || answerStarted) return;
+    answerStarted = true;
+    await peer.setRemoteDescription(description);
+    await peer.setLocalDescription(await peer.createAnswer());
+    if (!peer.localDescription?.sdp) throw new Error(`client ${clientId} RTC answer has no SDP`);
     socket.send(
       JSON.stringify({
-        type: "rtc-offer",
+        type: "rtc-answer",
         protocolVersion: PROTOCOL_VERSION,
         worldEpoch: client.welcome.worldEpoch,
-        description: { type: "offer", sdp: peer.localDescription.sdp },
+        description: { type: "answer", sdp: peer.localDescription.sdp },
       }),
     );
   };
@@ -471,15 +472,13 @@ async function createClient(
       return;
     }
     const message = decodeServerControl(event.data);
-    if (message.type === "rtc-answer") {
-      void peer.setRemoteDescription(message.description).catch((error) => {
-        client.metrics.errors.push(String(error));
-      });
+    if (message.type === "rtc-offer") {
+      void acceptOffer(message.description).catch((error) =>
+        client.metrics.errors.push(String(error)),
+      );
       return;
     }
     handleOutbound(client, event.data, now);
-    if (message.type === "welcome")
-      void startOffer().catch((error) => client.metrics.errors.push(String(error)));
   });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`client ${clientId} open timeout`)), 3_000);

@@ -1,6 +1,5 @@
 import {
   INPUT_INTENT_TIMEOUT_TICKS,
-  type ConstraintId,
   type InputCommand,
   type RuntimeEntityRef,
   type RuntimeId,
@@ -14,6 +13,16 @@ import {
   type PlayerControllerState,
 } from "./controller";
 import type { GameEngine } from "./engine-api";
+import {
+  createPropGrab,
+  grabDistanceFor,
+  PLAYER_GRAB_REACH,
+  playerChest,
+  playerViewDirection,
+  stepPropGrab,
+  type GrabPose,
+  type PropGrab,
+} from "./grab";
 import type { PersistedPlayerState } from "./state";
 import type { WorldBundle } from "./world";
 
@@ -44,7 +53,7 @@ type Player = {
   lastInputServerTick: number;
   lastInteractCounter: number;
   lastPrimaryCounter: number;
-  grab: { constraint: ConstraintId; target: RuntimeId; length: number } | null;
+  grab: PropGrab | null;
 };
 
 type PlayerSlot = { generation: number; player: Player | null };
@@ -137,30 +146,11 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     stepCooldown: player.state.stepCooldown,
     crouched: player.state.crouched,
     grabbedAuthoredId: grabbedAuthoredId(player),
-    grabLength: player.grab?.length ?? 0,
+    grabDistance: player.grab?.distance ?? 0,
   });
 
-  const createGrab = (
-    player: Player,
-    target: RuntimeId,
-    worldAnchorB: Vec3,
-    length: number,
-  ): void => {
-    const anchor = chest(player);
-    player.grab = {
-      target,
-      length,
-      constraint: engine.createGrabConstraint({
-        bodyA: player.proxy,
-        bodyB: target,
-        worldAnchorA: anchor,
-        worldAnchorB,
-        length,
-        hertz: 7,
-        dampingRatio: 0.9,
-        maxForce: 350,
-      }),
-    };
+  const createGrab = (player: Player, target: RuntimeId, holdDistance: number): void => {
+    player.grab = createPropGrab(engine, target, grabPose(player), holdDistance);
   };
 
   const newPlayer = (
@@ -200,12 +190,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       );
       if (target && !alreadyOwned) {
         engine.setBodyAwake(target, true);
-        createGrab(
-          player,
-          target,
-          engine.bodies.state(target).position,
-          Math.max(0.5, restored.grabLength),
-        );
+        createGrab(player, target, restored.grabDistance);
       }
     }
     return player;
@@ -213,7 +198,6 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
 
   const respawn = (player: Player, worldRecreated = false): void => {
     if (!worldRecreated) {
-      if (player.grab) engine.destroyConstraint(player.grab.constraint);
       engine.destroyBody(player.proxy);
     }
     player.state = {
@@ -242,32 +226,45 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     engine.requestSave();
   };
 
-  const tryGrab = (player: Player, target: RuntimeId | null): void => {
+  const dropGrab = (player: Player, save: boolean): void => {
+    if (!player.grab) return;
+    player.grab = null;
+    if (save) engine.requestSave();
+  };
+
+  const tryGrab = (player: Player): void => {
     if (player.grab) {
-      engine.destroyConstraint(player.grab.constraint);
-      player.grab = null;
-      engine.requestSave();
+      dropGrab(player, true);
       return;
     }
-    if (
-      !target ||
-      players().some((candidate) => candidate.grab && sameId(candidate.grab.target, target))
-    )
+    const anchor = playerChest(player.state.position);
+    const hit = engine.raycast(
+      anchor,
+      scale(playerViewDirection(player.input.lookYaw, player.input.lookPitch), PLAYER_GRAB_REACH),
+    );
+    if (!hit) return;
+    const target = hit.body;
+    if (players().some((candidate) => candidate.grab && sameId(candidate.grab.target, target)))
       return;
-    const runtimeBody = engine.bodies.resolve(target);
+    const runtimeBody = engine.bodies.resolve(hit.body);
     if (!runtimeBody || bundle.entities[runtimeBody.entityIndex]?.interaction !== "grab") return;
-    const anchor = chest(player);
-    const direction = viewDirection(player.input);
-    const hit = engine.raycast(anchor, scale(direction, 3));
-    if (!hit || !sameId(hit.body, target)) return;
-    const length = Math.max(0.5, distance(anchor, hit.point));
-    createGrab(player, target, hit.point, length);
+    createGrab(player, target, grabDistanceFor(bundle, runtimeBody.entityIndex));
     engine.requestSave();
+  };
+
+  const updateGrab = (player: Player): void => {
+    const grab = player.grab;
+    if (!grab) return;
+    if (!stepPropGrab(engine, grab, grabPose(player))) dropGrab(player, true);
   };
 
   const tryUse = (player: Player, target: RuntimeId | null): void => {
     if (!target) return;
-    use(target, chest(player), scale(viewDirection(player.input), 3));
+    use(
+      target,
+      playerChest(player.state.position),
+      scale(playerViewDirection(player.input.lookYaw, player.input.lookPitch), 3),
+    );
   };
 
   const step = (): void => {
@@ -289,10 +286,6 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         continue;
       }
       if (player.state.crouched !== wasCrouched) {
-        if (player.grab) {
-          engine.destroyConstraint(player.grab.constraint);
-          player.grab = null;
-        }
         engine.destroyBody(player.proxy);
         player.proxy = engine.createPlayerProxy(
           player.state.position,
@@ -307,8 +300,9 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       }
       if (player.input.primaryCounter !== player.lastPrimaryCounter) {
         player.lastPrimaryCounter = player.input.primaryCounter;
-        tryGrab(player, player.input.interactTarget);
+        tryGrab(player);
       }
+      updateGrab(player);
     }
   };
 
@@ -355,7 +349,6 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     disconnect(id) {
       const resolved = resolve(id);
       if (!resolved) return false;
-      if (resolved.player.grab) engine.destroyConstraint(resolved.player.grab.constraint);
       dormant.set(resolved.player.persistentId, persistedPlayer(resolved.player));
       engine.destroyBody(resolved.player.proxy);
       resolved.slot.player = null;
@@ -434,29 +427,17 @@ function playerCapsule(crouched: boolean) {
   };
 }
 
-function chest(player: Player): Vec3 {
+function grabPose(player: Player): GrabPose {
   return {
-    x: player.state.position.x,
-    y: player.state.position.y + 0.4,
-    z: player.state.position.z,
-  };
-}
-
-function viewDirection(input: PlayerIntent): Vec3 {
-  const horizontal = Math.cos(input.lookPitch);
-  return {
-    x: -Math.sin(input.lookYaw) * horizontal,
-    y: Math.sin(input.lookPitch),
-    z: -Math.cos(input.lookYaw) * horizontal,
+    position: player.state.position,
+    yaw: player.state.yaw,
+    lookYaw: player.input.lookYaw,
+    lookPitch: player.input.lookPitch,
   };
 }
 
 function scale(value: Vec3, amount: number): Vec3 {
   return { x: value.x * amount, y: value.y * amount, z: value.z * amount };
-}
-
-function distance(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {

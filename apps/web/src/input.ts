@@ -43,8 +43,28 @@ export function createPlayerInput(
   let lookTouch: TouchState | null = null;
 
   const clearKeys = (): void => keys.clear();
+  const focusCanvas = (): void => {
+    canvas.focus({ preventScroll: true });
+  };
+  const pointerLockChanged = (): void => {
+    const locked = document.pointerLockElement === canvas;
+    document.body.dataset.pointerLocked = String(locked);
+    if (locked) focusCanvas();
+  };
+  const pointerLockFailed = (): void => {
+    document.body.dataset.pointerLocked = "false";
+    document.body.dataset.pointerLockFailed = "true";
+    focusCanvas();
+  };
   const lockPointer = (): void => {
-    void canvas.requestPointerLock();
+    focusCanvas();
+    if (document.pointerLockElement === canvas) return;
+    try {
+      const result = canvas.requestPointerLock() as Promise<void> | undefined;
+      if (result && typeof result.catch === "function") void result.catch(pointerLockFailed);
+    } catch {
+      pointerLockFailed();
+    }
   };
   const keyDown = (event: KeyboardEvent): void => {
     if (MOVEMENT_KEYS.has(event.code)) event.preventDefault();
@@ -65,11 +85,14 @@ export function createPlayerInput(
     onLook(yaw, pitch);
   };
   const mouseDown = (event: MouseEvent): void => {
-    if (document.pointerLockElement === canvas && event.button === 0) primaryCounter += 1;
+    if (event.button !== 0) return;
+    if (document.pointerLockElement === canvas) primaryCounter += 1;
+    else if (event.target === canvas) lockPointer();
   };
   const pointerDown = (event: PointerEvent): void => {
     if (event.pointerType !== "touch") return;
     event.preventDefault();
+    focusCanvas();
     try {
       canvas.setPointerCapture(event.pointerId);
     } catch {
@@ -155,12 +178,14 @@ export function createPlayerInput(
     });
   };
 
-  canvas.addEventListener("click", lockPointer);
+  document.body.dataset.pointerLocked = "false";
   addEventListener("keydown", keyDown);
   addEventListener("keyup", keyUp);
   addEventListener("blur", clearKeys);
   addEventListener("mousemove", mouseMove);
   addEventListener("mousedown", mouseDown);
+  document.addEventListener("pointerlockchange", pointerLockChanged);
+  document.addEventListener("pointerlockerror", pointerLockFailed);
   document.addEventListener("visibilitychange", visibilityChanged);
   canvas.addEventListener("pointerdown", pointerDown);
   canvas.addEventListener("pointermove", pointerMove);
@@ -184,12 +209,13 @@ export function createPlayerInput(
     },
     dispose() {
       clearInterval(timer);
-      canvas.removeEventListener("click", lockPointer);
       removeEventListener("keydown", keyDown);
       removeEventListener("keyup", keyUp);
       removeEventListener("blur", clearKeys);
       removeEventListener("mousemove", mouseMove);
       removeEventListener("mousedown", mouseDown);
+      document.removeEventListener("pointerlockchange", pointerLockChanged);
+      document.removeEventListener("pointerlockerror", pointerLockFailed);
       document.removeEventListener("visibilitychange", visibilityChanged);
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);

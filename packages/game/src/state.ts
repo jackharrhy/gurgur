@@ -35,7 +35,7 @@ export type PersistedPlayerState = {
   stepCooldown: number;
   crouched: boolean;
   grabbedAuthoredId: string | null;
-  grabLength: number;
+  grabDistance: number;
 };
 
 export type PersistedGameState = {

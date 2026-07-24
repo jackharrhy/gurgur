@@ -29,11 +29,29 @@ if (
 )
   throw new Error("authored asset manifest is invalid");
 const materialTextureUrls = Object.fromEntries(
-  Object.entries(assetManifest.materials).map(([name, url]) => {
-    if (typeof url !== "string" || !url.startsWith("/textures/")) {
-      throw new Error(`authored material texture URL is invalid: ${name}`);
-    }
-    return [name, url];
+  Object.entries(assetManifest.materials).map(([name, value]) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      typeof (value as { url?: unknown }).url !== "string" ||
+      !(value as { url: string }).url.startsWith("/textures/") ||
+      !Number.isSafeInteger((value as { width?: unknown }).width) ||
+      (value as { width: number }).width <= 0 ||
+      !Number.isSafeInteger((value as { height?: unknown }).height) ||
+      (value as { height: number }).height <= 0 ||
+      !["retro", "reality"].includes((value as { renderMode?: string }).renderMode ?? "")
+    )
+      throw new Error(`authored material texture metadata is invalid: ${name}`);
+    return [
+      name,
+      {
+        url: (value as { url: string }).url,
+        width: (value as { width: number }).width,
+        height: (value as { height: number }).height,
+        renderMode: (value as { renderMode: "retro" | "reality" }).renderMode,
+      },
+    ];
   }),
 );
 const spriteAssetUrls = Object.fromEntries(
@@ -154,9 +172,16 @@ const input = createPlayerInput(
 );
 session = new GameSession(
   {
-    status(status) {
+    status(status, close) {
       document.body.dataset.connection = status;
       document.body.dataset.ready = status === "connected" ? "true" : "false";
+      if (close) {
+        document.body.dataset.closeCode = String(close.code);
+        document.body.dataset.closeReason = close.reason;
+      } else {
+        delete document.body.dataset.closeCode;
+        delete document.body.dataset.closeReason;
+      }
     },
     welcome(message) {
       localPlayerKey = `${message.playerId.index}:${message.playerId.generation}`;
