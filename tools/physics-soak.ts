@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { PHYSICS_DT, PHYSICS_SUBSTEPS } from "../packages/shared/src";
-import { PhysicsWorld } from "../packages/physics/src";
+import { PHYSICS_DT, PHYSICS_SUBSTEPS, PhysicsWorld } from "../packages/engine/src";
 
 const churnCycles = Number(process.env.PHYSICS_CHURN_CYCLES ?? 10_000);
 const tickCount = Number(process.env.PHYSICS_SOAK_TICKS ?? 1_000_000);

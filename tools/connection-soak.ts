@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_VERSION, decodeServerControl, type WelcomeMessage } from "../packages/shared/src";
+import { PROTOCOL_VERSION, decodeServerControl, type WelcomeMessage } from "../packages/engine/src";
 import { createGurgurServer } from "../apps/server/src/server";
 
 const cycles = Number(process.env.CONNECTION_SOAK_CYCLES ?? 1_000);

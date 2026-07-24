@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadMaterialTextureAsset, loadMaterialTextureManifest } from "../src/material-textures";
+import {
+  loadAssetManifest,
+  loadMaterialTextureAsset,
+  loadMaterialTextureManifest,
+  loadSpriteAsset,
+} from "../src/material-textures";
 
 describe("authored material texture assets", () => {
   test("changes the browser URL when authored PNG bytes change", async () => {
@@ -24,11 +29,19 @@ describe("authored material texture assets", () => {
   });
 
   test("resolves only safe authored PNG paths", async () => {
-    const root = new URL("../../../content/textures/", import.meta.url);
-    expect((await loadMaterialTextureAsset(root, "/textures/GURGUR/CONCRETE.png"))?.key).toBe(
-      "GURGUR/CONCRETE",
-    );
-    expect(await loadMaterialTextureAsset(root, "/textures/GURGUR/%2e%2e/package.json")).toBeNull();
-    expect(await loadMaterialTextureAsset(root, "/textures/GURGUR/CONCRETE.jpg")).toBeNull();
+    const textureRoot = new URL("../../../content/textures/", import.meta.url);
+    const spriteRoot = new URL("../../../content/sprites/", import.meta.url);
+    const manifest = await loadAssetManifest(textureRoot, spriteRoot);
+    expect(manifest.materials["GURGUR/CONCRETE"]).toContain("/textures/");
+    expect(manifest.sprites.fern).toContain("/sprites/");
+    expect(
+      (await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/CONCRETE.png"))?.key,
+    ).toBe("GURGUR/CONCRETE");
+    expect((await loadSpriteAsset(spriteRoot, "/sprites/fern.png"))?.key).toBe("fern");
+    expect(
+      await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/%2e%2e/package.json"),
+    ).toBeNull();
+    expect(await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/CONCRETE.jpg")).toBeNull();
+    expect(await loadSpriteAsset(spriteRoot, "/sprites/%2e%2e/fern.png")).toBeNull();
   });
 });

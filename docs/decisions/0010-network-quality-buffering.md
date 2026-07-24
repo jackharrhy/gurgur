@@ -46,4 +46,4 @@ Evidence lives in the replication-cadence test in
 [`../../apps/server/test/game.test.ts`](../../apps/server/test/game.test.ts), the
 clock-aware real harness in
 [`../../tools/network-harness/src/real-harness.ts`](../../tools/network-harness/src/real-harness.ts),
-and the deterministic `bun run harness:matrix` gate.
+and the deterministic `bun run test:network -- matrix` gate.

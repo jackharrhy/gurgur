@@ -13,9 +13,12 @@ The dependency is pinned as a pair:
 - `box3d.js` commit `72491a34adcf6fc1cf562199d51b3766d5210e9d`;
 - vendored Box3D commit `8441b4a06d6d09dcfb0b0f704df4d847d1437b92`.
 
-Application code imports only Gurgur's physics adapter. The adapter exposes world,
-body, shape, constraint, query, mover, and event operations required by the game;
-raw Embind objects and Wasm views do not cross that boundary.
+Host and prediction code import Gurgur's physics adapter from `packages/engine`.
+Raw Embind objects and Wasm views do not cross that boundary. Gameplay simulation
+instead receives the narrower `GameEngine` capability: body lookup/state,
+kinematic targets, raycasts, player proxies, grab constraints, and save requests.
+It cannot step or dispose the world, construct arbitrary bodies, or extract
+debug data.
 
 The adapter's bounded debug extraction uses `b3World_Draw` only on demand. The
 installed binding emits broad-phase bounds, joint segments, and live contact
@@ -106,9 +109,12 @@ authored. Dynamic concave triangle meshes are forbidden.
 
 ## Player controller
 
-The player uses Box3D's geometric capsule mover, not a dynamic rigid body. The
-standing capsule is 1.8 m tall with a 0.35 m radius. Server and client run the
-same controller code from fixed input commands.
+The player uses Box3D's geometric capsule mover, not a dynamic rigid body.
+Player lifecycle, intent policy, interaction state, controller rules, collider
+dimensions, and tuning live in `packages/game`; the engine retains only generic
+capsule/query primitives. The standing capsule is 1.8 m tall with a 0.35 m
+radius. Server and client run the same controller code from fixed input
+commands.
 
 Each controller tick:
 

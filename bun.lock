@@ -5,8 +5,8 @@
     "": {
       "name": "gurgur",
       "dependencies": {
-        "@gurgur/entity-schema": "workspace:*",
-        "@gurgur/world-compiler": "workspace:*",
+        "@gurgur/engine": "workspace:*",
+        "@gurgur/game": "workspace:*",
         "box3d.js": "0.0.2",
         "three": "0.185.1",
         "werift": "0.23.0",
@@ -23,64 +23,27 @@
     "apps/server": {
       "name": "@gurgur/server",
       "dependencies": {
-        "@gurgur/physics": "workspace:*",
-        "@gurgur/shared": "workspace:*",
+        "@gurgur/engine": "workspace:*",
+        "@gurgur/game": "workspace:*",
       },
     },
     "apps/web": {
       "name": "@gurgur/web",
       "dependencies": {
-        "@gurgur/physics": "workspace:*",
-        "@gurgur/shared": "workspace:*",
+        "@gurgur/engine": "workspace:*",
+        "@gurgur/game": "workspace:*",
       },
     },
-    "packages/entity-schema": {
-      "name": "@gurgur/entity-schema",
-    },
-    "packages/map-format": {
-      "name": "@gurgur/map-format",
+    "packages/engine": {
+      "name": "@gurgur/engine",
       "dependencies": {
-        "@gurgur/shared": "workspace:*",
-      },
-    },
-    "packages/physics": {
-      "name": "@gurgur/physics",
-      "dependencies": {
-        "@gurgur/shared": "workspace:*",
         "box3d.js": "0.0.2",
       },
     },
-    "packages/shared": {
-      "name": "@gurgur/shared",
-    },
-    "packages/world-compiler": {
-      "name": "@gurgur/world-compiler",
+    "packages/game": {
+      "name": "@gurgur/game",
       "dependencies": {
-        "@gurgur/entity-schema": "workspace:*",
-        "@gurgur/map-format": "workspace:*",
-        "@gurgur/shared": "workspace:*",
-      },
-    },
-    "tools/compile-map": {
-      "name": "@gurgur/compile-map",
-      "dependencies": {
-        "@gurgur/entity-schema": "workspace:*",
-        "@gurgur/shared": "workspace:*",
-        "@gurgur/world-compiler": "workspace:*",
-      },
-    },
-    "tools/generate-fgd": {
-      "name": "@gurgur/generate-fgd",
-      "dependencies": {
-        "@gurgur/entity-schema": "workspace:*",
-        "@gurgur/shared": "workspace:*",
-      },
-    },
-    "tools/network-harness": {
-      "name": "@gurgur/network-harness",
-      "dependencies": {
-        "@gurgur/shared": "workspace:*",
-        "werift": "0.23.0",
+        "@gurgur/engine": "workspace:*",
       },
     },
   },
@@ -93,25 +56,13 @@
 
     "@fidm/x509": ["@fidm/x509@1.2.1", "", { "dependencies": { "@fidm/asn1": "^1.0.4", "tweetnacl": "^1.0.1" } }, "sha512-nwc2iesjyc9hkuzcrMCBXQRn653XuAUKorfWM8PZyJawiy1QzLj4vahwzaI25+pfpwOLvMzbJ0uKpWLDNmo16w=="],
 
-    "@gurgur/compile-map": ["@gurgur/compile-map@workspace:tools/compile-map"],
+    "@gurgur/engine": ["@gurgur/engine@workspace:packages/engine"],
 
-    "@gurgur/entity-schema": ["@gurgur/entity-schema@workspace:packages/entity-schema"],
-
-    "@gurgur/generate-fgd": ["@gurgur/generate-fgd@workspace:tools/generate-fgd"],
-
-    "@gurgur/map-format": ["@gurgur/map-format@workspace:packages/map-format"],
-
-    "@gurgur/network-harness": ["@gurgur/network-harness@workspace:tools/network-harness"],
-
-    "@gurgur/physics": ["@gurgur/physics@workspace:packages/physics"],
+    "@gurgur/game": ["@gurgur/game@workspace:packages/game"],
 
     "@gurgur/server": ["@gurgur/server@workspace:apps/server"],
 
-    "@gurgur/shared": ["@gurgur/shared@workspace:packages/shared"],
-
     "@gurgur/web": ["@gurgur/web@workspace:apps/web"],
-
-    "@gurgur/world-compiler": ["@gurgur/world-compiler@workspace:packages/world-compiler"],
 
     "@leichtgewicht/ip-codec": ["@leichtgewicht/ip-codec@2.0.5", "", {}, "sha512-Vo+PSpZG2/fmgmiNzYK9qWRh8h/CHrwD0mo1h1DzL4yzHNSfWYujGTYsWGreD000gcgmZ7K4Ys6Tx9TxtsKdDw=="],
 

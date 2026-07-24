@@ -18,14 +18,25 @@ describe("WorldStore", () => {
             awake: false,
           },
         ],
-        mechanisms: [
-          { authoredId: "door.1", progress: 0.4, direction: 1 as const, resumeAtTick: 0 },
-        ],
-        signals: [
-          { authoredId: "relay.1", kind: "relay" as const, readyAtTick: 0, latched: true },
-          { authoredId: "trigger.1", kind: "trigger" as const, readyAtTick: 910, latched: true },
-        ],
-        delayedSignals: [{ target: "door.1", dueTick: 920 }],
+        gameState: {
+          entities: [
+            {
+              kind: "linear-mover" as const,
+              authoredId: "door.1",
+              progress: 0.4,
+              direction: 1 as const,
+              resumeAtTick: 0,
+            },
+            { authoredId: "relay.1", kind: "relay" as const, fired: true },
+            {
+              authoredId: "trigger.1",
+              kind: "trigger" as const,
+              readyAtTick: 910,
+              consumed: true,
+            },
+          ],
+          delayedSignals: [{ target: "door.1", dueTick: 920 }],
+        },
         players: [
           {
             persistentId: "session-hash",
@@ -64,9 +75,7 @@ describe("WorldStore", () => {
           awake: true,
         },
       ],
-      mechanisms: [],
-      signals: [],
-      delayedSignals: [],
+      gameState: { entities: [], delayedSignals: [] },
       players: [],
     };
     try {

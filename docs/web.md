@@ -38,8 +38,8 @@ apps/web/
 owns predicted physics. `session.ts` owns network state. `renderer.ts` owns
 Three.js objects and `requestAnimationFrame`. The shipped play page contains only
 the world canvas: no HUD, reticle, visible cursor, caption, or control overlay.
-Non-rendered `data-*` attributes expose browser-smoke diagnostics without becoming
-player interface.
+`?test` enables a generic read-only diagnostic object for browser automation;
+ordinary play does not expose entity-specific instrumentation.
 
 ## Three.js lifecycle
 
@@ -76,7 +76,8 @@ controlled software-renderer instability without sacrificing texture mip levels.
 Large concrete and stone surfaces use deterministic irregular aggregate instead
 of periodic line grids, preventing grazing-angle moire without smoothing away the
 pixel texture language.
-Water, caution, danger, and platform materials animate UVs in TSL; water combines
+Authored sky color sets both scene background and fog. Water, caution, danger,
+and platform materials animate UVs in TSL; water combines
 two independently moving translucent samples and a slow palette pulse. Decorative
 `env_sprite` point entities and player sprites are camera-facing pixel billboards.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
@@ -90,12 +91,15 @@ interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls the current authoritative Box3D debug frame at 10 Hz and draws
 broad-phase bounds, joints, and contact points above the scene. The overlay is
 diagnostic only and does not replace authoritative server interaction validation.
-The player billboard source is a committed Blender scene sized to the authoritative
+Sprite presentation consumes only `PresentationSpec` and the hashed logical
+sprite manifest; it never compares mapper classnames. The player billboard source
+is a committed Blender scene sized to the authoritative
 player collider. A code-defined 120-view latitude-ring rig covers camera elevation
-from -75 through +75 degrees without oversampling the poles. `bun run
-setup:player-harness` rebuilds that rig in the saved scene; `bun run render:player`
-runs it headlessly and emits reproducible views, a texture atlas, and metadata
-under `content/generated/`. The presentation layer rotates the live 3D
+from -75 through +75 degrees without oversampling the poles.
+`bun run content -- setup-player-harness` rebuilds that rig in the saved scene;
+`bun run content -- render-player` runs it headlessly and emits reproducible
+views, a texture atlas, and metadata under `content/generated/`. The presentation
+layer rotates the live 3D
 player-to-camera vector into player-local space and selects the authored view with
 the greatest dot product. The sprite quad is centered on the authoritative capsule
 pose and uses the bake camera's exact orthographic dimensions.
@@ -112,19 +116,19 @@ interaction rays, map geometry, and network transforms remain full precision.
 
 The server exposes a deliberately small surface:
 
-| Route                                     | Purpose                             |
-| ----------------------------------------- | ----------------------------------- |
-| `/` and SPA fallback                      | browser application                 |
-| `/game`                                   | control/signaling WebSocket upgrade |
-| `/healthz`                                | process and event-loop health       |
-| `/readyz`                                 | map, Box3D, and SQLite readiness    |
-| `/metrics`                                | simulation and send-queue metrics   |
-| `/debug/physics`                          | bounded current Box3D debug frame   |
-| `/world.bin`                              | immutable compiled map bundle       |
-| `/box3d.wasm` and `/prediction-worker.js` | prediction runtime assets           |
-| `/player-billboard.png`                   | generated directional player atlas  |
-| `/textures.json` and `/textures/*`        | hashed authored material textures   |
-| `/admin/reset`                            | authenticated world reset request   |
+| Route                                       | Purpose                                |
+| ------------------------------------------- | -------------------------------------- |
+| `/` and SPA fallback                        | browser application                    |
+| `/game`                                     | control/signaling WebSocket upgrade    |
+| `/healthz`                                  | process and event-loop health          |
+| `/readyz`                                   | map, Box3D, and SQLite readiness       |
+| `/metrics`                                  | simulation and send-queue metrics      |
+| `/debug/physics`                            | bounded current Box3D debug frame      |
+| `/world.bin`                                | immutable compiled map bundle          |
+| `/box3d.wasm` and `/prediction-worker.js`   | prediction runtime assets              |
+| `/player-billboard.png`                     | generated directional player atlas     |
+| `/assets.json`, `/textures/*`, `/sprites/*` | hashed authored material/sprite assets |
+| `/admin/reset`                              | authenticated world reset request      |
 
 Browser assets and gameplay share an origin, so no application CORS layer is
 required. Administrative authorization remains server-side and never trusts UI

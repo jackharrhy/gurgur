@@ -148,7 +148,7 @@ from buffered authoritative history.
 
 ## Protocol and connection lifecycle
 
-Protocol version 2 has exact bounded JSON control unions and explicit
+Protocol version 1 has exact bounded JSON control unions and explicit
 little-endian binary codecs. `mapRevision`, `worldEpoch`, runtime identity, and
 protocol version remain separate:
 
@@ -156,6 +156,12 @@ protocol version remain separate:
 - WebSocket carries hello/welcome, world manifest, lifecycle, reset,
   ping/pong, WebRTC signaling, and the initial complete snapshot;
 - WebRTC carries disposable input and current state datagrams.
+
+World lifecycle records identify runtime actors only by source tag, runtime
+index/generation, and immutable compiled `entityIndex`; players use the reserved
+player sentinel. They never carry mapper classnames, authored IDs, strings, or
+brush lists. Multiple harness-created bodies may intentionally share one compiled
+entity index.
 
 The browser may temporarily send binary input on WebSocket while WebRTC
 negotiates. State never falls back to an ordered reliable stream; a peer that
@@ -171,8 +177,8 @@ epoch boundary.
 ## Gameplay transport
 
 The same Bun process terminates HTTP/WebSocket and a `werift@0.23.0` WebRTC peer
-per client. The client creates `gurgur-input-v2` as unordered with no
-retransmissions. The server creates `gurgur-state-v2` as unordered with at most
+per client. The client creates `gurgur-input-v1` as unordered with no
+retransmissions. The server creates `gurgur-state-v1` as unordered with at most
 one retransmission. Creating a channel at its sender is mandatory: partial
 reliability is a sender policy.
 

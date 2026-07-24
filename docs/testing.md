@@ -44,12 +44,12 @@ proxies, but player contact cannot apply local rigid-body motion to them.
 
 Browser scenarios run the actual Bun server, WebSocket signaling, WebRTC data
 channels, codecs, prediction worker, Box3D Wasm, Three.js renderer, and input
-path. `smoke:dynamic` covers moving support, `smoke:push` covers visible prop
-response under shaped latency, `smoke:latency` covers held input, and the other
-smokes cover grab, touch, gamepad, reconnect, and ordinary movement. The grab
-smoke enables the general `?debug` view and requires a non-empty authoritative
-Box3D debug frame, covering the server callback, JSON route, browser polling, and
-Three.js overlay together.
+path. `test:browser -- dynamic` covers moving support, `-- push` covers visible
+prop response under shaped latency, `-- latency` covers held input, and the other
+scenarios cover grab, touch, gamepad, reconnect, and ordinary movement. Browser
+automation appends `?test`; the grab scenario also enables the general `?debug`
+view and requires a non-empty authoritative Box3D debug frame, covering the server
+callback, JSON route, browser polling, and Three.js overlay together.
 
 ## Multiplayer harness
 
@@ -129,13 +129,10 @@ never a weakened assertion hidden in a test.
 
 ```sh
 bun run check
-bun run harness:network
-bun run harness:matrix
-bun run smoke:browser
-bun run smoke:latency
-bun run smoke:dynamic
-bun run smoke:push
-bun run soak:physics
-bun run soak:connections
-bun run soak:persistence
+bun run test:network -- single
+bun run test:network -- matrix --quick
+bun run test:browser -- all
+bun run soak -- physics
+bun run soak -- connections
+bun run soak -- persistence
 ```

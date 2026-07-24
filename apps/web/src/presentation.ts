@@ -1,4 +1,4 @@
-import { PHYSICS_DT, type BodySnapshot, type Quat, type Vec3 } from "@gurgur/shared";
+import { PHYSICS_DT, type BodySnapshot, type Quat, type Vec3 } from "@gurgur/engine";
 
 const FRAME_MILLISECONDS = PHYSICS_DT * 1_000;
 const TELEPORT_METRES = 0.75;

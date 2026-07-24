@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
-import type { BodySnapshot, InputCommand, RuntimeId, Snapshot, WorldMessage } from "@gurgur/shared";
+import type { BodySnapshot, InputCommand, RuntimeId, Snapshot } from "@gurgur/engine";
+import type { WorldMessage } from "@gurgur/game";
 import { PlayerPredictor } from "./prediction";
 
 type WorkerRequest =

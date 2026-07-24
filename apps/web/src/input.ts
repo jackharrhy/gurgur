@@ -1,4 +1,4 @@
-import { PHYSICS_HZ, PROTOCOL_VERSION, type InputCommand } from "@gurgur/shared";
+import { PHYSICS_HZ, PROTOCOL_VERSION, type InputCommand } from "@gurgur/engine";
 
 const MOVEMENT_KEYS = new Set([
   "KeyW",

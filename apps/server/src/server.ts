@@ -25,7 +25,6 @@ import {
   decodeInputBundle,
   decodeClientControl,
   encodeLifecycle,
-  encodeWorldBundle,
   encodeSnapshot,
   type InputCommand,
   type RuntimeId,
@@ -34,12 +33,11 @@ import {
   type Vec3,
   type WelcomeMessage,
   type ClientControlMessage,
-  type WorldBundle,
-  type WorldMessage,
   type WorldManifestMessage,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
+import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/game";
 import { AuthoritativeGame } from "./game";
-import { loadMaterialTextureAsset, loadMaterialTextureManifest } from "./material-textures";
+import { loadAssetManifest, loadMaterialTextureAsset, loadSpriteAsset } from "./material-textures";
 import { WorldStore } from "./store";
 import { guardIceUdpSockets } from "./rtc";
 
@@ -142,6 +140,7 @@ export async function createGurgurServer(
   if (!(await playerBillboard.exists()))
     throw new Error("missing generated player billboard; run bun run render:player");
   const materialTextureRoot = new URL("../../../content/textures/", import.meta.url);
+  const spriteRoot = new URL("../../../content/sprites/", import.meta.url);
   const store = new WorldStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "./data/gurgur.sqlite",
   );
@@ -221,7 +220,9 @@ export async function createGurgurServer(
   const worldBundleBytes = encodeWorldBundle(game.worldMessage().bundle);
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
   let physicsDebugCache: { serverTick: number; body: string } | null = null;
-  const physicsDebugResponse = (): Response => {
+  const physicsDebugResponse = (request: Request): Response => {
+    if (new URL(request.url).searchParams.get("test") !== "1")
+      return new Response("not found", { status: 404 });
     if (physicsDebugCache?.serverTick !== game.serverTick) {
       physicsDebugCache = {
         serverTick: game.serverTick,
@@ -281,7 +282,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v2", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v1", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -312,7 +313,7 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-input-v2" && !socket.data.inputChannel) {
+      if (channel.label === "gurgur-input-v1" && !socket.data.inputChannel) {
         socket.data.inputChannel = channel;
         channel.onMessage.subscribe((packet) => {
           if (typeof packet === "string" || !acceptInputPacket(socket, packet))
@@ -368,9 +369,9 @@ export async function createGurgurServer(
           "cache-control": "public, max-age=31536000, immutable",
         },
       }),
-      "/textures.json": {
+      "/assets.json": {
         async GET(request: Request) {
-          const manifest = await loadMaterialTextureManifest(materialTextureRoot);
+          const manifest = await loadAssetManifest(materialTextureRoot, spriteRoot);
           const headers = {
             "cache-control": "no-cache",
             "content-type": "application/json",
@@ -379,7 +380,10 @@ export async function createGurgurServer(
           if (request.headers.get("if-none-match") === manifest.etag) {
             return new Response(null, { status: 304, headers });
           }
-          return Response.json(manifest.textures, { headers });
+          return Response.json(
+            { materials: manifest.materials, sprites: manifest.sprites },
+            { headers },
+          );
         },
       },
       "/textures/*": {
@@ -387,6 +391,25 @@ export async function createGurgurServer(
           const url = new URL(request.url);
           const asset = await loadMaterialTextureAsset(materialTextureRoot, url.pathname);
           if (!asset) return new Response("texture not found", { status: 404 });
+          if (url.searchParams.get("v") !== asset.hash) {
+            url.search = "";
+            url.searchParams.set("v", asset.hash);
+            return Response.redirect(url, 307);
+          }
+          return new Response(asset.file, {
+            headers: {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "image/png",
+              etag: `"${asset.hash}"`,
+            },
+          });
+        },
+      },
+      "/sprites/*": {
+        async GET(request: Request) {
+          const url = new URL(request.url);
+          const asset = await loadSpriteAsset(spriteRoot, url.pathname);
+          if (!asset) return new Response("sprite not found", { status: 404 });
           if (url.searchParams.get("v") !== asset.hash) {
             url.search = "";
             url.searchParams.set("v", asset.hash);

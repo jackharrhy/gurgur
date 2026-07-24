@@ -1,0 +1,11 @@
+{
+  "name": "@gurgur/engine",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "box3d.js": "0.0.2"
+  }
+}

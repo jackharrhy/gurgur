@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Snapshot } from "@gurgur/shared";
+import type { Snapshot } from "@gurgur/engine";
 import { createSnapshotTimeline } from "../src/interpolation";
 
 function snapshot(tick: number, y: number, epoch = 1, velocityY = 0, flags = 0): Snapshot {

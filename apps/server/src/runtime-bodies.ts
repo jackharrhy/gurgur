@@ -1,9 +1,17 @@
-import type { BodyKind, PhysicsWorld } from "@gurgur/physics";
-import type { RuntimeEntity, RuntimeId, WorldBundle } from "@gurgur/shared";
+import type { BodyKind, PhysicsWorld, RuntimeEntityRef, RuntimeId } from "@gurgur/engine";
+import type { WorldBundle } from "@gurgur/game";
 import type { PersistedWorld } from "./store";
 
-type PhysicalRuntimeEntity = Extract<RuntimeEntity, { brushIndex: number }>;
-export type RuntimeBody = PhysicalRuntimeEntity & { handle: RuntimeId };
+export type RuntimeBody = {
+  handle: RuntimeId;
+  id: RuntimeId;
+  entityIndex: number;
+  authoredId: string;
+};
+
+export function runtimeBodyRef(body: RuntimeBody): RuntimeEntityRef {
+  return { id: body.id, kind: "world-entity", entityIndex: body.entityIndex };
+}
 
 export function createRuntimeBodies(
   physics: PhysicsWorld,
@@ -24,68 +32,74 @@ function createAuthoredBodies(
   const bodies: RuntimeBody[] = [];
   const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
   for (const [entityIndex, entity] of bundle.entities.entries()) {
-    if (
-      entity.classname !== "func_physics" &&
-      entity.classname !== "func_door" &&
-      entity.classname !== "func_platform" &&
-      entity.classname !== "func_button"
-    )
+    const spec = entity.body;
+    if (!spec) continue;
+    if (spec.brushIndices.length === 0)
+      throw new Error(`world entity ${entityIndex} must have at least one brush`);
+    const authoredId = entity.authoredId ?? `transient.entity.${entityIndex}`;
+    const firstBrush = bundle.brushes[spec.brushIndices[0]!]!;
+    const saved = restoredById.get(authoredId);
+    const authoredPosition =
+      entity.kind === "linear-mover" && entity.startOpen
+        ? {
+            x: firstBrush.center.x + entity.moveDirection.x * entity.distance,
+            y: firstBrush.center.y + entity.moveDirection.y * entity.distance,
+            z: firstBrush.center.z + entity.moveDirection.z * entity.distance,
+          }
+        : firstBrush.center;
+    if (spec.kind === "sensor-brush") {
+      if (spec.brushIndices.length !== 1)
+        throw new Error(`sensor entity ${entityIndex} must use exactly one brush`);
+      const handle = physics.createSensorHull({
+        position: { x: 0, y: 0, z: 0 },
+        vertices: firstBrush.worldVertices,
+      });
+      bodies.push({ handle, id: handle, entityIndex, authoredId });
       continue;
-    if (!entity.authoredId || entity.brushIndices.length === 0) {
-      throw new Error(
-        `physical map entity ${entityIndex} must have at least one brush and an authoredId`,
-      );
     }
-    const brushIndex = entity.brushIndices[0]!;
-    const brush = bundle.brushes[brushIndex]!;
     const type: BodyKind =
-      entity.classname === "func_physics"
+      spec.kind === "dynamic-brush"
         ? "dynamic"
-        : entity.classname === "func_button"
-          ? "static"
-          : "kinematic";
-    const material = {
-      density: Number(entity.runtimeProperties.density ?? 1),
-      friction: Number(entity.runtimeProperties.friction ?? 0.6),
-      restitution: Number(entity.runtimeProperties.restitution ?? 0),
-    };
-    const saved = restoredById.get(entity.authoredId);
-    const hulls = entity.brushIndices.map((index) => ({
+        : spec.kind === "kinematic-brush"
+          ? "kinematic"
+          : "static";
+    const material =
+      spec.kind === "dynamic-brush"
+        ? {
+            density: spec.density,
+            friction: spec.friction,
+            restitution: spec.restitution,
+          }
+        : {};
+    const hulls = spec.brushIndices.map((index) => ({
       vertices: bundle.brushes[index]!.worldVertices.map((vertex) => ({
-        x: vertex.x - brush.center.x,
-        y: vertex.y - brush.center.y,
-        z: vertex.z - brush.center.z,
+        x: vertex.x - firstBrush.center.x,
+        y: vertex.y - firstBrush.center.y,
+        z: vertex.z - firstBrush.center.z,
       })),
     }));
     const handle =
-      entity.brushIndices.length === 1
+      spec.brushIndices.length === 1
         ? saved
-          ? physics.restoreHull({ type, vertices: brush.localVertices, ...material, ...saved })
+          ? physics.restoreHull({ type, vertices: firstBrush.localVertices, ...material, ...saved })
           : physics.createHull({
               type,
-              position: brush.center,
-              vertices: brush.localVertices,
+              position: authoredPosition,
+              vertices: firstBrush.localVertices,
               ...material,
             })
         : physics.createCompoundHulls({
             type,
-            position: saved?.position ?? brush.center,
+            position: saved?.position ?? authoredPosition,
             rotation: saved?.rotation,
             hulls,
             ...material,
           });
-    if (saved && entity.brushIndices.length > 1) {
+    if (saved && spec.brushIndices.length > 1) {
       physics.setBodyVelocity(handle, saved.linearVelocity, saved.angularVelocity);
       physics.setBodyAwake(handle, saved.awake);
     }
-    bodies.push({
-      handle,
-      id: handle,
-      authoredId: entity.authoredId,
-      classname: entity.classname,
-      brushIndex,
-      ...(entity.brushIndices.length > 1 ? { brushIndices: [...entity.brushIndices] } : {}),
-    });
+    bodies.push({ handle, id: handle, entityIndex, authoredId });
   }
   return bodies;
 }
@@ -96,16 +110,16 @@ function createStressBodies(
   restored: PersistedWorld | null,
   count: number,
 ): RuntimeBody[] {
-  if (!Number.isInteger(count) || count < 0 || count > 512) {
+  if (!Number.isInteger(count) || count < 0 || count > 512)
     throw new Error("extra dynamic body count must be between 0 and 512");
-  }
   if (count === 0) return [];
-  const templateEntity = bundle.entities.find((entity) => entity.classname === "func_physics");
-  const brushIndex = templateEntity?.brushIndices[0];
-  const brush = brushIndex === undefined ? null : bundle.brushes[brushIndex];
-  if (!templateEntity || brushIndex === undefined || !brush) {
+  const entityIndex = bundle.entities.findIndex((entity) => entity.kind === "physics-prop");
+  const templateEntity = bundle.entities[entityIndex];
+  if (!templateEntity || templateEntity.kind !== "physics-prop")
     throw new Error("dynamic stress-body template is missing");
-  }
+  const brushIndex = templateEntity.body.brushIndices[0];
+  const brush = brushIndex === undefined ? null : bundle.brushes[brushIndex];
+  if (!brush) throw new Error("dynamic stress-body template brush is missing");
   const restoredById = new Map(restored?.bodies.map((body) => [body.authoredId, body]));
   return Array.from({ length: count }, (_, index) => {
     const authoredId = `stress.dynamic.${index.toString().padStart(3, "0")}`;
@@ -119,15 +133,19 @@ function createStressBodies(
       ? physics.restoreHull({
           type: "dynamic",
           vertices: brush.localVertices,
-          density: 1,
+          density: templateEntity.body.density,
+          friction: templateEntity.body.friction,
+          restitution: templateEntity.body.restitution,
           ...saved,
         })
       : physics.createHull({
           type: "dynamic",
           position,
           vertices: brush.localVertices,
-          density: 1,
+          density: templateEntity.body.density,
+          friction: templateEntity.body.friction,
+          restitution: templateEntity.body.restitution,
         });
-    return { id: handle, handle, authoredId, classname: "func_physics", brushIndex };
+    return { id: handle, handle, authoredId, entityIndex };
   });
 }

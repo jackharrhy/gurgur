@@ -7,14 +7,17 @@ authored world truth. Maps contain geometry, materials, entity instances, and
 authored defaults. The TypeScript schema defines legal classnames, properties,
 types, defaults, and runtime construction behavior.
 
-Material PNGs under `content/textures` are authored assets. Generated meshes,
-collision data, FGD files, TrenchBroom game configuration, and runtime bundles are
-reproducible build artifacts. They are never edited by hand.
+Material PNGs under `content/textures` and decorative PNGs under
+`content/sprites` are authored assets. Sprite names are validated extensionless
+logical IDs. Generated meshes, collision data, FGD files, TrenchBroom game
+configuration, manifests, and runtime bundles are reproducible build artifacts.
+They are never edited by hand.
 
 ## TrenchBroom setup
 
-Run `bun run setup:trenchbroom` after cloning or whenever the entity schema or
-game configuration changes. The command regenerates the FGD and game
+Run `bun run content -- setup` after cloning or whenever the entity schema or
+game configuration changes. The command first performs `content -- compile`,
+then installs the generated FGD and game
 configuration, validates the authored material collection, installs the game
 configuration in the current operating system's TrenchBroom user-data directory,
 and configures this repository's `content` directory as the Gurgur game path
@@ -76,9 +79,10 @@ One source map compiles into one immutable world bundle containing:
 
 - material-grouped Three.js vertex/index/UV/normal buffers;
 - Box3D static indexed-mesh data and convex data for moving brushes;
-- typed runtime entity definitions and authored defaults;
-- spawn points and persistent `authoredId` values;
-- source-to-generated diagnostic tables;
+- typed game entities with explicit body, presentation, and interaction
+  capabilities;
+- world settings, uniquely named player spawns, reset markers, and persistent
+  `authoredId` values;
 - a SHA-256 `mapRevision`.
 
 Serialization uses a v1 binary envelope with deterministic, unversioned sections.
@@ -109,19 +113,28 @@ configuration. The authoritative server constructs the corresponding runtime
 registries from the validated compiled entities. Properties are typed and
 composable; arbitrary mapper scripts and runtime code strings are forbidden.
 
+Compilation requires exactly one `worldspawn`, at least one uniquely named
+player spawn, and exactly one spawn named `default`. Authored gravity drives
+authoritative and predicted physics/controller behavior; authored sky color
+drives renderer background and fog. Every `target` must resolve, while multiple
+recipients may intentionally share a `targetname`.
+
 Every entity whose state can persist requires a unique explicit `authoredId`.
 Compilation fails on missing or duplicate persistent IDs. Entity order, line
 number, and runtime network identity are never persistence keys.
 
-The `compile:map` authoring entrypoint assigns UUID-backed `authoredId` values to
+The `bun run content -- compile` entrypoint assigns UUID-backed `authoredId` values to
 new persistent entities that TrenchBroom created without one and atomically writes
 them into the source map before compiling. The compiler API remains strict: a map
 passed directly to `compileWorld` must already contain complete, unique IDs. This
 keeps generated identity persistent without making entity order or geometry an
 implicit persistence key.
 
-The executable base schema lives in `packages/entity-schema`. It is the source
-for compiler validation and the generated `content/trenchbroom/Gurgur.fgd`.
+The executable catalog lives in `packages/game/src/entities.ts`; the compiled
+gameplay union and strict decoder live in `packages/game/src/world.ts`. They are
+the source for compiler validation and the generated
+`content/trenchbroom/Gurgur.fgd`. Mapper classnames and raw map properties do not
+enter the runtime bundle; source identity survives only in compiler diagnostics.
 Mechanisms use typed `targetname`/`target` signal links. Doors and platforms use
 map-space `moveDirection`, map-unit `distance` and `speed`, endpoint `wait`, and
 `startOpen`. Dynamic bodies author density, friction, and restitution. Relays

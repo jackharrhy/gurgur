@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { PLAYER_CAPSULE_RADIUS, PLAYER_HALF_HEIGHT } from "@gurgur/physics";
-import { compileWorld } from "@gurgur/world-compiler";
+import { PLAYER_CAPSULE_RADIUS, PLAYER_HALF_HEIGHT, compileWorld } from "@gurgur/game";
 import {
   PHYSICS_DT,
   PROTOCOL_VERSION,
   SNAPSHOT_INTERVAL_TICKS,
   type InputCommand,
   type Snapshot,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
 import { PlayerPredictor } from "../../web/src/prediction";
 import { AuthoritativeGame } from "../src/game";
 import { WorldStore } from "../src/store";
@@ -34,9 +33,13 @@ describe("server-authoritative props with player-only prediction", () => {
       const playerId = game.connectPlayer("prediction-fixture");
       const box = game
         .worldMessage()
-        .runtimeEntities.find((entity) => entity.authoredId === "fixture.push")!;
+        .runtimeEntities.find(
+          (runtime) =>
+            runtime.kind === "world-entity" &&
+            bundle.entities[runtime.entityIndex]?.authoredId === "fixture.push",
+        )!;
       const boxEntity = bundle.entities.find((entity) => entity.authoredId === "fixture.push")!;
-      const boxBrush = bundle.brushes[boxEntity.brushIndices[0]!]!;
+      const boxBrush = bundle.brushes[boxEntity.body!.brushIndices[0]!]!;
       const boxHalfX = Math.max(...boxBrush.localVertices.map((vertex) => Math.abs(vertex.x)));
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(game.worldMessage());
@@ -98,7 +101,7 @@ describe("server-authoritative props with player-only prediction", () => {
       "network-push-corridor.map",
     );
     const boxEntity = bundle.entities.find((entity) => entity.authoredId === "corridor.light")!;
-    const boxBrush = bundle.brushes[boxEntity.brushIndices[0]!]!;
+    const boxBrush = bundle.brushes[boxEntity.body!.brushIndices[0]!]!;
     const boxHalfX = Math.max(...boxBrush.localVertices.map((vertex) => Math.abs(vertex.x)));
     const store = new WorldStore(":memory:");
     const game = await AuthoritativeGame.create(
@@ -120,7 +123,11 @@ describe("server-authoritative props with player-only prediction", () => {
       const playerId = game.connectPlayer("bidirectional-latency-fixture");
       const box = game
         .worldMessage()
-        .runtimeEntities.find((entity) => entity.authoredId === "corridor.light")!;
+        .runtimeEntities.find(
+          (runtime) =>
+            runtime.kind === "world-entity" &&
+            bundle.entities[runtime.entityIndex]?.authoredId === "corridor.light",
+        )!;
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(game.worldMessage());
       predictor.reconcile(game.snapshot());
@@ -167,7 +174,7 @@ describe("server-authoritative props with player-only prediction", () => {
     const upperEntity = bundle.entities.find(
       (entity) => entity.authoredId === "fixture.stack.upper",
     )!;
-    const upperBrush = bundle.brushes[upperEntity.brushIndices[0]!]!;
+    const upperBrush = bundle.brushes[upperEntity.body!.brushIndices[0]!]!;
     const localTop = Math.max(...upperBrush.localVertices.map((vertex) => vertex.y));
     const store = new WorldStore(":memory:");
     const game = await AuthoritativeGame.create(
@@ -189,7 +196,11 @@ describe("server-authoritative props with player-only prediction", () => {
       const playerId = game.connectPlayer("stack-fixture");
       const upper = game
         .worldMessage()
-        .runtimeEntities.find((entity) => entity.authoredId === "fixture.stack.upper")!;
+        .runtimeEntities.find(
+          (runtime) =>
+            runtime.kind === "world-entity" &&
+            bundle.entities[runtime.entityIndex]?.authoredId === "fixture.stack.upper",
+        )!;
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(game.worldMessage());
       predictor.reconcile(game.snapshot());

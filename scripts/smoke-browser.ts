@@ -8,9 +8,9 @@ import {
   PLAYER_CAPSULE_HALF_SEGMENT,
   PLAYER_CAPSULE_RADIUS,
   PLAYER_HALF_HEIGHT,
-} from "../packages/physics/src/index";
-import type { WorldBundle } from "../packages/shared/src/index";
-import { compileWorld } from "../packages/world-compiler/src/index";
+} from "../packages/game/src/controller";
+import type { WorldBundle } from "../packages/game/src/index";
+import { compileWorld } from "../packages/game/src/index";
 
 const directory = process.env.GURGUR_URL ? null : await mkdtemp(join(tmpdir(), "gurgur-browser-"));
 const scenario = process.env.SMOKE_SCENARIO ?? "movement";
@@ -26,13 +26,11 @@ const bundle = interactionScenario
     )
   : (worldBundleJson as unknown as WorldBundle);
 const heavyEntity = bundle.entities.find(
-  (entity) =>
-    entity.classname === "func_physics" &&
-    Boolean(entity.authoredId) &&
-    entity.brushIndices.length === 1,
+  (entity) => entity.kind === "physics-prop" && entity.body.brushIndices.length === 1,
 );
+const heavyEntityIndex = heavyEntity ? bundle.entities.indexOf(heavyEntity) : -1;
 const heavyBrush =
-  heavyEntity?.brushIndices.length === 1 ? bundle.brushes[heavyEntity.brushIndices[0]!] : null;
+  heavyEntity?.kind === "physics-prop" ? bundle.brushes[heavyEntity.body.brushIndices[0]!] : null;
 if (interactionScenario && !heavyBrush)
   throw new Error("Systems Garden physics-prop fixture is missing");
 const playerSpawn = heavyBrush
@@ -74,6 +72,7 @@ const server: GurgurServer | null = directory
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
 const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
 if (simulatedLatencyMs > 0) url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
+if (process.env.GURGUR_TEST_MODE === "1") url.searchParams.set("test", "1");
 if (scenario === "grab") url.searchParams.set("debug", "1");
 const browser = await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
@@ -179,18 +178,29 @@ try {
   if (scenario === "dynamic-push") {
     const cubeHalfX = Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.x)));
     await page.waitForFunction(
-      () => {
+      (entityIndex) => {
         const playerX = Number(document.body.dataset.renderedX);
-        const cubeX = Number(document.body.dataset.renderedHeavyCubeX);
+        const cubeX = (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                rendered?: { position: { x: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.rendered?.position.x;
         return (
-          Number.isFinite(playerX) && Number.isFinite(cubeX) && Math.abs(cubeX - playerX) > 0.1
+          Number.isFinite(playerX) && Number.isFinite(cubeX) && Math.abs(cubeX! - playerX) > 0.1
         );
       },
-      null,
+      heavyEntityIndex,
       { timeout: 5_000 },
     );
     const samples = page.evaluate(
-      () =>
+      (entityIndex) =>
         new Promise<
           Array<{
             player: { x: number; y: number; z: number };
@@ -211,24 +221,40 @@ try {
           }> = [];
           const started = performance.now();
           const sample = (now: number): void => {
+            const diagnostic = (
+              window as unknown as {
+                __gurgurDiagnostics: {
+                  bodies(): Array<{
+                    entityIndex: number;
+                    predicted?: { position: { x: number } };
+                    rendered?: {
+                      position: { x: number; y: number; z: number };
+                      rotation: { x: number; y: number; z: number; w: number };
+                    };
+                  }>;
+                };
+              }
+            ).__gurgurDiagnostics
+              .bodies()
+              .find((body) => body.entityIndex === entityIndex);
             values.push({
               player: {
                 x: Number(document.body.dataset.renderedX),
                 y: Number(document.body.dataset.renderedY),
                 z: Number(document.body.dataset.renderedZ),
               },
-              predictedCubeX: Number(document.body.dataset.predictedHeavyCubeX),
+              predictedCubeX: diagnostic?.predicted?.position.x ?? Number.NaN,
               cube: {
-                position: {
-                  x: Number(document.body.dataset.renderedHeavyCubeX),
-                  y: Number(document.body.dataset.renderedHeavyCubeY),
-                  z: Number(document.body.dataset.renderedHeavyCubeZ),
+                position: diagnostic?.rendered?.position ?? {
+                  x: Number.NaN,
+                  y: Number.NaN,
+                  z: Number.NaN,
                 },
-                rotation: {
-                  x: Number(document.body.dataset.renderedHeavyCubeQx),
-                  y: Number(document.body.dataset.renderedHeavyCubeQy),
-                  z: Number(document.body.dataset.renderedHeavyCubeQz),
-                  w: Number(document.body.dataset.renderedHeavyCubeQw),
+                rotation: diagnostic?.rendered?.rotation ?? {
+                  x: Number.NaN,
+                  y: Number.NaN,
+                  z: Number.NaN,
+                  w: Number.NaN,
                 },
               },
             });
@@ -237,8 +263,25 @@ try {
           };
           requestAnimationFrame(sample);
         }),
+      heavyEntityIndex,
     );
-    const cubeStartX = Number(await page.evaluate(() => document.body.dataset.heavyCubeX));
+    const cubeStartX = await page.evaluate(
+      (entityIndex) =>
+        (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                authoritative?: { position: { x: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.authoritative?.position.x ??
+        Number.NaN,
+      heavyEntityIndex,
+    );
     await page.keyboard.down("d");
     const presented = await samples;
     await page.keyboard.up("d");
@@ -283,8 +326,24 @@ try {
     }
   } else if (scenario === "dynamic-landing") {
     await page.waitForFunction(
-      (halfHeight) => {
-        const supportY = Number(document.body.dataset.heavyCubeTopY) + halfHeight;
+      ({ halfHeight, entityIndex }) => {
+        const body = (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                localTop: number;
+                authoritative?: { position: { y: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((candidate) => candidate.entityIndex === entityIndex);
+        const supportY =
+          (body?.authoritative?.position.y ?? Number.NaN) +
+          (body?.localTop ?? Number.NaN) +
+          halfHeight;
         const authoritativeY = Number(document.body.dataset.playerY);
         const predictedY = Number(document.body.dataset.predictedY);
         return (
@@ -293,7 +352,7 @@ try {
           Math.abs(predictedY - supportY) < 0.09
         );
       },
-      PLAYER_HALF_HEIGHT,
+      { halfHeight: PLAYER_HALF_HEIGHT, entityIndex: heavyEntityIndex },
       { timeout: 5_000 },
     );
     const supportY = Number(await page.evaluate(() => document.body.dataset.predictedY));
@@ -303,14 +362,34 @@ try {
       supportY,
     );
     await page.waitForFunction(
-      ({ halfHeight, jumpedFrom }) => {
-        const target = Number(document.body.dataset.heavyCubeTopY) + halfHeight;
+      ({ halfHeight, jumpedFrom, entityIndex }) => {
+        const body = (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                localTop: number;
+                authoritative?: { position: { y: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((candidate) => candidate.entityIndex === entityIndex);
+        const target =
+          (body?.authoritative?.position.y ?? Number.NaN) +
+          (body?.localTop ?? Number.NaN) +
+          halfHeight;
         return (
           Number(document.body.dataset.predictedY) < jumpedFrom + 0.05 &&
           Math.abs(Number(document.body.dataset.playerY) - target) < 0.1
         );
       },
-      { halfHeight: PLAYER_HALF_HEIGHT, jumpedFrom: supportY },
+      {
+        halfHeight: PLAYER_HALF_HEIGHT,
+        jumpedFrom: supportY,
+        entityIndex: heavyEntityIndex,
+      },
       { timeout: 4_000 },
     );
   } else if (scenario === "grab") {
@@ -327,7 +406,23 @@ try {
       null,
       { timeout: 5_000 },
     );
-    const beforeZ = Number(await page.evaluate(() => document.body.dataset.heavyCubeZ));
+    const beforeZ = await page.evaluate(
+      (entityIndex) =>
+        (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                authoritative?: { position: { z: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.authoritative?.position.z ??
+        Number.NaN,
+      heavyEntityIndex,
+    );
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -350,8 +445,22 @@ try {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 1;
     });
     await page.waitForFunction(
-      (z) => Number(document.body.dataset.heavyCubeZ) > z + 0.12,
-      beforeZ,
+      ({ z, entityIndex }) => {
+        const current = (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                authoritative?: { position: { z: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.authoritative?.position.z;
+        return current !== undefined && current > z + 0.12;
+      },
+      { z: beforeZ, entityIndex: heavyEntityIndex },
       { timeout: 4_000 },
     );
     await page.evaluate(() => {

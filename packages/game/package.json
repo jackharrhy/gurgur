@@ -1,0 +1,11 @@
+{
+  "name": "@gurgur/game",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@gurgur/engine": "workspace:*"
+  }
+}

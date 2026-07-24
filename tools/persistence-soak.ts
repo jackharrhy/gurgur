@@ -26,18 +26,24 @@ try {
           awake: tick % 2 === 0,
         },
       ],
-      mechanisms: [
-        {
-          authoredId: "door",
-          progress: (tick % 100) / 100,
-          direction: tick % 2 ? -1 : 1,
-          resumeAtTick: tick + 5,
-        },
-      ],
-      signals: [
-        { authoredId: "trigger", kind: "trigger", readyAtTick: tick + 10, latched: tick % 3 === 0 },
-      ],
-      delayedSignals: [{ target: "door", dueTick: tick + 20 }],
+      gameState: {
+        entities: [
+          {
+            kind: "linear-mover",
+            authoredId: "door",
+            progress: (tick % 100) / 100,
+            direction: tick % 2 ? -1 : 1,
+            resumeAtTick: tick + 5,
+          },
+          {
+            kind: "trigger",
+            authoredId: "trigger",
+            readyAtTick: tick + 10,
+            consumed: tick % 3 === 0,
+          },
+        ],
+        delayedSignals: [{ target: "door", dueTick: tick + 20 }],
+      },
       players: [
         {
           persistentId: "player",

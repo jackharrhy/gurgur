@@ -1,0 +1,4 @@
+interface:
+  display_name: "Extend Gurgur Entities"
+  short_description: "Add typed Gurgur entities and gameplay"
+  default_prompt: "Use $extend-gurgur-entities to add or modify a typed Gurgur entity without leaking gameplay into the engine."

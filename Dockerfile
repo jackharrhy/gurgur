@@ -8,7 +8,7 @@ COPY packages ./packages
 COPY tools ./tools
 COPY scripts ./scripts
 RUN bun install --frozen-lockfile
-RUN bun run compile:map && bun run check && bun run build
+RUN bun run check && bun run build
 
 FROM oven/bun:1.3.14
 WORKDIR /app/dist

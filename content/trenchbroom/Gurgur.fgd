@@ -1,11 +1,11 @@
-// Generated from @gurgur/entity-schema. Do not edit by hand.
+// Generated from @gurgur/game. Do not edit by hand.
 
 @SolidClass color(92 112 101) = worldspawn : "Static world geometry and environment settings"
 [
   classname(string) : "Entity class" : "worldspawn"
   mapversion(float) : "Valve map format version" : "220"
   message(string) : "World display name" : "Gurgur World"
-  gravity(float) : "Gravity magnitude in metres per second squared" : "10"
+  gravity(float) : "Downward gravity in metres per second squared" : "10"
   skyColor(vector) : "Linear RGB sky color" : "0.08 0.11 0.09"
 ]
 
@@ -45,7 +45,7 @@
   moveDirection(vector) : "Map-space movement direction" : "0 0 1"
   distance(float) : "Travel distance in map units" : "128"
   speed(float) : "Travel speed in map units per second" : "64"
-  wait(float) : "Seconds at each endpoint" : "1"
+  wait(float) : "Seconds before returning; -1 stays open" : "1"
   startOpen(choices) : "Begin at the travelled endpoint" : 0 = [ 0 : "No" 1 : "Yes" ]
 ]
 
@@ -54,6 +54,7 @@
   classname(string) : "Entity class" : "trigger_once"
   authoredId(string) : "Stable unique persistence identity"
   target(target_destination) : "Entity targetname to signal"
+  wait(float) : "Minimum seconds between signals" : "0"
 ]
 
 @SolidClass color(179 112 211) = trigger_multiple : "Repeatable sensor signal source"
@@ -91,7 +92,7 @@
 @PointClass color(119 218 172) size(-16 -16 0, 16 16 64) = env_sprite : "Camera-facing decorative sprite"
 [
   classname(string) : "Entity class" : "env_sprite"
-  sprite(string) : "Built-in pixel sprite name" : "fern"
+  sprite(string) : "Logical sprite asset ID" : "fern"
   scale(float) : "Sprite height in map units" : "64"
   glow(choices) : "Render without scene lighting" : 0 = [ 0 : "No" 1 : "Yes" ]
 ]

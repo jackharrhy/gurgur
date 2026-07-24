@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { entityDefinitions, type EntityClassname } from "@gurgur/entity-schema";
-import { compileWorld } from "@gurgur/world-compiler";
 import {
-  MATERIAL_TEXTURE_SIZE,
+  compileWorld,
   decodeWorldBundle,
   encodeWorldBundle,
-} from "../../packages/shared/src";
+  entityDefinitions,
+  type EntityClassname,
+} from "@gurgur/game";
+import { MATERIAL_TEXTURE_SIZE } from "../../packages/engine/src";
 
 type ParsedEntity = {
   properties: Record<string, string>;
@@ -128,7 +129,7 @@ describe("Systems Garden map", () => {
       const classname = entity.properties.classname as EntityClassname;
       const definition = entityDefinitions[classname];
       expect(definition).toBeDefined();
-      if (!definition?.persistent) continue;
+      if (!definition?.editor.persistent) continue;
       const id = entity.properties.authoredId;
       expect(id).toBeTruthy();
       expect(ids.has(id!)).toBe(false);
@@ -136,7 +137,7 @@ describe("Systems Garden map", () => {
     }
     const persistentEntities = entities.filter((entity) => {
       const classname = entity.properties.classname as EntityClassname;
-      return entityDefinitions[classname].persistent;
+      return entityDefinitions[classname].editor.persistent;
     });
     expect(ids.size).toBe(persistentEntities.length);
   });
@@ -165,16 +166,14 @@ describe("Systems Garden map", () => {
   });
 
   test("compiles authored defaults without requiring optional content classes", () => {
-    const spawn = compiledWorld.entities.find(
-      (entity) => entity.classname === "info_player_start",
-    )!;
-    expect(spawn.runtimeProperties.angle).toBe(0);
+    const spawn = compiledWorld.playerSpawns.find((candidate) => candidate.name === "default");
+    expect(spawn?.yaw).toBe(0);
   });
 
   test("keeps point entities out of brushes and solid entities inside them", () => {
     for (const entity of entities) {
       const definition = entityDefinitions[entity.properties.classname as EntityClassname];
-      if (definition.kind === "point") expect(entity.brushes.length).toBe(0);
+      if (definition.editor.kind === "point") expect(entity.brushes.length).toBe(0);
       else expect(entity.brushes.length).toBeGreaterThan(0);
     }
   });

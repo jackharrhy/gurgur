@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { PLAYER_HALF_HEIGHT } from "@gurgur/physics";
+import { PLAYER_HALF_HEIGHT, compileWorld, type WorldBundle } from "@gurgur/game";
 import {
   FAR_BODY_SNAPSHOT_STRIDE,
   FULL_RATE_BODY_RADIUS_METRES,
@@ -14,9 +14,7 @@ import {
   type InputCommand,
   type RuntimeId,
   type Snapshot,
-  type WorldBundle,
-} from "@gurgur/shared";
-import { compileWorld } from "@gurgur/world-compiler";
+} from "@gurgur/engine";
 import { AuthoritativeGame } from "../src/game";
 import { WorldStore } from "../src/store";
 
@@ -39,9 +37,7 @@ describe("authoritative network physics", () => {
         { worldBundle: bundle },
       );
       try {
-        const expectedBodies = bundle.entities.filter((entity) =>
-          ["func_physics", "func_door", "func_platform", "func_button"].includes(entity.classname),
-        ).length;
+        const expectedBodies = bundle.entities.filter((entity) => entity.body !== null).length;
         expect(game.worldMessage().runtimeEntities).toHaveLength(expectedBodies);
         for (let tick = 0; tick < 360; tick += 1) game.advance(PHYSICS_DT);
         const snapshot = game.snapshot();
@@ -92,9 +88,9 @@ describe("authoritative network physics", () => {
   test("replicates authoritative grab ownership until the player releases it", async () => {
     const bundle = await fixture("network-push-corridor");
     const heavyEntity = bundle.entities.find(
-      (entity) => entity.authoredId === "corridor.heavy" && entity.classname === "func_physics",
+      (entity) => entity.authoredId === "corridor.heavy" && entity.kind === "physics-prop",
     )!;
-    const heavyBrush = bundle.brushes[heavyEntity.brushIndices[0]!]!;
+    const heavyBrush = bundle.brushes[heavyEntity.body!.brushIndices[0]!]!;
     const store = new WorldStore(":memory:");
     const game = await AuthoritativeGame.create(
       store,
@@ -239,9 +235,7 @@ describe("authoritative network physics", () => {
     const bundle = await fixture("network-domino-field");
     const withoutPlayer = await cadence(bundle, false);
     const withPlayer = await cadence(bundle, true);
-    const runtimeCount = bundle.entities.filter(
-      (entity) => entity.classname === "func_physics",
-    ).length;
+    const runtimeCount = bundle.entities.filter((entity) => entity.kind === "physics-prop").length;
     expect(withoutPlayer).toHaveLength(FAR_BODY_SNAPSHOT_STRIDE);
     expect(withoutPlayer.reduce((sum, snapshot) => sum + snapshot.bodies.length, 0)).toBe(
       runtimeCount,
@@ -377,7 +371,12 @@ function command(
 }
 
 function runtimeId(game: AuthoritativeGame, authoredId: string): RuntimeId {
-  return game.worldMessage().runtimeEntities.find((entity) => entity.authoredId === authoredId)!.id;
+  const world = game.worldMessage();
+  return world.runtimeEntities.find(
+    (runtime) =>
+      runtime.kind === "world-entity" &&
+      world.bundle.entities[runtime.entityIndex]?.authoredId === authoredId,
+  )!.id;
 }
 
 function body(snapshot: Snapshot, id: RuntimeId) {

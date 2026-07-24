@@ -1,6 +1,6 @@
 import { rename, writeFile } from "node:fs/promises";
-import { addMissingAuthoredIds, compileWorld } from "@gurgur/world-compiler";
-import { encodeWorldBundle } from "@gurgur/shared";
+import { addMissingAuthoredIds, compileWorld } from "@gurgur/game";
+import { encodeWorldBundle } from "@gurgur/game";
 
 const sourcePath = "content/maps/systems-garden.map";
 const originalSource = await Bun.file(sourcePath).text();
@@ -17,6 +17,11 @@ if (repaired.added.length > 0) {
 }
 const source = repaired.source;
 const bundle = compileWorld(source, sourcePath);
+for (const entity of bundle.entities) {
+  if (entity.presentation.kind !== "sprite") continue;
+  const path = `content/sprites/${entity.presentation.asset}.png`;
+  if (!(await Bun.file(path).exists())) throw new Error(`missing authored sprite asset: ${path}`);
+}
 const bytes = encodeWorldBundle(bundle);
 await Bun.write("content/generated/systems-garden.bin", bytes);
 await Bun.write("content/generated/systems-garden.json", `${JSON.stringify(bundle)}\n`);

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { SNAPSHOT_HISTORY_PACKETS, type Snapshot } from "@gurgur/shared";
+import { SNAPSHOT_HISTORY_PACKETS, type Snapshot } from "@gurgur/engine";
 import { retainSnapshot } from "../src/session";
 
 test("retains a bounded pre-world snapshot history instead of overwriting the initial full state", () => {

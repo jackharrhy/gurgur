@@ -3,31 +3,80 @@ import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createPredictionClient } from "./prediction-client";
-import type { PhysicsDebugFrame } from "@gurgur/shared";
+import type { PhysicsDebugFrame } from "@gurgur/engine";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
 const searchParams = new URLSearchParams(location.search);
 const debugEnabled = searchParams.has("debug") && searchParams.get("debug") !== "0";
+const testEnabled = searchParams.has("test") && searchParams.get("test") !== "0";
 
-const textureManifestResponse = await fetch("/textures.json", { cache: "no-cache" });
+const textureManifestResponse = await fetch("/assets.json", { cache: "no-cache" });
 if (!textureManifestResponse.ok)
   throw new Error("authored material texture manifest is unavailable");
 const textureManifest = (await textureManifestResponse.json()) as unknown;
 if (!textureManifest || typeof textureManifest !== "object" || Array.isArray(textureManifest)) {
   throw new Error("authored material texture manifest is invalid");
 }
+const assetManifest = textureManifest as Record<string, unknown>;
+if (
+  !assetManifest.materials ||
+  typeof assetManifest.materials !== "object" ||
+  Array.isArray(assetManifest.materials) ||
+  !assetManifest.sprites ||
+  typeof assetManifest.sprites !== "object" ||
+  Array.isArray(assetManifest.sprites)
+)
+  throw new Error("authored asset manifest is invalid");
 const materialTextureUrls = Object.fromEntries(
-  Object.entries(textureManifest).map(([name, url]) => {
+  Object.entries(assetManifest.materials).map(([name, url]) => {
     if (typeof url !== "string" || !url.startsWith("/textures/")) {
       throw new Error(`authored material texture URL is invalid: ${name}`);
     }
     return [name, url];
   }),
 );
+const spriteAssetUrls = Object.fromEntries(
+  Object.entries(assetManifest.sprites).map(([name, url]) => {
+    if (typeof url !== "string" || !url.startsWith("/sprites/"))
+      throw new Error(`authored sprite URL is invalid: ${name}`);
+    return [name, url];
+  }),
+);
 
 const history = createSnapshotTimeline();
-let heavyCube: { key: string; localTop: number } | null = null;
+const diagnosticBodies = new Map<
+  string,
+  {
+    entityIndex: number;
+    localTop: number;
+    authoritative?: {
+      position: { x: number; y: number; z: number };
+      rotation: { x: number; y: number; z: number; w: number };
+    };
+    predicted?: {
+      position: { x: number; y: number; z: number };
+      rotation: { x: number; y: number; z: number; w: number };
+    };
+    rendered?: {
+      position: { x: number; y: number; z: number };
+      rotation: { x: number; y: number; z: number; w: number };
+    };
+  }
+>();
+if (testEnabled) {
+  Object.defineProperty(window, "__gurgurDiagnostics", {
+    configurable: false,
+    writable: false,
+    value: Object.freeze({
+      bodies: () =>
+        [...diagnosticBodies.entries()].map(([runtimeId, body]) => ({
+          runtimeId,
+          ...structuredClone(body),
+        })),
+    }),
+  });
+}
 const renderer = new WorldRenderer(
   canvas,
   history,
@@ -37,28 +86,31 @@ const renderer = new WorldRenderer(
     document.body.dataset.renderedZ = String(body.position.z);
   },
   (body) => {
-    if (`${body.id.index}:${body.id.generation}` !== heavyCube?.key) return;
-    document.body.dataset.renderedHeavyCubeX = String(body.position.x);
-    document.body.dataset.renderedHeavyCubeY = String(body.position.y);
-    document.body.dataset.renderedHeavyCubeZ = String(body.position.z);
-    document.body.dataset.renderedHeavyCubeQx = String(body.rotation.x);
-    document.body.dataset.renderedHeavyCubeQy = String(body.rotation.y);
-    document.body.dataset.renderedHeavyCubeQz = String(body.rotation.z);
-    document.body.dataset.renderedHeavyCubeQw = String(body.rotation.w);
+    if (!testEnabled) return;
+    const diagnostic = diagnosticBodies.get(`${body.id.index}:${body.id.generation}`);
+    if (diagnostic)
+      diagnostic.rendered = {
+        position: { ...body.position },
+        rotation: { ...body.rotation },
+      };
   },
   materialTextureUrls,
+  spriteAssetUrls,
   debugEnabled,
 );
 const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
   renderer.setPredictedBodies(bodies);
-  const predictedHeavyCube = bodies.find(
-    (candidate) => `${candidate.id.index}:${candidate.id.generation}` === heavyCube?.key,
-  );
+  if (testEnabled)
+    for (const predicted of bodies) {
+      const diagnostic = diagnosticBodies.get(`${predicted.id.index}:${predicted.id.generation}`);
+      if (diagnostic)
+        diagnostic.predicted = {
+          position: { ...predicted.position },
+          rotation: { ...predicted.rotation },
+        };
+    }
   document.body.dataset.predictedBodyCount = String(bodies.length);
-  document.body.dataset.predictedHeavyCubeX = predictedHeavyCube
-    ? String(predictedHeavyCube.position.x)
-    : "";
   document.body.dataset.predictionReady = body ? "true" : "false";
   if (body) {
     document.body.dataset.predictedX = String(body.position.x);
@@ -120,18 +172,20 @@ session = new GameSession(
         predictionWorldEpoch = message.worldEpoch;
         enableInputIfReady();
       });
-      const runtime = message.runtimeEntities.find(
-        (entity) => entity.classname === "func_physics" && "brushIndex" in entity,
-      );
-      if (runtime && "brushIndex" in runtime) {
-        const brush = message.bundle.brushes[runtime.brushIndex];
-        heavyCube = brush
-          ? {
-              key: `${runtime.id.index}:${runtime.id.generation}`,
-              localTop: Math.max(...brush.localVertices.map((vertex) => vertex.y)),
-            }
-          : null;
-      }
+      diagnosticBodies.clear();
+      if (testEnabled)
+        for (const runtime of message.runtimeEntities) {
+          if (runtime.kind !== "world-entity") continue;
+          const entity = message.bundle.entities[runtime.entityIndex];
+          const brush = entity?.body
+            ? message.bundle.brushes[entity.body.brushIndices[0]!]
+            : undefined;
+          if (!brush) continue;
+          diagnosticBodies.set(`${runtime.id.index}:${runtime.id.generation}`, {
+            entityIndex: runtime.entityIndex,
+            localTop: Math.max(...brush.localVertices.map((vertex) => vertex.y)),
+          });
+        }
       document.body.dataset.worldReady = "true";
     },
     lifecycle(message) {
@@ -157,17 +211,15 @@ session = new GameSession(
         document.body.dataset.playerY = String(player.position.y);
         document.body.dataset.playerZ = String(player.position.z);
       }
-      if (heavyCube) {
-        const body = message.bodies.find(
-          (candidate) => `${candidate.id.index}:${candidate.id.generation}` === heavyCube!.key,
-        );
-        if (body) {
-          document.body.dataset.heavyCubeX = String(body.position.x);
-          document.body.dataset.heavyCubeY = String(body.position.y);
-          document.body.dataset.heavyCubeZ = String(body.position.z);
-          document.body.dataset.heavyCubeTopY = String(body.position.y + heavyCube.localTop);
+      if (testEnabled)
+        for (const body of message.bodies) {
+          const diagnostic = diagnosticBodies.get(`${body.id.index}:${body.id.generation}`);
+          if (diagnostic)
+            diagnostic.authoritative = {
+              position: { ...body.position },
+              rotation: { ...body.rotation },
+            };
         }
-      }
     },
     clock(serverTick, receivedAtMs, oneWayDelayMs) {
       history.observeServerTick(serverTick, receivedAtMs, oneWayDelayMs);
@@ -200,7 +252,7 @@ if (debugEnabled) {
     if (debugRequest) return;
     debugRequest = new AbortController();
     try {
-      const response = await fetch("/debug/physics", {
+      const response = await fetch("/debug/physics?test=1", {
         cache: "no-store",
         signal: debugRequest.signal,
       });

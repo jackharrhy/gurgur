@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { BodySnapshot } from "@gurgur/shared";
+import type { BodySnapshot } from "@gurgur/engine";
 import { createPredictedPoseTimeline, mergeBodySamples } from "../src/presentation";
 
 const pose = (x: number): BodySnapshot => ({

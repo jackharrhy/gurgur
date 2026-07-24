@@ -11,10 +11,11 @@ import {
   type CompiledRenderBatch,
   type PhysicsDebugFrame,
   type PhysicsDebugPrimitive,
+  type RuntimeEntityRef,
   type RuntimeId,
   type Vec3,
-  type WorldMessage,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
+import type { WorldMessage } from "@gurgur/game";
 import type { SnapshotTimeline } from "./interpolation";
 import {
   createPredictedPoseTimeline,
@@ -148,6 +149,7 @@ export class WorldRenderer {
   readonly #textures = new Map<string, THREE.Texture>();
   readonly #physicsPropIds = new Set<string>();
   readonly #materialTextureUrls: Readonly<Record<string, string>>;
+  readonly #spriteAssetUrls: Readonly<Record<string, string>>;
   readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
   readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
   readonly #pickupDebug: PickupDebugView | null;
@@ -172,12 +174,14 @@ export class WorldRenderer {
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
     onBodyPresentation: (body: BodySnapshot) => void = () => {},
     materialTextureUrls: Readonly<Record<string, string>> = {},
+    spriteAssetUrls: Readonly<Record<string, string>> = {},
     debug = false,
   ) {
     this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
     this.#onBodyPresentation = onBodyPresentation;
     this.#materialTextureUrls = materialTextureUrls;
+    this.#spriteAssetUrls = spriteAssetUrls;
     this.#renderer = new THREE.WebGPURenderer({
       canvas,
       antialias: false,
@@ -215,19 +219,25 @@ export class WorldRenderer {
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
     if (this.#physicsDebug) this.#physicsDebug.group.visible = false;
     this.#cameraFollowing = false;
+    const sky = message.bundle.settings.skyColor;
+    const skyColor = new THREE.Color(sky.r, sky.g, sky.b);
+    this.#scene.background = skyColor;
+    this.#scene.fog = new THREE.Fog(skyColor, 34, 82);
     for (const batch of message.bundle.renderBatches)
       this.#worldRoot.add(this.#meshForBatch(batch));
     for (const entity of message.bundle.entities) {
-      if (entity.classname !== "env_sprite" || !entity.origin) continue;
+      if (entity.kind !== "sprite") continue;
       this.#worldRoot.add(this.#mapSprite(entity));
     }
     for (const runtime of message.runtimeEntities) {
-      if (!("brushIndex" in runtime)) continue;
-      const brushIndices = runtime.brushIndices ?? [runtime.brushIndex];
-      const origin = message.bundle.brushes[runtime.brushIndex]?.center;
+      if (runtime.kind !== "world-entity") continue;
+      const entity = message.bundle.entities[runtime.entityIndex];
+      if (!entity || entity.presentation.kind !== "brush" || !entity.body) continue;
+      const brushIndices = entity.body.brushIndices;
+      const origin = message.bundle.brushes[brushIndices[0]!]?.center;
       if (!origin) continue;
       const group = new THREE.Group();
-      group.name = runtime.authoredId;
+      group.name = `${entity.kind}.${runtime.entityIndex}`;
       for (const brushIndex of brushIndices) {
         const brush = message.bundle.brushes[brushIndex];
         if (!brush) continue;
@@ -238,18 +248,17 @@ export class WorldRenderer {
           brush.center.z - origin.z,
         );
         mesh.userData.runtimeId = runtime.id;
-        mesh.userData.interactable =
-          runtime.classname === "func_button" || runtime.classname === "func_physics";
-        mesh.userData.grabbable = runtime.classname === "func_physics";
+        mesh.userData.interactable = entity.interaction !== "none";
+        mesh.userData.grabbable = entity.interaction === "grab";
         mesh.userData.interactionOccluder = true;
         if (mesh.userData.grabbable) this.#addInteractionOutline(mesh);
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
-      if (runtime.classname === "func_physics") this.#physicsPropIds.add(idKey(runtime.id));
+      if (entity.kind === "physics-prop") this.#physicsPropIds.add(idKey(runtime.id));
       this.#worldRoot.add(group);
     }
-    for (const player of message.runtimeEntities.filter((entity) => entity.classname === "player"))
+    for (const player of message.runtimeEntities.filter((entity) => entity.kind === "player"))
       this.#addPlayer(player);
     this.#scene.add(this.#worldRoot);
   }
@@ -263,8 +272,7 @@ export class WorldRenderer {
       this.#worldRoot.remove(mesh);
       mesh.traverse(disposeOwnedResources);
     }
-    for (const entity of message.created)
-      if (entity.classname === "player") this.#addPlayer(entity);
+    for (const entity of message.created) if (entity.kind === "player") this.#addPlayer(entity);
   }
 
   setLocalPlayer(id: RuntimeId): void {
@@ -511,12 +519,12 @@ export class WorldRenderer {
     }
     const mesh = new THREE.Mesh(
       geometry,
-      materialNames.map((name) => this.#material(name, brush.classname)),
+      materialNames.map((name) => this.#material(name, false)),
     );
-    mesh.name = brush.authoredId ?? `${brush.classname}-${brush.entityIndex}`;
+    mesh.name = `brush.${brush.entityIndex}.${brush.sourceBrushIndex}`;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
-    mesh.userData.interactionOccluder = !brush.classname.startsWith("trigger_");
+    mesh.userData.interactionOccluder = true;
     return mesh;
   }
 
@@ -544,10 +552,7 @@ export class WorldRenderer {
       ),
     );
     geometry.setIndex(batch.indices);
-    const mesh = new THREE.Mesh(
-      geometry,
-      this.#material(batch.material, batch.sensor ? "trigger_batch" : "worldspawn"),
-    );
+    const mesh = new THREE.Mesh(geometry, this.#material(batch.material, batch.sensor));
     mesh.name = `material.${batch.material}`;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
@@ -555,11 +560,11 @@ export class WorldRenderer {
     return mesh;
   }
 
-  #addPlayer(player: Extract<LifecycleMessage["created"][number], { classname: "player" }>): void {
+  #addPlayer(player: Extract<RuntimeEntityRef, { kind: "player" }>): void {
     if (this.#meshes.has(idKey(player.id))) return;
     const local = this.#localPlayer && idKey(player.id) === idKey(this.#localPlayer);
     const texture = new THREE.TextureLoader().load("/player-billboard.png");
-    texture.name = `player-billboard:${player.authoredId}`;
+    texture.name = `player-billboard:${idKey(player.id)}`;
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.magFilter = THREE.NearestFilter;
     texture.minFilter = THREE.NearestFilter;
@@ -579,7 +584,7 @@ export class WorldRenderer {
       playerBillboardLayout.quad.heightMeters,
       1,
     );
-    mesh.name = player.authoredId;
+    mesh.name = `player.${idKey(player.id)}`;
     mesh.userData.ownedMaterial = true;
     mesh.userData.ownedTexture = texture;
     mesh.userData.playerDirection = 0;
@@ -589,8 +594,7 @@ export class WorldRenderer {
     this.#worldRoot.add(mesh);
   }
 
-  #material(name: string, classname: string): THREE.Material {
-    const sensor = classname.startsWith("trigger_");
+  #material(name: string, sensor: boolean): THREE.Material {
     const key = `${name}:${sensor ? "sensor" : "solid"}`;
     const cached = this.#materials.get(key);
     if (cached) return cached;
@@ -616,15 +620,17 @@ export class WorldRenderer {
     return texture;
   }
 
-  #mapSprite(entity: WorldMessage["bundle"]["entities"][number]): THREE.Sprite {
-    const spriteName = String(entity.runtimeProperties.sprite ?? "fern");
-    const glow = Boolean(entity.runtimeProperties.glow);
+  #mapSprite(
+    entity: Extract<WorldMessage["bundle"]["entities"][number], { kind: "sprite" }>,
+  ): THREE.Sprite {
+    const spriteName = entity.presentation.asset;
+    const glow = entity.presentation.glow;
     const material = createSpriteNodeMaterial(this.#spriteTexture(spriteName), glow);
     const sprite = new THREE.Sprite(material);
-    const height = Number(entity.runtimeProperties.scale ?? 1.6);
+    const height = entity.presentation.height;
     sprite.center.set(0.5, 0.04);
     sprite.scale.set(height, height, 1);
-    sprite.position.set(entity.origin!.x, entity.origin!.y, entity.origin!.z);
+    sprite.position.set(entity.origin.x, entity.origin.y, entity.origin.z);
     sprite.name = `sprite.${spriteName}`;
     sprite.userData.ownedMaterial = true;
     sprite.userData.interactionOccluder = false;
@@ -635,57 +641,9 @@ export class WorldRenderer {
     const key = `sprite:${name}`;
     const cached = this.#textures.get(key);
     if (cached) return cached;
-    const canvas = document.createElement("canvas");
-    canvas.width = 32;
-    canvas.height = 32;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("2D canvas is unavailable for sprite textures");
-    context.imageSmoothingEnabled = false;
-    const rect = (color: string, x: number, y: number, width: number, height: number): void => {
-      context.fillStyle = color;
-      context.fillRect(x, y, width, height);
-    };
-    if (name.startsWith("player")) {
-      const coat = name.endsWith("local") ? "#e5b94b" : "#42a58c";
-      rect("#30243f", 10, 6, 12, 22);
-      rect("#f1c49b", 12, 3, 8, 9);
-      rect(coat, 8, 10, 16, 15);
-      rect("#efe1b4", 14, 12, 4, 5);
-      rect("#181625", 9, 27, 5, 4);
-      rect("#181625", 18, 27, 5, 4);
-      rect("#4e3252", 11, 5, 10, 3);
-      rect("#f05d5e", 15, 6, 2, 2);
-    } else if (name === "terminal") {
-      rect("#29243c", 6, 5, 20, 26);
-      rect("#566176", 8, 7, 16, 13);
-      rect("#46d9b1", 10, 9, 12, 7);
-      rect("#b8f5c8", 11, 10, 7, 1);
-      rect("#db5b54", 10, 23, 3, 3);
-      rect("#e9bd56", 16, 23, 3, 3);
-    } else if (name === "sign") {
-      rect("#49334f", 14, 17, 4, 15);
-      rect("#e5b94b", 3, 4, 26, 16);
-      rect("#31243b", 5, 6, 22, 12);
-      rect("#f3e6bc", 7, 9, 18, 2);
-      rect("#f05d5e", 12, 13, 8, 2);
-    } else if (name === "lamp") {
-      rect("#34324a", 14, 12, 4, 20);
-      rect("#566176", 10, 8, 12, 6);
-      rect("#fff3a8", 12, 3, 8, 9);
-      rect("#e26a5c", 14, 5, 4, 5);
-    } else if (name === "crystal") {
-      rect("#47345d", 13, 7, 7, 24);
-      rect("#6954a1", 9, 14, 6, 17);
-      rect("#63d6c1", 15, 3, 4, 21);
-      rect("#b8f5c8", 16, 6, 2, 13);
-    } else {
-      rect("#382d45", 14, 18, 4, 14);
-      rect("#347e63", 7, 13, 8, 14);
-      rect("#4fb778", 4, 8, 8, 12);
-      rect("#8bc56f", 17, 10, 10, 17);
-      rect("#d2cf78", 21, 6, 4, 9);
-    }
-    const texture = new THREE.CanvasTexture(canvas);
+    const url = this.#spriteAssetUrls[name];
+    if (!url) throw new Error(`missing authored sprite asset: ${name}`);
+    const texture = new THREE.TextureLoader().load(url);
     texture.name = key;
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.magFilter = THREE.NearestFilter;

@@ -4,7 +4,6 @@ import {
   SNAPSHOT_HISTORY_PACKETS,
   decodeSnapshot,
   decodeLifecycle,
-  decodeWorldBundle,
   decodeServerControl,
   LIFECYCLE_TAG,
   encodeInputBundle,
@@ -14,9 +13,9 @@ import {
   type RtcAnswerMessage,
   type Snapshot,
   type WelcomeMessage,
-  type WorldMessage,
   type WorldManifestMessage,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
+import { decodeWorldBundle, type WorldMessage } from "@gurgur/game";
 
 export type SessionCallbacks = {
   status(state: "connecting" | "connected" | "disconnected"): void;
@@ -202,7 +201,7 @@ export class GameSession {
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: [] });
     let receivedState = false;
-    const input = peer.createDataChannel("gurgur-input-v2", {
+    const input = peer.createDataChannel("gurgur-input-v1", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -210,7 +209,7 @@ export class GameSession {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v2" ||
+        state.label !== "gurgur-state-v1" ||
         this.#stateChannel
       ) {
         state.close();

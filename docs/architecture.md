@@ -30,34 +30,35 @@ state.
 
 Persistent external resources have explicit lifecycle owners, but other modules
 depend on small structural capability interfaces rather than concrete classes.
-Pure transforms and short-lived registries use functions and plain data. The
-server game loop composes world loading, runtime-body construction, mechanisms,
-players, replication, and persistence; it does not implement every subsystem.
+Pure transforms and short-lived registries use functions and plain data.
+`GameSimulation` owns players, controller policy, interactions, mechanisms,
+signals, and gameplay serialization. The server host composes world loading,
+runtime-body construction, fixed stepping, replication, and tick-boundary
+persistence transactions; it does not reimplement gameplay policy.
 
 ## Source boundaries
 
 ```text
 apps/
   web/             HTML, vanilla TS, Three.js, input, prediction worker
-  server/          sole Bun entrypoint, HTTP/WebSocket/WebRTC, simulation, administration
+  server/          authoritative host, HTTP/WebSocket/WebRTC, persistence, metrics
 packages/
-  shared/          packet types, codecs, input, controller rules, math
-  physics/         lifecycle-safe box3d.js adapter
-  map-format/      Valve 220 scanner/parser and source diagnostics
-  world-compiler/  render/collision/entity bundle compiler
-  entity-schema/   authored definitions, validation, FGD generation
+  engine/          math, protocol, Valve parsing, generic capabilities, Box3D adapter
+  game/            entity catalog/union, compiler, controller, simulation, game state
 tools/
   generate-fgd/
   compile-map/
   network-harness/  deterministic clients, link shaping, metrics, reports
 content/
-  maps/ textures/ models/ generated/
+  maps/ textures/ sprites/ models/ generated/
 ```
 
-Browser, DOM, and Three.js code stay out of shared packages. SQLite, filesystem,
-administration, and server sockets stay out of client packages.
-The network harness is production-adjacent tooling: it imports the real shared
-codecs and drives the real server and client simulation boundaries.
+Browser, DOM, and Three.js code stay out of both packages. SQLite, filesystem,
+administration, and server sockets stay in the server app. The engine never
+knows mapper classnames or gameplay union members. Game code sees the host only
+through `GameEngine`; that capability omits stepping, disposal, debug extraction,
+and arbitrary body creation. The network harness is production-adjacent tooling:
+it imports the real codecs and drives the real server and client boundaries.
 
 ## State ownership
 
@@ -65,7 +66,7 @@ codecs and drives the real server and client simulation boundaries.
 | ------------------------------ | --------------------- | ----------------------- |
 | Authored geometry and defaults | compiled world bundle | one `mapRevision`       |
 | Live bodies and constraints    | server Box3D world    | one `worldEpoch`        |
-| Gameplay and entity state      | server registries     | one `worldEpoch`        |
+| Gameplay and entity state      | game simulation       | one `worldEpoch`        |
 | Replicated view                | each client           | disposable              |
 | Local-player prediction        | client worker         | until correction/reset  |
 | Durable application state      | SQLite                | across process restarts |
@@ -94,11 +95,11 @@ statements, and tick-boundary transactions. The default snapshot interval is fiv
 seconds; important mechanism changes also request a snapshot at the next tick
 boundary.
 
-A snapshot contains `mapRevision`, `worldEpoch`, server tick, save time, authored
-IDs, transforms, velocities, sleep state,
-mechanism progress, trigger/relay latches, cooldown deadlines, queued delayed
-signals, complete player-controller state, and authored grab ownership. It never
-contains raw Box3D memory, Wasm pointers, or runtime network IDs.
+A snapshot writes world metadata, body state, player state, and one strictly
+validated `game_state` JSON value in a single tick-boundary transaction.
+`game_state` contains mechanism/trigger/relay/button state and delayed signals;
+the game package owns its schema. The snapshot never contains raw Box3D memory,
+Wasm pointers, or runtime network IDs.
 
 Startup restores a snapshot only when its `mapRevision` matches the compiled
 bundle. Otherwise the server starts from authored defaults. This pre-release

@@ -11,7 +11,7 @@ import {
   type Quat,
   type Snapshot,
   type Vec3,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
 
 function key(body: BodySnapshot): string {
   return `${body.id.index}:${body.id.generation}`;

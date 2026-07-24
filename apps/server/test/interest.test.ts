@@ -7,7 +7,7 @@ import {
   encodeSnapshot,
   type BodySnapshot,
   type PlayerStateSnapshot,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
 import { snapshotForPlayer } from "../src/server";
 
 test("player interest keeps local and near records while rotating distant records", () => {

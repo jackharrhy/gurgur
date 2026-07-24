@@ -1,4 +1,4 @@
-import { entityDefinitions, type PropertyDefinition } from "@gurgur/entity-schema";
+import { entityDefinitions, type PropertyDefinition } from "@gurgur/game";
 
 const fgdType = (property: PropertyDefinition): string =>
   ({
@@ -8,29 +8,44 @@ const fgdType = (property: PropertyDefinition): string =>
     vector: "vector",
     target: "target_destination",
     targetname: "target_source",
-  })[property.type];
+  })[property.editor.type];
 
 const quote = (value: string | number | boolean): string => ` : "${String(value)}"`;
-const lines = ["// Generated from @gurgur/entity-schema. Do not edit by hand.", ""];
+const lines = ["// Generated from @gurgur/game. Do not edit by hand.", ""];
 for (const [classname, definition] of Object.entries(entityDefinitions)) {
-  const kind = definition.kind === "solid" ? "SolidClass" : "PointClass";
-  const size =
-    "size" in definition && definition.size
-      ? ` size(${definition.size.slice(0, 3).join(" ")}, ${definition.size.slice(3).join(" ")})`
-      : "";
+  const kind = definition.editor.kind === "solid" ? "SolidClass" : "PointClass";
+  const size = definition.editor.size
+    ? ` size(${definition.editor.size.slice(0, 3).join(" ")}, ${definition.editor.size.slice(3).join(" ")})`
+    : "";
   lines.push(
-    `@${kind} color(${definition.color.join(" ")})${size} = ${classname} : "${definition.description}"`,
+    `@${kind} color(${definition.editor.color.join(" ")})${size} = ${classname} : "${definition.editor.description}"`,
   );
   lines.push("[");
   lines.push('  classname(string) : "Entity class" : "' + classname + '"');
-  for (const [name, property] of Object.entries(definition.properties)) {
-    if (property.type === "boolean") {
+  const properties = {
+    ...(definition.editor.persistent
+      ? {
+          authoredId: {
+            editor: {
+              type: "string" as const,
+              description: "Stable unique persistence identity",
+            },
+          },
+        }
+      : {}),
+    ...definition.properties,
+  };
+  for (const [name, property] of Object.entries(properties)) {
+    if (property.editor.type === "boolean") {
       lines.push(
-        `  ${name}(choices) : "${property.description}" : ${property.default ? 1 : 0} = [ 0 : "No" 1 : "Yes" ]`,
+        `  ${name}(choices) : "${property.editor.description}" : ${property.editor.default ? 1 : 0} = [ 0 : "No" 1 : "Yes" ]`,
       );
     } else {
-      const defaultValue = property.default === undefined ? "" : quote(property.default);
-      lines.push(`  ${name}(${fgdType(property)}) : "${property.description}"${defaultValue}`);
+      const defaultValue =
+        property.editor.default === undefined ? "" : quote(property.editor.default);
+      lines.push(
+        `  ${name}(${fgdType(property as PropertyDefinition)}) : "${property.editor.description}"${defaultValue}`,
+      );
     }
   }
   lines.push("]", "");

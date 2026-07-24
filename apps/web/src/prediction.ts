@@ -13,17 +13,19 @@ import {
   type RuntimeId,
   type Snapshot,
   type Vec3,
-  type WorldMessage,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
 import {
-  PhysicsWorld,
   PLAYER_CROUCHED_HALF_SEGMENT,
+  PLAYER_CAPSULE_HALF_SEGMENT,
+  PLAYER_CAPSULE_RADIUS,
   PLAYER_GRAVITY,
   PLAYER_MAX_FIXED_TICK_DISPLACEMENT,
   PLAYER_SPEED,
   stepPlayerController,
   type PlayerControllerState,
-} from "@gurgur/physics";
+  type WorldMessage,
+} from "@gurgur/game";
+import { PhysicsWorld } from "@gurgur/engine";
 
 const MAX_INPUT_HISTORY = 120;
 const PREDICTION_STALL_RESET_TICKS = 30;
@@ -70,6 +72,7 @@ export class PlayerPredictor {
   #collisionProxies = new Map<string, CollisionProxy>();
   #playerProxy: RuntimeId | null = null;
   #playerProxyCrouched = false;
+  #gravity = PLAYER_GRAVITY;
 
   constructor(
     onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void,
@@ -106,6 +109,7 @@ export class PlayerPredictor {
     this.#playerProxyCrouched = false;
     this.#worldEpoch = message.worldEpoch;
     this.#mapRevision = message.bundle.mapRevision;
+    this.#gravity = Math.max(0, -message.bundle.settings.gravity.y);
     this.#state = null;
     this.#history = [];
     this.#latestAuthorityTick = null;
@@ -119,8 +123,9 @@ export class PlayerPredictor {
       this.#wasmUrl
         ? {
             locateFile: (path) => (path.endsWith("box3d.wasm") ? this.#wasmUrl! : path),
+            gravity: message.bundle.settings.gravity,
           }
-        : undefined,
+        : { gravity: message.bundle.settings.gravity },
     );
     physics.createStaticMesh({
       vertices: message.bundle.staticCollision.vertices,
@@ -128,26 +133,27 @@ export class PlayerPredictor {
     });
     const proxies = new Map<string, CollisionProxy>();
     for (const runtime of message.runtimeEntities) {
-      if (!("brushIndex" in runtime)) continue;
-      const brush = message.bundle.brushes[runtime.brushIndex];
-      if (!brush) throw new Error(`runtime brush ${runtime.brushIndex} does not exist`);
+      if (runtime.kind !== "world-entity") continue;
+      const authored = message.bundle.entities[runtime.entityIndex];
+      const body = authored?.body;
+      if (!authored || !body || body.kind === "sensor-brush") continue;
+      const brushIndex = body.brushIndices[0];
+      const brush = brushIndex === undefined ? null : message.bundle.brushes[brushIndex];
+      if (!brush) throw new Error(`runtime entity ${runtime.entityIndex} has no brush`);
       const rotation = identityRotation();
       const bodyKind =
-        runtime.classname === "func_physics"
+        body.kind === "dynamic-brush"
           ? "dynamic"
-          : runtime.classname === "func_button"
-            ? "static"
-            : "kinematic";
+          : body.kind === "kinematic-brush"
+            ? "kinematic"
+            : "static";
       const type = bodyKind === "dynamic" ? "kinematic" : bodyKind;
-      const authored = message.bundle.entities.find(
-        (entity) => entity.authoredId === runtime.authoredId,
-      );
       const material = {
-        density: Number(authored?.runtimeProperties.density ?? 1),
-        friction: Number(authored?.runtimeProperties.friction ?? 0.6),
-        restitution: Number(authored?.runtimeProperties.restitution ?? 0),
+        density: body.kind === "dynamic-brush" ? body.density : 1,
+        friction: body.kind === "dynamic-brush" ? body.friction : 0.6,
+        restitution: body.kind === "dynamic-brush" ? body.restitution : 0,
       };
-      const brushIndices = runtime.brushIndices ?? [runtime.brushIndex];
+      const brushIndices = body.brushIndices;
       const hulls = brushIndices.map((index) => ({
         vertices: message.bundle.brushes[index]!.worldVertices.map((vertex) => ({
           x: vertex.x - brush.center.x,
@@ -173,7 +179,7 @@ export class PlayerPredictor {
                 ...material,
               }),
         networkId: { ...runtime.id },
-        contactPresentation: runtime.classname === "func_physics",
+        contactPresentation: authored.kind === "physics-prop",
         position: { ...brush.center },
         rotation,
         linearVelocity: zero(),
@@ -192,7 +198,7 @@ export class PlayerPredictor {
     }
     this.#physics = physics;
     this.#collisionProxies = proxies;
-    this.#playerProxy = physics.createPlayerProxy({ x: 0, y: -1_000, z: 0 });
+    this.#playerProxy = physics.createPlayerProxy({ x: 0, y: -1_000, z: 0 }, playerCapsule(false));
     const authority = this.#pendingAuthority;
     this.#pendingAuthority = null;
     if (authority) this.reconcile(authority);
@@ -205,10 +211,21 @@ export class PlayerPredictor {
     if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
     if (!this.#physics || !this.#state) return;
     const previous = this.#state;
-    const predicted = stepPlayerController(this.#physics, previous, command, PHYSICS_DT);
+    const predicted = stepPlayerController(
+      this.#physics,
+      previous,
+      command,
+      PHYSICS_DT,
+      this.#gravity,
+    );
     if (
       !plausiblePredictionStep(previous, predicted) ||
-      !plausibleFromAuthority(this.#lastAuthorityPosition, predicted, this.#history.length)
+      !plausibleFromAuthority(
+        this.#lastAuthorityPosition,
+        predicted,
+        this.#history.length,
+        this.#gravity,
+      )
     ) {
       this.#history = [];
       this.#state = {
@@ -283,10 +300,16 @@ export class PlayerPredictor {
           this.#state,
           frame.command,
           PHYSICS_DT,
+          this.#gravity,
         );
         if (
           !plausiblePredictionStep(this.#state, predicted) ||
-          !plausibleFromAuthority(authority.position, predicted, this.#history.length)
+          !plausibleFromAuthority(
+            authority.position,
+            predicted,
+            this.#history.length,
+            this.#gravity,
+          )
         ) {
           this.#history = [];
           this.#state = controllerState(authority);
@@ -387,7 +410,7 @@ export class PlayerPredictor {
     return this.#physics.moveCapsule(
       this.#state.position,
       this.#correction,
-      this.#state.crouched ? { halfSegment: PLAYER_CROUCHED_HALF_SEGMENT } : {},
+      playerCapsule(this.#state.crouched),
     );
   }
 
@@ -487,9 +510,10 @@ export class PlayerPredictor {
     if (!this.#physics || !this.#playerProxy || !this.#state) return;
     if (this.#state.crouched !== this.#playerProxyCrouched) {
       this.#physics.destroy(this.#playerProxy);
-      this.#playerProxy = this.#physics.createPlayerProxy(this.#state.position, {
-        crouched: this.#state.crouched,
-      });
+      this.#playerProxy = this.#physics.createPlayerProxy(
+        this.#state.position,
+        playerCapsule(this.#state.crouched),
+      );
       this.#playerProxyCrouched = this.#state.crouched;
     }
     this.#physics.setBodyTransform(this.#playerProxy, this.#state.position, {
@@ -515,6 +539,13 @@ function controllerState(authority: PlayerStateSnapshot): PlayerControllerState 
 
 function cloneState(state: PlayerControllerState): PlayerControllerState {
   return { ...state, position: { ...state.position } };
+}
+
+function playerCapsule(crouched: boolean) {
+  return {
+    radius: PLAYER_CAPSULE_RADIUS,
+    halfSegment: crouched ? PLAYER_CROUCHED_HALF_SEGMENT : PLAYER_CAPSULE_HALF_SEGMENT,
+  };
 }
 
 function zero(): Vec3 {
@@ -557,6 +588,7 @@ function plausibleFromAuthority(
   authority: Vec3 | null,
   predicted: PlayerControllerState,
   inputCount: number,
+  gravity: number,
 ): boolean {
   if (!authority) return true;
   const seconds = Math.min(inputCount, MAX_INPUT_HISTORY) * PHYSICS_DT;
@@ -564,6 +596,6 @@ function plausibleFromAuthority(
     Math.hypot(predicted.position.x - authority.x, predicted.position.z - authority.z) <=
       PLAYER_SPEED * seconds + PREDICTION_DIVERGENCE_BUFFER_METRES &&
     Math.abs(predicted.position.y - authority.y) <=
-      0.5 * PLAYER_GRAVITY * seconds * seconds + PREDICTION_DIVERGENCE_BUFFER_METRES
+      0.5 * gravity * seconds * seconds + PREDICTION_DIVERGENCE_BUFFER_METRES
   );
 }

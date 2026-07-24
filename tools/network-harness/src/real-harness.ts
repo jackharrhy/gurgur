@@ -11,15 +11,14 @@ import {
   decodeLifecycle,
   decodeServerControl,
   decodeSnapshot,
-  decodeWorldBundle,
   encodeInputBundle,
   type BodySnapshot,
   type InputCommand,
   type Snapshot,
   type WelcomeMessage,
-  type WorldMessage,
   type WorldManifestMessage,
-} from "@gurgur/shared";
+} from "@gurgur/engine";
+import { decodeWorldBundle, type WorldMessage } from "@gurgur/game";
 import type { ServerMetrics } from "../../../apps/server/src/server";
 import { PlayerPredictor } from "../../../apps/web/src/prediction";
 import { createSnapshotTimeline, type SnapshotTimeline } from "../../../apps/web/src/interpolation";
@@ -371,7 +370,7 @@ async function createClient(
   const peer = new RTCPeerConnection({
     iceAdditionalHostAddresses: ["127.0.0.1"],
   });
-  const inputChannel = peer.createDataChannel("gurgur-input-v2", {
+  const inputChannel = peer.createDataChannel("gurgur-input-v1", {
     ordered: false,
     maxRetransmits: 0,
   });
@@ -427,7 +426,7 @@ async function createClient(
       5_000,
     );
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v2" || client.stateChannel) {
+      if (channel.label !== "gurgur-state-v1" || client.stateChannel) {
         channel.close();
         return;
       }

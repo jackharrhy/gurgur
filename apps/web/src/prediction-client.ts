@@ -1,4 +1,5 @@
-import type { BodySnapshot, InputCommand, RuntimeId, Snapshot, WorldMessage } from "@gurgur/shared";
+import type { BodySnapshot, InputCommand, RuntimeId, Snapshot } from "@gurgur/engine";
+import type { WorldMessage } from "@gurgur/game";
 
 type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }

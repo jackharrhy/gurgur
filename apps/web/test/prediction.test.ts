@@ -6,12 +6,11 @@ import {
   SNAPSHOT_FLAG_TELEPORT,
   type BodySnapshot,
   type InputCommand,
-  type RuntimeEntity,
+  type RuntimeEntityRef,
   type Snapshot,
   type Vec3,
-  type WorldBundle,
-} from "@gurgur/shared";
-import { compileWorld } from "@gurgur/world-compiler";
+} from "@gurgur/engine";
+import { compileWorld, type WorldBundle, type WorldMessage } from "@gurgur/game";
 import { PlayerPredictor } from "../src/prediction";
 
 const playerId = { index: 0x8000_0000, generation: 1 };
@@ -68,9 +67,8 @@ describe("player-only prediction", () => {
   test("treats a state stall as a prediction discontinuity", async () => {
     const bundle = await fixture("network-push-corridor");
     const runtime = runtimes(bundle);
-    const light = runtime.find((entity) => entity.authoredId === "corridor.light")!;
-    if (!("brushIndex" in light)) throw new Error("light fixture is not physical");
-    const brush = bundle.brushes[light.brushIndex]!;
+    const light = runtimeFor(bundle, runtime, "corridor.light");
+    const brush = runtimeBrush(bundle, light);
     const predictor = new PlayerPredictor(() => {});
     try {
       predictor.setLocalPlayer(playerId);
@@ -152,9 +150,8 @@ describe("player-only prediction", () => {
   test("uses authoritative dynamics as moving kinematic collision proxies", async () => {
     const bundle = await fixture("network-push-corridor");
     const runtime = runtimes(bundle);
-    const light = runtime.find((entity) => entity.authoredId === "corridor.light")!;
-    if (!("brushIndex" in light)) throw new Error("light fixture is not physical");
-    const brush = bundle.brushes[light.brushIndex]!;
+    const light = runtimeFor(bundle, runtime, "corridor.light");
+    const brush = runtimeBrush(bundle, light);
     const predictor = new PlayerPredictor(() => {});
     try {
       predictor.setLocalPlayer(playerId);
@@ -209,9 +206,8 @@ describe("player-only prediction", () => {
   test("retains sparse body authority from every snapshot in a render batch", async () => {
     const bundle = await fixture("network-push-corridor");
     const runtime = runtimes(bundle);
-    const light = runtime.find((entity) => entity.authoredId === "corridor.light")!;
-    if (!("brushIndex" in light)) throw new Error("light fixture is not physical");
-    const brush = bundle.brushes[light.brushIndex]!;
+    const light = runtimeFor(bundle, runtime, "corridor.light");
+    const brush = runtimeBrush(bundle, light);
     const predictor = new PlayerPredictor(() => {});
     try {
       predictor.setLocalPlayer(playerId);
@@ -254,9 +250,8 @@ describe("player-only prediction", () => {
   test("lands on an authoritative dynamic proxy without locally simulating the prop", async () => {
     const bundle = await fixture("network-boxes");
     const runtime = runtimes(bundle);
-    const lower = runtime.find((entity) => entity.authoredId === "fixture.stack.lower")!;
-    if (!("brushIndex" in lower)) throw new Error("stack fixture is not physical");
-    const brush = bundle.brushes[lower.brushIndex]!;
+    const lower = runtimeFor(bundle, runtime, "fixture.stack.lower");
+    const brush = runtimeBrush(bundle, lower);
     const predictor = new PlayerPredictor(() => {});
     try {
       predictor.setLocalPlayer(playerId);
@@ -291,7 +286,7 @@ describe("player-only prediction", () => {
   });
 });
 
-function world(bundle: WorldBundle, runtimeEntities: RuntimeEntity[] = []) {
+function world(bundle: WorldBundle, runtimeEntities: RuntimeEntityRef[] = []): WorldMessage {
   return {
     type: "world" as const,
     protocolVersion: PROTOCOL_VERSION,
@@ -301,17 +296,15 @@ function world(bundle: WorldBundle, runtimeEntities: RuntimeEntity[] = []) {
   };
 }
 
-function runtimes(bundle: WorldBundle): RuntimeEntity[] {
+function runtimes(bundle: WorldBundle): RuntimeEntityRef[] {
   let index = 1;
-  return bundle.entities.flatMap((entity) => {
-    if (entity.classname !== "func_physics") return [];
+  return bundle.entities.flatMap((entity, entityIndex) => {
+    if (entity.kind !== "physics-prop") return [];
     return [
       {
         id: { index: index++, generation: 1 },
-        authoredId: entity.authoredId!,
-        classname: "func_physics" as const,
-        brushIndex: entity.brushIndices[0]!,
-        ...(entity.brushIndices.length > 1 ? { brushIndices: entity.brushIndices } : {}),
+        kind: "world-entity" as const,
+        entityIndex,
       },
     ];
   });
@@ -364,8 +357,32 @@ function snapshot(
 }
 
 function spawn(bundle: WorldBundle): Vec3 {
-  const point = bundle.entities.find((entity) => entity.classname === "info_player_start")!.origin!;
+  const point = bundle.playerSpawns.find((candidate) => candidate.name === "default")!.position;
   return { x: point.x, y: point.y + 0.9, z: point.z };
+}
+
+function runtimeFor(
+  bundle: WorldBundle,
+  runtimeEntities: RuntimeEntityRef[],
+  authoredId: string,
+): Extract<RuntimeEntityRef, { kind: "world-entity" }> {
+  const runtime = runtimeEntities.find(
+    (candidate) =>
+      candidate.kind === "world-entity" &&
+      bundle.entities[candidate.entityIndex]?.authoredId === authoredId,
+  );
+  if (!runtime || runtime.kind !== "world-entity")
+    throw new Error(`runtime ${authoredId} is missing`);
+  return runtime;
+}
+
+function runtimeBrush(
+  bundle: WorldBundle,
+  runtime: Extract<RuntimeEntityRef, { kind: "world-entity" }>,
+) {
+  const brushIndex = bundle.entities[runtime.entityIndex]?.body?.brushIndices[0];
+  if (brushIndex === undefined) throw new Error("runtime entity is not physical");
+  return bundle.brushes[brushIndex]!;
 }
 
 async function fixture(name: string): Promise<WorldBundle> {

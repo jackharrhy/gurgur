@@ -11,7 +11,7 @@ slice:
 
 - one Bun process owns the persistent 60 Hz Box3D world, serves HTTP and reliable
   WebSocket control, and terminates per-client WebRTC gameplay channels;
-- protocol v2 sends redundant 60 Hz newest-wins intent and 30 Hz self-contained
+- protocol v1 sends redundant 60 Hz newest-wins intent and 30 Hz self-contained
   quantized state datagrams; current state is dropped under backpressure rather
   than queued behind obsolete state;
 - players send intent only. Loose props, stacks, dominoes, constraints, grabs,
@@ -32,10 +32,14 @@ slice:
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
   prediction worker, Box3D Wasm, and Three.js presentation.
 
-The existing compiler, entity schema, mechanisms, persistence, browser input,
-render pipeline, and content-authoring surfaces remain in place. Canonical
-networking and physics documents and AGENTS invariants were revised where the
-former dynamic-prop prediction design was unsound.
+The repository is consolidated around `apps/server`, `apps/web`,
+`packages/engine`, and `packages/game`. The typed catalog compiles mapper
+classnames into a closed game-owned union; engine, renderer dispatch, and
+transport use capabilities or immutable bundle indices instead of classnames.
+World settings/spawns/reset markers are partitioned, persistence has one strict
+game-state document beside structured world/body/player tables, and content,
+browser, network, and soak commands are grouped behind four discoverable
+dispatchers.
 
 `werift@0.23.0` remains pinned. Its packet-lifetime defect is not vendored or
 patched; state uses its working one-retransmission policy and the application
@@ -88,9 +92,9 @@ respawn discontinuity.
 Scheduled soaks remain first-class commands:
 
 ```sh
-bun run soak:physics
-bun run soak:persistence
-bun run soak:connections
+bun run soak -- physics
+bun run soak -- persistence
+bun run soak -- connections
 ```
 
 ## Active focus
@@ -113,16 +117,10 @@ deployment and breadth:
 ```sh
 bun run check
 bun run build
-bun run harness:matrix
-bun run smoke:browser
-bun run smoke:latency
-bun run smoke:dynamic
-bun run smoke:push
-bun run smoke:grab
-bun run smoke:touch
-bun run smoke:gamepad
-bun run smoke:reconnect
-bun run soak:physics
-bun run soak:persistence
-bun run soak:connections
+bun run content -- compile
+bun run test:network -- matrix
+bun run test:browser -- all
+bun run soak -- physics
+bun run soak -- persistence
+bun run soak -- connections
 ```
