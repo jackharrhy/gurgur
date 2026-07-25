@@ -33,4 +33,52 @@ describe("compiled game entity decoder", () => {
       ]),
     ).toThrow("logic-counter");
   });
+
+  test("validates ambient audio and its typed listener trigger", () => {
+    expect(
+      decodeCompiledGameEntities([
+        {
+          kind: "ambient-audio",
+          asset: "music/dylan",
+          volume: 0.8,
+          fadeInSeconds: 0.25,
+          fadeOutSeconds: 0.5,
+          loop: true,
+          priority: 2,
+          body: null,
+          presentation: { kind: "none" },
+          interaction: "none",
+        },
+        {
+          kind: "trigger",
+          authoredId: "trigger.audio.garden",
+          mode: "multiple",
+          outputs: {
+            enter: { targetEntityIndices: [0], input: "play" },
+            exit: { targetEntityIndices: [0], input: "stop" },
+          },
+          waitSeconds: 0.5,
+          body: { kind: "sensor-brush", brushIndices: [0] },
+          presentation: { kind: "none" },
+          interaction: "none",
+        },
+      ]),
+    ).toHaveLength(2);
+    expect(() =>
+      decodeCompiledGameEntities([
+        {
+          kind: "ambient-audio",
+          asset: "../dylan.mp3",
+          volume: 0.8,
+          fadeInSeconds: 0.25,
+          fadeOutSeconds: 0.5,
+          loop: true,
+          priority: 2,
+          body: null,
+          presentation: { kind: "none" },
+          interaction: "none",
+        },
+      ]),
+    ).toThrow("extensionless logical asset ID");
+  });
 });

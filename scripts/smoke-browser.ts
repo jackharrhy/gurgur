@@ -81,6 +81,19 @@ const browser =
     ? await firefox.launch({ headless: true })
     : await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+await page.addInitScript(() => {
+  const state = { exposed: false, hiddenSamples: 0 };
+  Object.defineProperty(window, "__gurgurSmokeViewGate", { value: state });
+  const sample = (): void => {
+    const canvas = document.querySelector("#world");
+    if (canvas && document.body.dataset.playerViewReady !== "true") {
+      state.hiddenSamples += 1;
+      if (Number(getComputedStyle(canvas).opacity) !== 0) state.exposed = true;
+    }
+    if (document.body.dataset.playerViewReady !== "true") requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
+});
 if (process.env.SMOKE_RTC_TRACE === "1")
   page.on("websocket", (socket) => {
     socket.on("framesent", ({ payload }) => {
@@ -152,19 +165,64 @@ try {
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-input-ready="true"]').waitFor({ timeout: 5_000 });
+  const viewGate = await page.evaluate(() => {
+    const state = (
+      window as unknown as {
+        __gurgurSmokeViewGate: { exposed: boolean; hiddenSamples: number };
+      }
+    ).__gurgurSmokeViewGate;
+    const canvas = document.querySelector("#world");
+    return {
+      ...state,
+      canvasOpacity: canvas ? getComputedStyle(canvas).opacity : null,
+      bodyBackground: getComputedStyle(document.body).backgroundColor,
+      ready: document.body.dataset.playerViewReady,
+    };
+  });
+  if (
+    viewGate.exposed ||
+    viewGate.hiddenSamples === 0 ||
+    viewGate.canvasOpacity !== "1" ||
+    viewGate.bodyBackground !== "rgb(0, 0, 0)" ||
+    viewGate.ready !== "true"
+  ) {
+    throw new Error(`player-view reveal gate failed: ${JSON.stringify(viewGate)}`);
+  }
+  if (scenario === "stale-session") {
+    for (let reload = 0; reload < 3; reload += 1) {
+      await page.reload();
+      const outcome = await Promise.race([
+        page
+          .locator('body[data-close-reason="stale socket generation"]')
+          .waitFor({ timeout: 5_000 })
+          .then(() => "stale" as const),
+        page
+          .locator('body[data-input-ready="true"]')
+          .waitFor({ timeout: 5_000 })
+          .then(() => "ready" as const),
+      ]);
+      if (outcome === "stale")
+        throw new Error(`hard reload ${reload + 1} reused a stale socket generation`);
+    }
+  }
   await page.waitForFunction(() =>
     performance
       .getEntriesByType("resource")
       .some((entry) => new URL(entry.name).pathname.startsWith("/textures/")),
   );
   const shell = await page.evaluate(() => {
-    const canvas = document.querySelector("#world");
+    const canvas = document.querySelector<HTMLCanvasElement>("#world");
     const main = document.querySelector("main");
+    canvas?.focus();
+    const canvasStyle = canvas ? getComputedStyle(canvas) : null;
     return {
       mainChildren: main?.childElementCount,
       canvasChildren: main?.querySelectorAll(":scope > canvas").length,
       controls: document.querySelectorAll("button, [role=button], input, .hud").length,
-      cursor: canvas ? getComputedStyle(canvas).cursor : null,
+      canvasFocused: document.activeElement === canvas,
+      canvasBorderWidth: canvasStyle?.borderWidth,
+      canvasOutlineStyle: canvasStyle?.outlineStyle,
+      cursor: canvasStyle?.cursor,
       reticle: main ? getComputedStyle(main, "::after").content : null,
     };
   });
@@ -172,6 +230,9 @@ try {
     shell.mainChildren !== 1 ||
     shell.canvasChildren !== 1 ||
     shell.controls !== 0 ||
+    !shell.canvasFocused ||
+    shell.canvasBorderWidth !== "0px" ||
+    shell.canvasOutlineStyle !== "none" ||
     shell.cursor !== "none" ||
     !["none", "normal"].includes(shell.reticle ?? "")
   ) {

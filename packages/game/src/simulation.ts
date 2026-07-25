@@ -2,19 +2,28 @@ import type { PhysicsStepEvents, RuntimeId, Vec3 } from "@gurgur/engine";
 import type { GameEngine } from "./engine-api";
 import { createGamePlayers, type GamePlayers, type GamePlayersOptions } from "./players";
 import type { PersistedGameState } from "./state";
-import type { WorldBundle } from "./world";
+import {
+  entityInputDomain,
+  type EntityInput,
+  type OutputConnection,
+  type TriggerOutputs,
+  type WorldBundle,
+} from "./world";
 
 type Trigger = {
+  entityIndex: number;
   handle: RuntimeId;
   authoredId: string;
   mode: "once" | "multiple";
-  target: string;
+  outputs: TriggerOutputs;
   waitTicks: number;
   readyAtTick: number;
   consumed: boolean;
+  activeVisitors: Set<string>;
 };
 
 export type Mechanism = {
+  entityIndex: number;
   handle: RuntimeId;
   authoredId: string;
   mode: "door" | "platform";
@@ -29,6 +38,7 @@ export type Mechanism = {
 };
 
 type Relay = {
+  entityIndex: number;
   authoredId: string;
   targetname: string;
   target: string;
@@ -48,7 +58,10 @@ export type Button = {
 export type GameSimulation = {
   readonly players: GamePlayers;
   step(): void;
-  processSensorBegins(events: PhysicsStepEvents["sensorBegin"]): void;
+  processSensorEvents(
+    begins: PhysicsStepEvents["sensorBegin"],
+    ends: PhysicsStepEvents["sensorEnd"],
+  ): void;
   use(target: RuntimeId, origin: Vec3, displacement: Vec3): boolean;
   persistedState(): PersistedGameState;
   reset(): void;
@@ -75,20 +88,55 @@ export function createGameSimulation(options: GameSimulationOptions): GameSimula
     engine.setKinematicTarget(mechanism.handle, position);
   };
 
+  const activateRelay = (relay: Relay): void => {
+    if (relay.once && relay.fired) return;
+    relay.fired = true;
+    delayedSignals.push({
+      target: relay.target,
+      dueTick: engine.tick + relay.delayTicks,
+    });
+    delayedSignals.sort((a, b) => a.dueTick - b.dueTick);
+    engine.requestSave();
+  };
+
+  const activateMechanism = (mechanism: Mechanism, input: EntityInput): void => {
+    if (input === "open") {
+      if (mechanism.progress < 1) mechanism.direction = 1;
+    } else if (input === "close") {
+      if (mechanism.progress > 0) mechanism.direction = -1;
+    } else {
+      mechanism.direction = mechanism.progress >= 1 ? -1 : 1;
+    }
+    mechanism.resumeAtTick = 0;
+    engine.requestSave();
+  };
+
   const emitTarget = (targetname: string): void => {
-    const tick = engine.tick;
     for (const relay of relays) {
-      if (relay.targetname !== targetname || (relay.once && relay.fired)) continue;
-      relay.fired = true;
-      delayedSignals.push({ target: relay.target, dueTick: tick + relay.delayTicks });
-      delayedSignals.sort((a, b) => a.dueTick - b.dueTick);
-      engine.requestSave();
+      if (relay.targetname === targetname) activateRelay(relay);
     }
     for (const mechanism of mechanisms) {
       if (mechanism.targetname !== targetname) continue;
-      mechanism.direction = mechanism.progress >= 1 ? -1 : 1;
-      mechanism.resumeAtTick = 0;
-      engine.requestSave();
+      activateMechanism(mechanism, "trigger");
+    }
+  };
+
+  const dispatchConnection = (connection: OutputConnection): void => {
+    for (const entityIndex of connection.targetEntityIndices) {
+      const relay = relays.find((candidate) => candidate.entityIndex === entityIndex);
+      if (relay && connection.input === "trigger") {
+        activateRelay(relay);
+        continue;
+      }
+      const mechanism = mechanisms.find((candidate) => candidate.entityIndex === entityIndex);
+      if (
+        mechanism &&
+        (connection.input === "trigger" ||
+          connection.input === "open" ||
+          connection.input === "close")
+      ) {
+        activateMechanism(mechanism, connection.input);
+      }
     }
   };
 
@@ -133,17 +181,32 @@ export function createGameSimulation(options: GameSimulationOptions): GameSimula
     }
   };
 
-  const processSensorBegins = (events: PhysicsStepEvents["sensorBegin"]): void => {
+  const processSensorEvents = (
+    begins: PhysicsStepEvents["sensorBegin"],
+    ends: PhysicsStepEvents["sensorEnd"],
+  ): void => {
     const proxyKeys = new Set(players.proxies().map(key));
     const tick = engine.tick;
-    for (const event of events) {
+    for (const event of begins) {
       if (!proxyKeys.has(key(event.visitor))) continue;
       const trigger = triggers.find((candidate) => key(candidate.handle) === key(event.sensor));
       if (!trigger || trigger.consumed || trigger.readyAtTick > tick) continue;
-      emitTarget(trigger.target);
+      const visitor = key(event.visitor);
+      if (trigger.activeVisitors.has(visitor)) continue;
+      if (connectionIsGame(trigger.outputs.enter, bundle))
+        dispatchConnection(trigger.outputs.enter);
+      if (trigger.outputs.exit && connectionIsGame(trigger.outputs.exit, bundle))
+        trigger.activeVisitors.add(visitor);
       if (trigger.mode === "once") trigger.consumed = true;
       else trigger.readyAtTick = tick + trigger.waitTicks;
       engine.requestSave();
+    }
+    for (const event of ends) {
+      if (!proxyKeys.has(key(event.visitor))) continue;
+      const trigger = triggers.find((candidate) => key(candidate.handle) === key(event.sensor));
+      const visitor = key(event.visitor);
+      if (!trigger?.activeVisitors.delete(visitor) || !trigger.outputs.exit) continue;
+      dispatchConnection(trigger.outputs.exit);
     }
   };
 
@@ -226,7 +289,7 @@ export function createGameSimulation(options: GameSimulationOptions): GameSimula
   return {
     players,
     step,
-    processSensorBegins,
+    processSensorEvents,
     use,
     persistedState,
     reset,
@@ -254,23 +317,31 @@ function populate(options: Population): void {
   );
   for (const [entityIndex, entity] of bundle.entities.entries()) {
     if (entity.kind === "trigger") {
+      if (
+        !connectionIsGame(entity.outputs.enter, bundle) &&
+        (!entity.outputs.exit || !connectionIsGame(entity.outputs.exit, bundle))
+      )
+        continue;
       const saved = restoredSignals.get(entity.authoredId);
       const body = engine.bodies.forEntity(entityIndex);
       if (!body) throw new Error(`trigger body ${entity.authoredId} is missing`);
       triggers.push({
+        entityIndex,
         handle: body.id,
         authoredId: entity.authoredId,
         mode: entity.mode,
-        target: entity.target,
+        outputs: entity.outputs,
         waitTicks: Math.max(1, Math.ceil(entity.waitSeconds / engine.dt)),
         readyAtTick: saved?.kind === "trigger" ? saved.readyAtTick : 0,
         consumed: saved?.kind === "trigger" ? saved.consumed : false,
+        activeVisitors: new Set(),
       });
       continue;
     }
     if (entity.kind === "relay") {
       const saved = restoredSignals.get(entity.authoredId);
       relays.push({
+        entityIndex,
         authoredId: entity.authoredId,
         targetname: entity.targetName,
         target: entity.target,
@@ -301,6 +372,7 @@ function populate(options: Population): void {
     const distance = entity.distance;
     const saved = restoredMechanisms.get(entity.authoredId);
     const mechanism: Mechanism = {
+      entityIndex,
       handle: body.id,
       authoredId: entity.authoredId,
       mode: entity.mode,
@@ -319,6 +391,11 @@ function populate(options: Population): void {
     };
     mechanisms.push(mechanism);
   }
+}
+
+function connectionIsGame(connection: OutputConnection, bundle: WorldBundle): boolean {
+  const target = bundle.entities[connection.targetEntityIndices[0]!]!;
+  return entityInputDomain(target, connection.input) === "game";
 }
 
 function key(id: RuntimeId): string {

@@ -3,6 +3,7 @@ import {
   addMissingAuthoredIds,
   compileWorld,
   entityDefinitions,
+  logicalAudioAssetProperty,
   logicalSpriteAssetProperty,
 } from "../src";
 
@@ -71,6 +72,7 @@ describe("typed entity catalog", () => {
     expect(Object.keys(entityDefinitions).toSorted()).toEqual(
       [
         "env_sprite",
+        "ambient_audio",
         "func_button",
         "func_door",
         "func_physics",
@@ -97,6 +99,18 @@ describe("typed entity catalog", () => {
     };
     expect(property.parse("decor/fern", source)).toBe("decor/fern");
     expect(() => property.parse("../fern.png", source)).toThrow("extensionless logical asset ID");
+  });
+
+  test("validates extensionless logical audio IDs at the authoring boundary", () => {
+    const property = logicalAudioAssetProperty("audio");
+    const source = {
+      sourceName: "fixture.map",
+      classname: "ambient_audio",
+      property: "audio",
+      line: 4,
+    };
+    expect(property.parse("music/dylan", source)).toBe("music/dylan");
+    expect(() => property.parse("../dylan.mp3", source)).toThrow("extensionless logical asset ID");
   });
 
   test("partitions authored settings, spawns, reset markers, and sprites", () => {
@@ -219,9 +233,10 @@ ${cube}
 ${cube}
 }
 {
-"classname" "func_button"
-"authoredId" "button.shared"
-"target" "shared"
+"classname" "trigger_multiple"
+"authoredId" "trigger.shared"
+"onEnterTarget" "shared"
+"onEnterInput" "open"
 ${cube}
 }`),
       "targets.map",
@@ -229,8 +244,106 @@ ${cube}
     expect(bundle.entities.map((entity) => entity.kind)).toEqual([
       "linear-mover",
       "linear-mover",
-      "button",
+      "trigger",
     ]);
+    expect(bundle.entities[2]).toMatchObject({
+      outputs: {
+        enter: { targetEntityIndices: [0, 1], input: "open" },
+      },
+    });
+  });
+
+  test("compiles typed trigger enter and exit outputs to ambient entity indices", () => {
+    const bundle = compileWorld(
+      baseMap(`
+{
+"classname" "ambient_audio"
+"targetname" "garden_song"
+"audio" "dylan"
+"volume" "0.8"
+"fadeIn" "0.25"
+"fadeOut" "0.5"
+"loop" "1"
+"priority" "4"
+}
+{
+"classname" "trigger_multiple"
+"authoredId" "trigger.audio.garden"
+"onEnterTarget" "garden_song"
+"onEnterInput" "play"
+"onExitTarget" "garden_song"
+"onExitInput" "stop"
+${cube}
+}`),
+      "audio.map",
+    );
+    expect(bundle.entities).toEqual([
+      {
+        kind: "ambient-audio",
+        asset: "dylan",
+        volume: 0.8,
+        fadeInSeconds: 0.25,
+        fadeOutSeconds: 0.5,
+        loop: true,
+        priority: 4,
+        body: null,
+        presentation: { kind: "none" },
+        interaction: "none",
+      },
+      {
+        kind: "trigger",
+        authoredId: "trigger.audio.garden",
+        mode: "multiple",
+        outputs: {
+          enter: { targetEntityIndices: [0], input: "play" },
+          exit: { targetEntityIndices: [0], input: "stop" },
+        },
+        waitSeconds: 0.5,
+        body: { kind: "sensor-brush", brushIndices: [1] },
+        presentation: { kind: "none" },
+        interaction: "none",
+      },
+    ]);
+  });
+
+  test("rejects unsupported receiver inputs and incomplete listener pairs", () => {
+    expect(() =>
+      compileWorld(
+        baseMap(`
+{
+"classname" "ambient_audio"
+"targetname" "garden_song"
+"audio" "dylan"
+}
+{
+"classname" "trigger_multiple"
+"authoredId" "trigger.audio.invalid-input"
+"onEnterTarget" "garden_song"
+"onEnterInput" "open"
+${cube}
+}`),
+        "invalid-input.map",
+      ),
+    ).toThrow("ambient-audio target garden_song does not support input open");
+
+    expect(() =>
+      compileWorld(
+        baseMap(`
+{
+"classname" "ambient_audio"
+"targetname" "garden_song"
+"audio" "dylan"
+}
+{
+"classname" "trigger_multiple"
+"authoredId" "trigger.audio.missing-exit"
+"onEnterTarget" "garden_song"
+"onEnterInput" "play"
+${cube}
+}`),
+        "missing-exit.map",
+      ),
+    ).toThrow("listener outputs must pair play on enter with stop on exit");
   });
 });
 

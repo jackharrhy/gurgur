@@ -712,8 +712,7 @@ export class PhysicsWorld {
       center2: { x: 0, y: capsuleShape.halfSegment, z: 0 },
       radius: capsuleShape.radius,
     };
-    const filter = this.#box3d.b3DefaultQueryFilter();
-    filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    const filter = this.#queryFilter();
     const planeResult = this.#box3d.createPlaneResult();
     const target = add(start, desired);
     let origin = { ...start };
@@ -766,8 +765,7 @@ export class PhysicsWorld {
 
   castCapsule(start: Vec3, desired: Vec3, capsule: { radius: number; halfSegment: number }): Vec3 {
     this.#assertLive();
-    const filter = this.#box3d.b3DefaultQueryFilter();
-    filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    const filter = this.#queryFilter();
     const fraction = this.#box3d.b3World_CastMover(
       this.#world,
       start,
@@ -785,8 +783,7 @@ export class PhysicsWorld {
 
   capsuleFits(center: Vec3, capsule: { radius: number; halfSegment: number }): boolean {
     this.#assertLive();
-    const filter = this.#box3d.b3DefaultQueryFilter();
-    filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    const filter = this.#queryFilter();
     let overlaps = false;
     const plane = this.#box3d.createPlaneResult();
     this.#box3d.b3World_CollideMover(
@@ -818,8 +815,7 @@ export class PhysicsWorld {
     options: { includePlayerProxies?: boolean; ignoreBodies?: readonly RuntimeId[] } = {},
   ): { point: Vec3; normal: Vec3; fraction: number; body: RuntimeId } | null {
     this.#assertLive();
-    const filter = this.#box3d.b3DefaultQueryFilter();
-    if (!options.includePlayerProxies) filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    const filter = this.#queryFilter(options.includePlayerProxies);
     if (options.ignoreBodies?.length) {
       const ignored = new Set(options.ignoreBodies.map(runtimeKey));
       let closest: { point: Vec3; normal: Vec3; fraction: number; body: RuntimeId } | null = null;
@@ -1007,6 +1003,13 @@ export class PhysicsWorld {
   #rotation(body: b3BodyId): Quat {
     const rotation = this.#box3d.b3Body_GetRotation(body);
     return { x: rotation.v.x, y: rotation.v.y, z: rotation.v.z, w: rotation.s };
+  }
+
+  #queryFilter(includePlayerProxies = false) {
+    const filter = this.#box3d.b3DefaultQueryFilter();
+    filter.maskBits &= ~TRIGGER_CATEGORY;
+    if (!includePlayerProxies) filter.maskBits &= ~PLAYER_PROXY_CATEGORY;
+    return filter;
   }
 
   #bodyType(type: BodyKind) {

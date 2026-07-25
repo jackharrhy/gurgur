@@ -308,6 +308,29 @@ describe("PhysicsWorld", () => {
     }
   });
 
+  test("keeps sensor hulls non-solid to player geometry queries", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      world.createSensorHull({
+        position: { x: 0, y: PLAYER_HALF_HEIGHT, z: 0 },
+        vertices: boxVertices(1),
+      });
+      const start = { x: -2, y: PLAYER_HALF_HEIGHT, z: 0 };
+      const desired = { x: 4, y: 0, z: 0 };
+      const capsule = {
+        radius: PLAYER_CAPSULE_RADIUS,
+        halfSegment: PLAYER_CAPSULE_HALF_SEGMENT,
+      };
+
+      expect(world.moveCapsule(start, desired, capsule).x).toBeGreaterThan(1.9);
+      expect(world.castCapsule(start, desired, capsule).x).toBeGreaterThan(1.9);
+      expect(world.capsuleFits({ x: 0, y: PLAYER_HALF_HEIGHT, z: 0 }, capsule)).toBe(true);
+      expect(world.raycastClosest(start, desired)).toBeNull();
+    } finally {
+      world.dispose();
+    }
+  });
+
   test("carries a grounded controller with kinematic support point velocity", async () => {
     const world = await PhysicsWorld.create();
     try {

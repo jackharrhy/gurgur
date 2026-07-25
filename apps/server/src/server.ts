@@ -37,9 +37,14 @@ import {
 } from "@gurgur/engine";
 import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/game";
 import { AuthoritativeGame } from "./game";
-import { loadAssetManifest, loadMaterialTextureAsset, loadSpriteAsset } from "./material-textures";
+import {
+  loadAssetManifest,
+  loadAudioAsset,
+  loadMaterialTextureAsset,
+  loadSpriteAsset,
+} from "./material-textures";
 import { WorldStore } from "./store";
-import { guardIceUdpSockets, omitMdnsHostCandidates } from "./rtc";
+import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -141,6 +146,7 @@ export async function createGurgurServer(
     throw new Error("missing generated player billboard; run bun run render:player");
   const materialTextureRoot = new URL("../../../content/textures/", import.meta.url);
   const spriteRoot = new URL("../../../content/sprites/", import.meta.url);
+  const audioRoot = new URL("../../../content/audio/", import.meta.url);
   const store = new WorldStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "./data/gurgur.sqlite",
   );
@@ -350,7 +356,7 @@ export async function createGurgurServer(
       return;
     }
     try {
-      await peer.setRemoteDescription(omitMdnsHostCandidates(description));
+      await peer.setRemoteDescription(prepareMdnsIceDescription(description));
       if (socket.data.peerConnection === peer) socket.data.rtcNegotiating = false;
     } catch {
       if (socket.data.peerConnection === peer) {
@@ -386,7 +392,7 @@ export async function createGurgurServer(
       }),
       "/assets.json": {
         async GET(request: Request) {
-          const manifest = await loadAssetManifest(materialTextureRoot, spriteRoot);
+          const manifest = await loadAssetManifest(materialTextureRoot, spriteRoot, audioRoot);
           const headers = {
             "cache-control": "no-cache",
             "content-type": "application/json",
@@ -396,7 +402,11 @@ export async function createGurgurServer(
             return new Response(null, { status: 304, headers });
           }
           return Response.json(
-            { materials: manifest.materials, sprites: manifest.sprites },
+            {
+              materials: manifest.materials,
+              sprites: manifest.sprites,
+              audio: manifest.audio,
+            },
             { headers },
           );
         },
@@ -434,6 +444,25 @@ export async function createGurgurServer(
             headers: {
               "cache-control": "public, max-age=31536000, immutable",
               "content-type": "image/png",
+              etag: `"${asset.hash}"`,
+            },
+          });
+        },
+      },
+      "/audio/*": {
+        async GET(request: Request) {
+          const url = new URL(request.url);
+          const asset = await loadAudioAsset(audioRoot, url.pathname);
+          if (!asset) return new Response("audio not found", { status: 404 });
+          if (url.searchParams.get("v") !== asset.hash) {
+            url.search = "";
+            url.searchParams.set("v", asset.hash);
+            return Response.redirect(url, 307);
+          }
+          return new Response(asset.file, {
+            headers: {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "audio/mpeg",
               etag: `"${asset.hash}"`,
             },
           });

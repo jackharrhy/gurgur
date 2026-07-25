@@ -41,6 +41,12 @@ brush-face smart tags so authors can select and filter them in the editor. Valve
 220 itself has no arbitrary per-face presentation metadata, so the material
 namespace is the authored contract; new content should use `GURGUR/REAL/*`.
 
+`GURGUR/SKIP` marks collision-only brush faces. The generated TrenchBroom
+configuration exposes it as a transparent brush-face smart tag. Compilation
+retains its geometry for static and moving-body collision and source diagnostics,
+but excludes it from static render batches and moving-brush presentation.
+`GURGUR/SKIP` never makes a brush nonsolid.
+
 The installer follows TrenchBroom's platform user-data locations. Set
 `TRENCHBROOM_USER_DATA_PATH` only for a portable or otherwise nonstandard
 installation.
@@ -58,11 +64,11 @@ and invalid entity properties fail compilation with those source coordinates.
 
 ## Brush compilation
 
-For each convex brush, the compiler orients every face plane toward the brush
-interior, intersects plane triplets, retains points inside all half-spaces,
-deduplicates vertices, sorts each face around its normal, and triangulates it with
-a stable fan. Epsilon policy and sort order are fixed so identical inputs produce
-identical output.
+For each convex brush, the compiler orients every face plane with its normal
+outward from the brush interior, intersects plane triplets, retains points inside
+all half-spaces, deduplicates vertices, sorts each face around its normal, and
+triangulates it with a stable outward fan. Epsilon policy and sort order are fixed
+so identical inputs produce identical output.
 
 Valve face-defining points establish an infinite plane and need not lie inside the
 eventual clipped face. The compiler therefore never guesses an interior point by
@@ -119,6 +125,7 @@ The base schema contains:
 | `func_button`       | physical/use-activated signal source            |
 | `info_world_reset`  | authenticated administrative reset marker       |
 | `env_sprite`        | camera-facing render-only pixel-art prop        |
+| `ambient_audio`     | targeted per-listener music node                |
 
 The schema drives compiler validation, FGD generation, and the TrenchBroom game
 configuration. The authoritative server constructs the corresponding runtime
@@ -128,8 +135,8 @@ composable; arbitrary mapper scripts and runtime code strings are forbidden.
 Compilation requires exactly one `worldspawn`, at least one uniquely named
 player spawn, and exactly one spawn named `default`. Authored gravity drives
 authoritative and predicted physics/controller behavior; authored sky color
-drives renderer background and fog. Every `target` must resolve, while multiple
-recipients may intentionally share a `targetname`.
+drives renderer background and fog. Every target property must resolve, while
+multiple recipients may intentionally share a `targetname`.
 
 Every entity whose state can persist requires a unique explicit `authoredId`.
 Compilation fails on missing or duplicate persistent IDs. Entity order, line
@@ -147,10 +154,24 @@ gameplay union and strict decoder live in `packages/game/src/world.ts`. They are
 the source for compiler validation and the generated
 `content/trenchbroom/Gurgur.fgd`. Mapper classnames and raw map properties do not
 enter the runtime bundle; source identity survives only in compiler diagnostics.
-Mechanisms use typed `targetname`/`target` signal links. Doors and platforms use
+Triggers compile `onEnterTarget`/`onEnterInput` and optional
+`onExitTarget`/`onExitInput` properties into bundle-index connections. The
+closed input vocabulary is `trigger`, `open`, `close`, `play`, and `stop`;
+compilation rejects unsupported receiver/input pairs. Doors and platforms use
 map-space `moveDirection`, map-unit `distance` and `speed`, endpoint `wait`, and
 `startOpen`. Dynamic bodies author density, friction, and restitution. Relays
-author delay and one-shot behavior; triggers and buttons only emit signals.
+retain their simple delayed target forwarding, while triggers use the typed
+connection path.
+
+Area music is composed from two typed entities rather than embedded in trigger
+code. A regular `trigger_multiple` sends `play` to an
+`ambient_audio.targetname` on enter and `stop` to the same recipients on exit.
+The compiler requires that listener-local pair. While the local listener
+remains inside any such convex volume, the referenced audio node is claimed;
+leaving the last volume releases it. Audio nodes author a logical MP3 asset ID,
+volume, loop flag, fade durations, and deterministic overlap priority. These
+per-listener presentation claims require no authoritative transport or
+persisted state.
 
 Navigation meshes are not part of Gurgur's runtime or bundle format. If navigation
 becomes product scope, it must be generated from this compiler's collision

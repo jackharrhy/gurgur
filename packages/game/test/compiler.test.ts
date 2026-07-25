@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileWorld } from "../src";
+import { compileWorld, SKIP_MATERIAL } from "../src";
 
 type Point = [number, number, number];
 type Transform = (point: Point) => Point;
@@ -36,6 +36,34 @@ describe("Valve geometry conformance fixtures", () => {
       ).toBe(true);
     },
   );
+
+  test("emits outward triangle winding and matching normals for front-face rendering", () => {
+    const brush = compileWorld(
+      mapWithBrush((point) => point),
+      "winding.map",
+    ).brushes[0]!;
+    const center = brush.worldVertices.reduce(
+      (sum, vertex) => ({
+        x: sum.x + vertex.x,
+        y: sum.y + vertex.y,
+        z: sum.z + vertex.z,
+      }),
+      { x: 0, y: 0, z: 0 },
+    );
+    center.x /= brush.worldVertices.length;
+    center.y /= brush.worldVertices.length;
+    center.z /= brush.worldVertices.length;
+
+    for (const [triangleIndex, triangle] of brush.triangles.entries()) {
+      const point = brush.worldVertices[triangle[0]]!;
+      const normal = brush.triangleNormals[triangleIndex]!;
+      const centerSide =
+        normal.x * (center.x - point.x) +
+        normal.y * (center.y - point.y) +
+        normal.z * (center.z - point.z);
+      expect(centerSide).toBeLessThan(-1e-6);
+    }
+  });
 
   test("rejects a degenerate face with complete source identity", () => {
     const source = mapWithBrush((point) => point).replace(
@@ -96,6 +124,19 @@ describe("Valve geometry conformance fixtures", () => {
       x: mapPoint.x / 0.25 + 8,
       y: mapPoint.y / 0.5 + 16,
     });
+  });
+
+  test("compiles skip faces as collision-only presentation", () => {
+    const source = mapWithBrush((point) => point).replace(" FIXTURE [", ` ${SKIP_MATERIAL} [`);
+    const bundle = compileWorld(source, "skip.map");
+    const brush = bundle.brushes[0]!;
+    expect(brush.collisionOnlyFaceIndices).toEqual([0]);
+    expect(brush.triangles).toHaveLength(12);
+    expect(bundle.staticCollision.triangles).toHaveLength(12);
+    expect(bundle.renderBatches.some((batch) => batch.material === SKIP_MATERIAL)).toBeFalse();
+    expect(bundle.renderBatches.reduce((count, batch) => count + batch.indices.length / 3, 0)).toBe(
+      10,
+    );
   });
 
   test("keeps every convex child of a multi-brush moving entity", () => {

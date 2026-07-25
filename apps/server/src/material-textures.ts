@@ -25,6 +25,8 @@ const encodedTexturePath = (relativePath: string): string =>
   `/textures/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
 const encodedSpritePath = (relativePath: string): string =>
   `/sprites/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
+const encodedAudioPath = (relativePath: string): string =>
+  `/audio/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
 
 export async function loadMaterialTextureManifest(
   rootUrl: URL,
@@ -61,14 +63,17 @@ export function materialRenderMode(name: string): "retro" | "reality" {
 export async function loadAssetManifest(
   materialRoot: URL,
   spriteRoot: URL,
+  audioRoot: URL,
 ): Promise<{
   etag: string;
   materials: Record<string, MaterialTextureManifestEntry>;
   sprites: Record<string, string>;
+  audio: Record<string, string>;
 }> {
   const materials = (await loadMaterialTextureManifest(materialRoot)).textures;
-  const sprites = await loadLogicalPngManifest(spriteRoot, encodedSpritePath);
-  const value = { materials, sprites };
+  const sprites = await loadLogicalAssetManifest(spriteRoot, ".png", encodedSpritePath);
+  const audio = await loadLogicalAssetManifest(audioRoot, ".mp3", encodedAudioPath);
+  const value = { materials, sprites, audio };
   return {
     ...value,
     etag: `"${createHash("sha256").update(JSON.stringify(value)).digest("hex")}"`,
@@ -86,20 +91,31 @@ export async function loadSpriteAsset(
   rootUrl: URL,
   pathname: string,
 ): Promise<MaterialTextureAsset | null> {
-  return loadPngAsset(rootUrl, pathname, "/sprites/", encodedSpritePath);
+  return loadFileAsset(rootUrl, pathname, "/sprites/", ".png", encodedSpritePath);
 }
 
-async function loadLogicalPngManifest(
+export async function loadAudioAsset(
   rootUrl: URL,
+  pathname: string,
+): Promise<MaterialTextureAsset | null> {
+  return loadFileAsset(rootUrl, pathname, "/audio/", ".mp3", encodedAudioPath);
+}
+
+async function loadLogicalAssetManifest(
+  rootUrl: URL,
+  extension: string,
   encodePath: (relativePath: string) => string,
 ): Promise<Record<string, string>> {
   const root = fileURLToPath(rootUrl);
   const assets: Array<[string, string]> = [];
-  for await (const path of new Bun.Glob("**/*.png").scan({ cwd: root, dot: false })) {
+  for await (const path of new Bun.Glob(`**/*${extension}`).scan({ cwd: root, dot: false })) {
     const relativePath = path.replaceAll("\\", "/");
     const file = Bun.file(join(root, path));
     const hash = await hashFile(file);
-    assets.push([relativePath.slice(0, -4), `${encodePath(relativePath)}?v=${hash}`]);
+    assets.push([
+      relativePath.slice(0, -extension.length),
+      `${encodePath(relativePath)}?v=${hash}`,
+    ]);
   }
   return Object.fromEntries(assets.toSorted(([left], [right]) => left.localeCompare(right)));
 }
@@ -126,6 +142,16 @@ async function loadPngAsset(
   prefix: string,
   encodePath: (relativePath: string) => string,
 ): Promise<MaterialTextureAsset | null> {
+  return loadFileAsset(rootUrl, pathname, prefix, ".png", encodePath);
+}
+
+async function loadFileAsset(
+  rootUrl: URL,
+  pathname: string,
+  prefix: string,
+  extension: string,
+  encodePath: (relativePath: string) => string,
+): Promise<MaterialTextureAsset | null> {
   if (!pathname.startsWith(prefix)) return null;
   const segments: string[] = [];
   for (const encoded of pathname.slice(prefix.length).split("/")) {
@@ -139,14 +165,14 @@ async function loadPngAsset(
     segments.push(segment);
   }
   const filename = segments.at(-1);
-  if (!filename?.toLowerCase().endsWith(".png")) return null;
+  if (!filename?.toLowerCase().endsWith(extension)) return null;
   const file = Bun.file(join(fileURLToPath(rootUrl), ...segments));
   if (!(await file.exists())) return null;
   const relativePath = segments.join("/");
   return {
     file,
     hash: await hashFile(file),
-    key: relativePath.slice(0, -4),
+    key: relativePath.slice(0, -extension.length),
     url: encodePath(relativePath),
   };
 }

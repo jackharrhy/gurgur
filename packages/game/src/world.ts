@@ -16,6 +16,18 @@ type EntityBase = {
   origin?: Vec3;
 };
 
+export type EntityInput = "trigger" | "open" | "close" | "play" | "stop";
+
+export type OutputConnection = {
+  targetEntityIndices: number[];
+  input: EntityInput;
+};
+
+export type TriggerOutputs = {
+  enter: OutputConnection;
+  exit?: OutputConnection;
+};
+
 export type PhysicsPropEntity = EntityBase & {
   kind: "physics-prop";
   authoredId: string;
@@ -43,7 +55,7 @@ export type TriggerEntity = EntityBase & {
   kind: "trigger";
   authoredId: string;
   mode: "once" | "multiple";
-  target: string;
+  outputs: TriggerOutputs;
   waitSeconds: number;
   body: SensorBrushBody;
   presentation: { kind: "none" };
@@ -80,13 +92,27 @@ export type SpriteEntity = EntityBase & {
   interaction: "none";
 };
 
+export type AmbientAudioEntity = EntityBase & {
+  kind: "ambient-audio";
+  asset: string;
+  volume: number;
+  fadeInSeconds: number;
+  fadeOutSeconds: number;
+  loop: boolean;
+  priority: number;
+  body: null;
+  presentation: { kind: "none" };
+  interaction: "none";
+};
+
 export type CompiledGameEntity =
   | PhysicsPropEntity
   | LinearMoverEntity
   | TriggerEntity
   | RelayEntity
   | ButtonEntity
-  | SpriteEntity;
+  | SpriteEntity
+  | AmbientAudioEntity;
 
 export type WorldBundle = EngineWorldBundle<CompiledGameEntity>;
 export type WorldMessage = EngineWorldMessage<CompiledGameEntity>;
@@ -131,7 +157,7 @@ export function decodeCompiledGameEntities(value: unknown): CompiledGameEntity[]
         requireInteraction(record, "none");
         if (record.mode !== "once" && record.mode !== "multiple")
           throw new Error("world bundle trigger mode is invalid");
-        assertString(record.target, "world bundle trigger target");
+        assertTriggerOutputs(record.outputs);
         assertFiniteFields(record, ["waitSeconds"]);
         break;
       case "relay":
@@ -160,11 +186,108 @@ export function decodeCompiledGameEntities(value: unknown): CompiledGameEntity[]
         if (!isRecord(record.presentation) || record.presentation.kind !== "sprite")
           throw new Error("world bundle sprite presentation must be sprite");
         break;
+      case "ambient-audio":
+        if (record.body !== null) throw new Error("world bundle ambient audio cannot have a body");
+        requireNoPresentation(record);
+        requireInteraction(record, "none");
+        assertLogicalAssetId(record.asset, "world bundle ambient audio asset");
+        assertFiniteFields(record, ["volume", "fadeInSeconds", "fadeOutSeconds", "priority"]);
+        if ((record.volume as number) < 0 || (record.volume as number) > 1)
+          throw new Error("world bundle ambient audio volume must be between zero and one");
+        if ((record.fadeInSeconds as number) < 0 || (record.fadeOutSeconds as number) < 0)
+          throw new Error("world bundle ambient audio fades must not be negative");
+        if (!Number.isSafeInteger(record.priority))
+          throw new Error("world bundle ambient audio priority must be an integer");
+        if (typeof record.loop !== "boolean")
+          throw new Error("world bundle ambient audio loop must be boolean");
+        break;
       default:
         throw new Error(`world bundle entity kind ${entity.kind} is invalid`);
     }
   }
-  return entities as CompiledGameEntity[];
+  const compiledEntities = entities as CompiledGameEntity[];
+  for (const entity of compiledEntities) {
+    if (entity.kind !== "trigger") continue;
+    for (const connection of [entity.outputs.enter, entity.outputs.exit]) {
+      if (!connection) continue;
+      for (const targetEntityIndex of connection.targetEntityIndices) {
+        const target = compiledEntities[targetEntityIndex];
+        if (!target) throw new Error("world bundle trigger output target index is out of bounds");
+        if (!entityInputDomain(target, connection.input))
+          throw new Error(`world bundle ${target.kind} does not support input ${connection.input}`);
+      }
+    }
+    assertListenerOutputPair(entity.outputs, compiledEntities);
+  }
+  return compiledEntities;
+}
+
+export function entityInputDomain(
+  entity: CompiledGameEntity,
+  input: EntityInput,
+): "game" | "listener" | null {
+  if (entity.kind === "ambient-audio")
+    return input === "play" || input === "stop" ? "listener" : null;
+  if (entity.kind === "linear-mover")
+    return input === "trigger" || input === "open" || input === "close" ? "game" : null;
+  if (entity.kind === "relay") return input === "trigger" ? "game" : null;
+  return null;
+}
+
+function assertTriggerOutputs(value: unknown): asserts value is TriggerOutputs {
+  if (!isRecord(value)) throw new Error("world bundle trigger outputs must be an object");
+  const fields = Object.keys(value);
+  if (fields.some((field) => field !== "enter" && field !== "exit") || !("enter" in value))
+    throw new Error("world bundle trigger outputs are invalid");
+  assertOutputConnection(value.enter);
+  if (value.exit !== undefined) assertOutputConnection(value.exit);
+}
+
+function assertOutputConnection(value: unknown): asserts value is OutputConnection {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((field) => !["input", "targetEntityIndices"].includes(field))
+  )
+    throw new Error("world bundle output connection is invalid");
+  if (!entityInput(value.input)) throw new Error("world bundle output connection input is invalid");
+  if (
+    !Array.isArray(value.targetEntityIndices) ||
+    value.targetEntityIndices.length === 0 ||
+    value.targetEntityIndices.length > 1_024 ||
+    value.targetEntityIndices.some((index) => !Number.isSafeInteger(index) || index < 0) ||
+    new Set(value.targetEntityIndices).size !== value.targetEntityIndices.length
+  ) {
+    throw new Error("world bundle output connection targets are invalid");
+  }
+}
+
+function assertListenerOutputPair(outputs: TriggerOutputs, entities: CompiledGameEntity[]): void {
+  const enterDomain = connectionDomain(outputs.enter, entities);
+  const exitDomain = outputs.exit ? connectionDomain(outputs.exit, entities) : null;
+  if (enterDomain !== "listener" && exitDomain !== "listener") return;
+  if (
+    outputs.enter.input !== "play" ||
+    outputs.exit?.input !== "stop" ||
+    outputs.enter.targetEntityIndices.length !== outputs.exit.targetEntityIndices.length ||
+    outputs.enter.targetEntityIndices.some(
+      (target, index) => outputs.exit!.targetEntityIndices[index] !== target,
+    )
+  ) {
+    throw new Error(
+      "world bundle listener trigger outputs must pair play on enter with stop on exit",
+    );
+  }
+}
+
+function connectionDomain(
+  connection: OutputConnection,
+  entities: CompiledGameEntity[],
+): "game" | "listener" | null {
+  return entityInputDomain(entities[connection.targetEntityIndices[0]!]!, connection.input);
+}
+
+function entityInput(value: unknown): value is EntityInput {
+  return ["trigger", "open", "close", "play", "stop"].includes(String(value));
 }
 
 function requireBody(value: unknown, kind: string): void {
@@ -215,6 +338,12 @@ function assertVec3(value: unknown, label: string): asserts value is Vec3 {
 
 function assertString(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${label} must be a string`);
+}
+
+function assertLogicalAssetId(value: unknown, label: string): asserts value is string {
+  assertString(value, label);
+  if (!/^[a-z0-9][a-z0-9/_-]*$/.test(value))
+    throw new Error(`${label} must be an extensionless logical asset ID`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

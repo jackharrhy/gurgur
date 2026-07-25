@@ -51,6 +51,23 @@ export function normalizeMaterialUv(
   return [uv.x / texture.width, -uv.y / texture.height];
 }
 
+export function shouldForceWebGL(userAgent: string, vendor: string): boolean {
+  return (
+    /Apple Computer/i.test(vendor) &&
+    /Safari\//i.test(userAgent) &&
+    !/(?:Chrome|Chromium|CriOS|Edg|OPR|FxiOS)\//i.test(userAgent)
+  );
+}
+
+export function renderableBrushTriangleIndices(
+  brush: Pick<CompiledBrush, "triangles" | "triangleSourceFaces" | "collisionOnlyFaceIndices">,
+): number[] {
+  const collisionOnlyFaces = new Set(brush.collisionOnlyFaceIndices);
+  return brush.triangles.flatMap((_, triangleIndex) =>
+    collisionOnlyFaces.has(brush.triangleSourceFaces[triangleIndex]!) ? [] : [triangleIndex],
+  );
+}
+
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
 const distance = (left: BodySnapshot["position"], right: BodySnapshot["position"]): number =>
   Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
@@ -208,6 +225,7 @@ export class WorldRenderer {
       canvas,
       antialias: false,
       powerPreference: "high-performance",
+      forceWebGL: shouldForceWebGL(navigator.userAgent, navigator.vendor),
     });
     this.#renderer.setPixelRatio(1);
     this.#renderer.setClearAlpha(0);
@@ -533,7 +551,8 @@ export class WorldRenderer {
     const positions: number[] = [];
     const normals: number[] = [];
     const uvs: number[] = [];
-    for (let triangleIndex = 0; triangleIndex < brush.triangles.length; triangleIndex += 1) {
+    const triangleIndices = renderableBrushTriangleIndices(brush);
+    for (const triangleIndex of triangleIndices) {
       const triangle = brush.triangles[triangleIndex]!;
       const normal = brush.triangleNormals[triangleIndex]!;
       const triangleUvs = brush.triangleUvs[triangleIndex]!;
@@ -548,13 +567,15 @@ export class WorldRenderer {
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
     geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-    const materialNames = [...new Set(brush.triangleMaterials)];
+    const materialNames = [
+      ...new Set(triangleIndices.map((triangleIndex) => brush.triangleMaterials[triangleIndex]!)),
+    ];
     const materialIndices = new Map(materialNames.map((name, index) => [name, index]));
-    for (let triangle = 0; triangle < brush.triangles.length; triangle += 1) {
+    for (const [renderTriangleIndex, triangleIndex] of triangleIndices.entries()) {
       geometry.addGroup(
-        triangle * 3,
+        renderTriangleIndex * 3,
         3,
-        materialIndices.get(brush.triangleMaterials[triangle]!) ?? 0,
+        materialIndices.get(brush.triangleMaterials[triangleIndex]!) ?? 0,
       );
     }
     const mesh = new THREE.Mesh(

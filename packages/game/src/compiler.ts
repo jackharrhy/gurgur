@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { entityDefinitions, type EntityClassname } from "./entities";
+import { entityDefinitions, type AuthoredOutputConnection, type EntityClassname } from "./entities";
+import { SKIP_MATERIAL } from "./materials";
 import { parseValve220, type MapBrush, type ValveMap } from "@gurgur/engine";
 import {
   deriveWorldBuffers,
@@ -10,7 +11,14 @@ import {
   type Vec3,
   type WorldSettings,
 } from "@gurgur/engine";
-import { encodeWorldBundle, type CompiledGameEntity, type WorldBundle } from "./world";
+import {
+  encodeWorldBundle,
+  entityInputDomain,
+  type CompiledGameEntity,
+  type OutputConnection,
+  type TriggerEntity,
+  type WorldBundle,
+} from "./world";
 
 export const METRES_PER_MAP_UNIT = 0.0254;
 const EPSILON = 1e-5;
@@ -188,6 +196,9 @@ function compileBrush(
       ),
     );
   const { planes, mapVertices } = selected ?? incomplete!;
+  const collisionOnlyFaceIndices = brush.faces
+    .filter((face) => face.material === SKIP_MATERIAL)
+    .map((face) => face.faceIndex);
   const triangles: Array<[number, number, number]> = [];
   const triangleMaterials: string[] = [];
   const triangleSourceFaces: number[] = [];
@@ -250,6 +261,7 @@ function compileBrush(
     entityIndex,
     sourceBrushIndex,
     center,
+    collisionOnlyFaceIndices,
     worldVertices,
     localVertices: worldVertices.map((vertex) => subtract(vertex, center)),
     triangles,
@@ -310,9 +322,12 @@ function validateMap(map: ValveMap): void {
       if (ids.has(id)) throw new Error(`line ${entity.line}: duplicate authoredId ${id}`);
       ids.add(id);
     }
-    const target = entity.properties.target;
-    if (target && !targets.has(target))
-      throw new Error(`line ${entity.line}: unresolved target ${target}`);
+    for (const [propertyName, property] of Object.entries(definition.properties)) {
+      if (property.editor.type !== "target") continue;
+      const target = entity.properties[propertyName];
+      if (target && !targets.has(target))
+        throw new Error(`line ${entity.line}: unresolved target ${target}`);
+    }
   }
 }
 
@@ -343,6 +358,13 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
   const entities: CompiledGameEntity[] = [];
   const playerSpawns: PlayerSpawn[] = [];
   const resetMarkers: ResetMarker[] = [];
+  const targetEntityIndices = new Map<string, number[]>();
+  const pendingTriggerOutputs: Array<{
+    entityIndex: number;
+    line: number;
+    enter: AuthoredOutputConnection;
+    exit?: AuthoredOutputConnection;
+  }> = [];
   let settings: WorldSettings | undefined;
   let worldspawnCount = 0;
   for (const [sourceEntityIndex, entity] of map.entities.entries()) {
@@ -371,8 +393,27 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
       playerSpawns.push(compiled.spawn);
     } else if (compiled.kind === "reset-marker") {
       resetMarkers.push(compiled.marker);
+    } else if (compiled.kind === "connected-trigger") {
+      const entityIndex = entities.length;
+      entities.push({
+        ...compiled.entity,
+        outputs: {
+          enter: {
+            targetEntityIndices: [],
+            input: compiled.outputs.enter.input,
+          },
+        },
+      });
+      pendingTriggerOutputs.push({
+        entityIndex,
+        line: entity.line,
+        ...compiled.outputs,
+      });
+      addTargetEntityIndex(targetEntityIndices, entity.properties.targetname, entityIndex);
     } else {
+      const entityIndex = entities.length;
       entities.push(compiled.entity);
+      addTargetEntityIndex(targetEntityIndices, entity.properties.targetname, entityIndex);
     }
   }
   if (worldspawnCount !== 1)
@@ -388,6 +429,30 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
   }
   if (playerSpawns.filter((spawn) => spawn.name === "default").length !== 1)
     throw new Error(`${sourceName}: expected exactly one player spawn named default`);
+  for (const pending of pendingTriggerOutputs) {
+    const trigger = entities[pending.entityIndex] as TriggerEntity;
+    trigger.outputs = {
+      enter: resolveOutputConnection(
+        sourceName,
+        pending.line,
+        pending.enter,
+        entities,
+        targetEntityIndices,
+      ),
+      ...(pending.exit
+        ? {
+            exit: resolveOutputConnection(
+              sourceName,
+              pending.line,
+              pending.exit,
+              entities,
+              targetEntityIndices,
+            ),
+          }
+        : {}),
+    };
+    validateListenerOutputPair(sourceName, pending.line, trigger, entities);
+  }
   const derived = deriveWorldBuffers(brushes, entities);
   const bundle: WorldBundle = {
     bundleVersion: 1,
@@ -402,4 +467,66 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
   };
   bundle.mapRevision = createHash("sha256").update(encodeWorldBundle(bundle)).digest("hex");
   return bundle;
+}
+
+function addTargetEntityIndex(
+  targetEntityIndices: Map<string, number[]>,
+  targetName: string | undefined,
+  entityIndex: number,
+): void {
+  if (!targetName) return;
+  const indices = targetEntityIndices.get(targetName) ?? [];
+  indices.push(entityIndex);
+  targetEntityIndices.set(targetName, indices);
+}
+
+function resolveOutputConnection(
+  sourceName: string,
+  line: number,
+  authored: AuthoredOutputConnection,
+  entities: CompiledGameEntity[],
+  targetEntityIndices: Map<string, number[]>,
+): OutputConnection {
+  const indices = targetEntityIndices.get(authored.target);
+  if (!indices?.length)
+    throw new Error(`${sourceName}:${line}: unresolved target ${authored.target}`);
+  for (const index of indices) {
+    const target = entities[index]!;
+    if (!entityInputDomain(target, authored.input))
+      throw new Error(
+        `${sourceName}:${line}: ${target.kind} target ${authored.target} does not support input ${authored.input}`,
+      );
+  }
+  return { targetEntityIndices: [...indices], input: authored.input };
+}
+
+function validateListenerOutputPair(
+  sourceName: string,
+  line: number,
+  trigger: TriggerEntity,
+  entities: CompiledGameEntity[],
+): void {
+  const enterDomain = connectionDomain(trigger.outputs.enter, entities);
+  const exitDomain = trigger.outputs.exit ? connectionDomain(trigger.outputs.exit, entities) : null;
+  if (enterDomain !== "listener" && exitDomain !== "listener") return;
+  if (
+    trigger.outputs.enter.input !== "play" ||
+    trigger.outputs.exit?.input !== "stop" ||
+    trigger.outputs.enter.targetEntityIndices.length !==
+      trigger.outputs.exit.targetEntityIndices.length ||
+    trigger.outputs.enter.targetEntityIndices.some(
+      (target, index) => trigger.outputs.exit!.targetEntityIndices[index] !== target,
+    )
+  ) {
+    throw new Error(
+      `${sourceName}:${line}: listener outputs must pair play on enter with stop on exit for the same targets`,
+    );
+  }
+}
+
+function connectionDomain(
+  connection: OutputConnection,
+  entities: CompiledGameEntity[],
+): "game" | "listener" | null {
+  return entityInputDomain(entities[connection.targetEntityIndices[0]!]!, connection.input);
 }

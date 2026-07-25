@@ -16,6 +16,13 @@ an existing archetype without touching simulation, renderer dispatch, physics,
 or transport; genuinely new behavior extends the game union, decoder,
 simulation, and persisted game state together.
 
+Mapper entity links follow the same boundary. Trigger enter/exit properties
+compile through a closed input vocabulary into recipient bundle indices.
+Recipient capability validation happens at compile and decode time; mapper
+target names and arbitrary input strings do not survive into runtime state.
+Listener-local inputs such as audio `play`/`stop` are consumed from the same
+compiled connection shape without adding server state or transport messages.
+
 Runtime actors refer back to immutable compiled content by `entityIndex`.
 Lifecycle records contain only their source tag, generation-bearing runtime ID,
 and entity index, with a reserved sentinel for players. Harness clones may share

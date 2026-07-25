@@ -21,6 +21,8 @@ authenticated administrator can reset the entire world to its authored state.
 - Falling ten metres below authored static collision respawns the same player
   identity at `info_player_start`.
 - The play view is the world canvas alone, with no HUD, reticle, or visible cursor.
+- Authored area music follows each listener independently and fades with typed
+  map volumes; it is not shared authoritative world state.
 - Realtime voice is outside the current product scope.
 
 ## Interaction feedback

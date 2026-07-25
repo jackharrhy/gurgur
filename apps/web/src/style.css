@@ -9,15 +9,23 @@ main {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  background: #000;
 }
 
 #world {
   display: block;
   width: 100%;
   height: 100%;
+  border: 0;
+  outline: none;
   touch-action: none;
   image-rendering: pixelated;
   cursor: none;
+  opacity: 0;
+}
+
+body[data-player-view-ready="true"] #world {
+  opacity: 1;
 }
 
 #debug-status {

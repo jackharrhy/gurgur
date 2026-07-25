@@ -2,11 +2,16 @@ import { describe, expect, test } from "bun:test";
 import type { BodySnapshot } from "@gurgur/engine";
 import * as THREE from "three/webgpu";
 import { createPredictedPoseTimeline, mergeBodySamples } from "../src/presentation";
-import { normalizeMaterialUv } from "../src/renderer";
+import {
+  normalizeMaterialUv,
+  renderableBrushTriangleIndices,
+  shouldForceWebGL,
+} from "../src/renderer";
 import {
   createInteractionOutlineMaterial,
   createInteractionOutlineMaskMaterial,
   createRealityNodeMaterial,
+  createWorldNodeMaterial,
   INTERACTION_OUTLINE_MASK_RENDER_ORDER,
   INTERACTION_OUTLINE_RENDER_ORDER,
   INTERACTION_OUTLINE_SCALE,
@@ -25,6 +30,41 @@ test("material UVs normalize against each authored PNG's real dimensions", () =>
   ]);
 });
 
+test("Safari uses the stable WebGL renderer backend for retro materials", () => {
+  expect(
+    shouldForceWebGL(
+      "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15",
+      "Apple Computer, Inc.",
+    ),
+  ).toBeTrue();
+  expect(
+    shouldForceWebGL(
+      "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36",
+      "Google Inc.",
+    ),
+  ).toBeFalse();
+  expect(
+    shouldForceWebGL(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0",
+      "",
+    ),
+  ).toBeFalse();
+});
+
+test("moving brush presentation omits collision-only faces", () => {
+  expect(
+    renderableBrushTriangleIndices({
+      triangles: [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 5, 6],
+      ],
+      triangleSourceFaces: [0, 0, 1],
+      collisionOnlyFaceIndices: [0],
+    }),
+  ).toEqual([2]);
+});
+
 test("reality materials bypass retro lighting, fog, and vertex treatment", () => {
   const texture = new THREE.Texture();
   const material = createRealityNodeMaterial(texture);
@@ -32,8 +72,18 @@ test("reality materials bypass retro lighting, fog, and vertex treatment", () =>
   expect(material.fog).toBeFalse();
   expect(material.toneMapped).toBeFalse();
   expect(material.vertexNode).toBeNull();
-  expect(material.side).toBe(THREE.DoubleSide);
   material.dispose();
+  texture.dispose();
+});
+
+test("retro and reality brush materials cull backfaces", () => {
+  const texture = new THREE.Texture();
+  const retro = createWorldNodeMaterial(texture, "FIXTURE", false);
+  const reality = createRealityNodeMaterial(texture);
+  expect(retro.side).toBe(THREE.FrontSide);
+  expect(reality.side).toBe(THREE.FrontSide);
+  retro.dispose();
+  reality.dispose();
   texture.dispose();
 });
 

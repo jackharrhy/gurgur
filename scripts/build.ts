@@ -7,10 +7,15 @@ await import("../tools/compile-map/src/index");
 
 const materialTextureRoot = new URL("../content/textures/", import.meta.url);
 const spriteRoot = new URL("../content/sprites/", import.meta.url);
-const assetManifest = await loadAssetManifest(materialTextureRoot, spriteRoot);
+const audioRoot = new URL("../content/audio/", import.meta.url);
+const assetManifest = await loadAssetManifest(materialTextureRoot, spriteRoot, audioRoot);
 const compiledWorld = (await Bun.file("content/generated/systems-garden.json").json()) as {
   brushes: Array<{ triangleMaterials: string[] }>;
-  entities: Array<{ presentation: { kind: string; asset?: string } }>;
+  entities: Array<{
+    kind: string;
+    asset?: string;
+    presentation: { kind: string; asset?: string };
+  }>;
 };
 const requiredMaterials = new Set(
   compiledWorld.brushes.flatMap((brush) => brush.triangleMaterials),
@@ -23,6 +28,8 @@ for (const material of requiredMaterials) {
 for (const entity of compiledWorld.entities) {
   if (entity.presentation.kind === "sprite" && !assetManifest.sprites[entity.presentation.asset!])
     throw new Error(`missing authored sprite: content/sprites/${entity.presentation.asset}.png`);
+  if (entity.kind === "ambient-audio" && !assetManifest.audio[entity.asset!])
+    throw new Error(`missing authored audio: content/audio/${entity.asset}.mp3`);
 }
 
 await rm("dist", { recursive: true, force: true });
@@ -75,6 +82,16 @@ for await (const path of new Bun.Glob("**/*.png").scan({
   await Bun.write(destination, Bun.file(`content/sprites/${path}`));
   spriteCount += 1;
 }
+let audioCount = 0;
+for await (const path of new Bun.Glob("**/*.mp3").scan({
+  cwd: "content/audio",
+  dot: false,
+})) {
+  const destination = `dist/content/audio/${path}`;
+  await mkdir(dirname(destination), { recursive: true });
+  await Bun.write(destination, Bun.file(`content/audio/${path}`));
+  audioCount += 1;
+}
 await Bun.write(
   "dist/apps/server/src/box3d.wasm",
   Bun.file("node_modules/box3d.js/dist/box3d.wasm"),
@@ -88,5 +105,5 @@ await Bun.write(
   Bun.file("content/generated/player-billboard/player-billboard.png"),
 );
 console.log(
-  `built ${result.outputs.length + workerResult.outputs.length} files, box3d.wasm, ${materialTextureCount} authored textures, and ${spriteCount} sprites`,
+  `built ${result.outputs.length + workerResult.outputs.length} files, box3d.wasm, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
 );

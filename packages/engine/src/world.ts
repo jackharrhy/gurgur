@@ -25,6 +25,7 @@ export type CompiledBrush = {
   entityIndex: number;
   sourceBrushIndex: number;
   center: Vec3;
+  collisionOnlyFaceIndices: number[];
   worldVertices: Vec3[];
   localVertices: Vec3[];
   triangles: Array<[number, number, number]>;

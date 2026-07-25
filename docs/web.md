@@ -53,6 +53,10 @@ Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission without advancing local physics by
 elapsed wall time. Leaving the page closes the WebSocket, RTCPeerConnection,
 data channels, prediction worker, geometries, materials, and renderer resources.
+The canvas remains hidden against a black page until the renderer has followed a
+finite predicted local-player pose in the current frame. Loading a new world
+closes that gate again, preventing a default-camera world frame from flashing
+before the player view is known.
 
 ## Visual language
 
@@ -74,6 +78,10 @@ Gouraud lighting explicitly evaluated in TSL's vertex stage. The hashed asset
 manifest carries each material's real PNG width and height so Valve 220
 pixel-space UVs normalize identically for default 64 x 64 tiles and larger
 TrenchBroom-fitted artwork.
+Static and moving brush meshes preserve the compiler's outward triangle winding
+and flat normals. Retro and reality brush materials render `FrontSide`, so the
+GPU culls reverse-facing triangles; sprites and interaction outlines keep their
+own presentation-specific sidedness.
 Clip-space vertex snapping and partially affine UV interpolation provide
 controlled software-renderer instability without sacrificing texture mip levels.
 Large concrete and stone surfaces use deterministic irregular aggregate instead
@@ -91,6 +99,10 @@ real inside the otherwise software-rendered world. A separate low-resolution
 occlusion pass supplies depth for the composite, so ordinary world geometry and
 player billboards still cover reality surfaces correctly without requiring a
 second full-resolution world render.
+Safari selects Three's WebGL2 backend because its WebGPU path currently renders
+the custom retro material graph with incorrect texture color and vertex lighting.
+Other browsers retain the preferred WebGPU backend and its automatic WebGL2
+fallback.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
 low-resolution scene pass: mint means locally available, while amber is driven by
 the server-authoritative local-grab flag. This avoids a separate full-scene
@@ -128,6 +140,16 @@ than smoothing pristine 3D shading.
 These choices are presentation rules rather than simulation constraints: physics,
 interaction rays, map geometry, and network transforms remain full precision.
 
+Per-listener area music consumes typed `play`/`stop` outputs from compiled
+`trigger` entities targeting `ambient-audio` entity indices, without mapper
+classname checks. The client tests its predicted player center against each
+authored convex trigger brush, retains overlapping claims, and selects competing
+music by priority and bundle order.
+Playback uses Web Audio after the first player gesture, with authored crossfades
+and hashed logical MP3 URLs under `content/audio`. Audio remains local
+presentation: it adds no protocol message, authoritative transform, or persisted
+game state.
+
 ## Routes
 
 The server exposes a deliberately small surface:
@@ -136,6 +158,7 @@ The server exposes a deliberately small surface:
 | ------------------------------------------- | -------------------------------------- |
 | `/` and SPA fallback                        | browser application                    |
 | `/game`                                     | control/signaling WebSocket upgrade    |
+| `/audio/<logical-id>.mp3?v=<sha256>`        | immutable authored audio asset         |
 | `/healthz`                                  | process and event-loop health          |
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |
@@ -167,8 +190,10 @@ Secrets are never bundled into browser assets.
 
 The world canvas is keyboard-focusable. Movement remains available when pointer
 lock is denied or unavailable; pointer lock controls relative mouse look, not
-whether keyboard intent is sampled. The browser accepts the server RTC offer and
-uses the dynamically supplied ICE configuration when creating its peer.
+whether keyboard intent is sampled. The canvas suppresses the browser's native
+focus outline because the full-viewport game surface has no adjacent focus
+targets; focus itself remains intact. The browser accepts the server RTC offer
+and uses the dynamically supplied ICE configuration when creating its peer.
 
 GitHub Actions builds this Dockerfile on pushes to `main`, version tags, and
 manual dispatches, then publishes it to `ghcr.io/<owner>/<repository>`. The

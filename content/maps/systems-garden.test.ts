@@ -4,6 +4,7 @@ import {
   decodeWorldBundle,
   encodeWorldBundle,
   entityDefinitions,
+  SKIP_MATERIAL,
   type EntityClassname,
 } from "@gurgur/game";
 import { MATERIAL_TEXTURE_SIZE, parseValve220 } from "../../packages/engine/src";
@@ -64,7 +65,7 @@ const gameConfig = (await Bun.file(
 ).json()) as {
   faceattribs: { defaults: { scale: [number, number] } };
   tags: {
-    brushface: Array<{ name: string; match: string; pattern: string }>;
+    brushface: Array<{ name: string; attribs: string[]; match: string; pattern: string }>;
   };
 };
 
@@ -92,8 +93,14 @@ describe("Systems Garden map", () => {
     expect(gameConfig.faceattribs.defaults.scale).toEqual([0.5, 0.5]);
   });
 
-  test("exposes reality-break materials as native TrenchBroom brush-face tags", () => {
+  test("exposes special presentation materials as native TrenchBroom brush-face tags", () => {
     expect(gameConfig.tags.brushface).toEqual([
+      {
+        name: "Skip",
+        attribs: ["transparent"],
+        match: "material",
+        pattern: SKIP_MATERIAL,
+      },
       { name: "Reality", attribs: [], match: "material", pattern: "GURGUR/REAL/*" },
       {
         name: "Reality (Dylan)",
@@ -102,6 +109,28 @@ describe("Systems Garden map", () => {
         pattern: "GURGUR/dylans*",
       },
     ]);
+  });
+
+  test("keeps skip faces in collision while omitting them from presentation", () => {
+    const skippedBrush = compiledWorld.brushes.find(
+      (brush) =>
+        brush.entityIndex === -1 &&
+        brush.triangleMaterials.some((material) => material === SKIP_MATERIAL),
+    );
+    expect(skippedBrush).toBeDefined();
+    const skippedTriangle = skippedBrush!.triangleMaterials.findIndex(
+      (material) => material === SKIP_MATERIAL,
+    );
+    const skippedFace = skippedBrush!.triangleSourceFaces[skippedTriangle]!;
+    expect(skippedBrush!.collisionOnlyFaceIndices).toContain(skippedFace);
+    expect(compiledWorld.staticCollision.triangleSources).toContainEqual({
+      entityIndex: -1,
+      brushIndex: skippedBrush!.sourceBrushIndex,
+      faceIndex: skippedFace,
+    });
+    expect(
+      compiledWorld.renderBatches.some((batch) => batch.material === SKIP_MATERIAL),
+    ).toBeFalse();
   });
 
   test("preserves authored Valve 220 face axes, offsets, and non-default scales", () => {

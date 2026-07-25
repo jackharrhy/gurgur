@@ -47,8 +47,9 @@ choosing the next.
   handling, and gameplay-state validation in `packages/game`.
 - Keep `packages/engine` generic. Do not add entity lifecycle callbacks, an ECS,
   mapper scripting, or arbitrary game-facing body construction.
-- For sprites, commit a PNG under `content/sprites` and use a validated
-  extensionless logical ID.
+- For sprites, commit a PNG under `content/sprites`; for authored audio, commit
+  a broadly supported MP3 under `content/audio`. Use validated extensionless
+  logical IDs for both.
 
 ## Verify
 

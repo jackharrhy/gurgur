@@ -49,19 +49,25 @@
   startOpen(choices) : "Begin at the travelled endpoint" : 0 = [ 0 : "No" 1 : "Yes" ]
 ]
 
-@SolidClass color(196 105 184) = trigger_once : "Sensor that emits its target once per world epoch"
+@SolidClass color(196 105 184) = trigger_once : "Sensor that emits its enter output once per world epoch"
 [
   classname(string) : "Entity class" : "trigger_once"
   authoredId(string) : "Stable unique persistence identity"
-  target(target_destination) : "Entity targetname to signal"
+  onEnterTarget(target_destination) : "Entity targetname to receive the enter input"
+  onEnterInput(string) : "Typed input sent when a player enters" : "trigger"
+  onExitTarget(target_destination) : "Entity targetname to receive the exit input"
+  onExitInput(string) : "Typed input sent when a player exits" : "trigger"
   wait(float) : "Minimum seconds between signals" : "0"
 ]
 
-@SolidClass color(179 112 211) = trigger_multiple : "Repeatable sensor signal source"
+@SolidClass color(179 112 211) = trigger_multiple : "Repeatable sensor output source"
 [
   classname(string) : "Entity class" : "trigger_multiple"
   authoredId(string) : "Stable unique persistence identity"
-  target(target_destination) : "Entity targetname to signal"
+  onEnterTarget(target_destination) : "Entity targetname to receive the enter input"
+  onEnterInput(string) : "Typed input sent when a player enters" : "trigger"
+  onExitTarget(target_destination) : "Entity targetname to receive the exit input"
+  onExitInput(string) : "Typed input sent when a player exits" : "trigger"
   wait(float) : "Minimum seconds between signals" : "0.5"
 ]
 
@@ -95,5 +101,17 @@
   sprite(string) : "Logical sprite asset ID" : "fern"
   scale(float) : "Sprite height in map units" : "64"
   glow(choices) : "Render without scene lighting" : 0 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(104 205 245) size(-16 -16 -16, 16 16 16) = ambient_audio : "Per-listener audio controlled by typed trigger outputs"
+[
+  classname(string) : "Entity class" : "ambient_audio"
+  targetname(target_source) : "Name other entities can target"
+  audio(string) : "Logical audio asset ID" : "dylan"
+  volume(float) : "Playback volume" : "1"
+  fadeIn(float) : "Fade-in duration in seconds" : "0.75"
+  fadeOut(float) : "Fade-out duration in seconds" : "1"
+  loop(choices) : "Loop while the listener remains in a targeting volume" : 1 = [ 0 : "No" 1 : "Yes" ]
+  priority(float) : "Winner when different audio volumes overlap" : "0"
 ]
 

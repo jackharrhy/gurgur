@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { RTCPeerConnection } from "werift";
-import { guardIceUdpSockets, omitMdnsHostCandidates } from "../src/rtc";
+import { guardIceUdpSockets, prepareMdnsIceDescription } from "../src/rtc";
 
 describe("Firefox mDNS ICE candidates", () => {
-  test("omits unreachable obfuscated host candidates without losing routable candidates", () => {
+  test("preserves obfuscated host candidates while leaving ICE open for resolution", () => {
     const description = {
       type: "answer" as const,
       sdp: [
@@ -16,11 +16,11 @@ describe("Firefox mDNS ICE candidates", () => {
         "",
       ].join("\r\n"),
     };
-    const sanitized = omitMdnsHostCandidates(description);
-    expect(sanitized.sdp).not.toContain("browser-host.local");
-    expect(sanitized.sdp).toContain("198.51.100.8 62000 typ srflx");
-    expect(sanitized.sdp).toContain("203.0.113.9 3478 typ relay");
-    expect(sanitized.sdp).toContain("a=end-of-candidates");
+    const prepared = prepareMdnsIceDescription(description);
+    expect(prepared.sdp).toContain("browser-host.local");
+    expect(prepared.sdp).toContain("198.51.100.8 62000 typ srflx");
+    expect(prepared.sdp).toContain("203.0.113.9 3478 typ relay");
+    expect(prepared.sdp).not.toContain("a=end-of-candidates");
   });
 
   test("preserves descriptions without mDNS candidates byte-for-byte", () => {
@@ -28,7 +28,7 @@ describe("Firefox mDNS ICE candidates", () => {
       type: "answer" as const,
       sdp: "v=0\r\na=candidate:0 1 UDP 2122252543 192.0.2.8 54788 typ host\r\n",
     };
-    expect(omitMdnsHostCandidates(description)).toEqual(description);
+    expect(prepareMdnsIceDescription(description)).toEqual(description);
   });
 });
 

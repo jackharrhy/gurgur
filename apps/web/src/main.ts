@@ -3,10 +3,12 @@ import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createPredictionClient } from "./prediction-client";
+import { WorldAudio } from "./audio";
 import type { PhysicsDebugFrame } from "@gurgur/engine";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
+document.body.dataset.playerViewReady = "false";
 const searchParams = new URLSearchParams(location.search);
 const debugEnabled = searchParams.has("debug") && searchParams.get("debug") !== "0";
 const testEnabled = searchParams.has("test") && searchParams.get("test") !== "0";
@@ -25,7 +27,10 @@ if (
   Array.isArray(assetManifest.materials) ||
   !assetManifest.sprites ||
   typeof assetManifest.sprites !== "object" ||
-  Array.isArray(assetManifest.sprites)
+  Array.isArray(assetManifest.sprites) ||
+  !assetManifest.audio ||
+  typeof assetManifest.audio !== "object" ||
+  Array.isArray(assetManifest.audio)
 )
   throw new Error("authored asset manifest is invalid");
 const materialTextureUrls = Object.fromEntries(
@@ -61,6 +66,17 @@ const spriteAssetUrls = Object.fromEntries(
     return [name, url];
   }),
 );
+const audioAssetUrls = Object.fromEntries(
+  Object.entries(assetManifest.audio).map(([name, url]) => {
+    if (typeof url !== "string" || !url.startsWith("/audio/"))
+      throw new Error(`authored audio URL is invalid: ${name}`);
+    return [name, url];
+  }),
+);
+const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
+  document.body.dataset.audioState = state.state;
+  document.body.dataset.audioAsset = state.asset ?? "";
+});
 
 const history = createSnapshotTimeline();
 const diagnosticBodies = new Map<
@@ -102,6 +118,7 @@ const renderer = new WorldRenderer(
     document.body.dataset.renderedX = String(body.position.x);
     document.body.dataset.renderedY = String(body.position.y);
     document.body.dataset.renderedZ = String(body.position.z);
+    document.body.dataset.playerViewReady = "true";
   },
   (body) => {
     if (!testEnabled) return;
@@ -118,6 +135,8 @@ const renderer = new WorldRenderer(
 );
 const predictor = createPredictionClient((body, bodies, correctionMagnitude) => {
   renderer.setPredictedPlayer(body);
+  if (!body) document.body.dataset.playerViewReady = "false";
+  if (body) worldAudio.update(body.position);
   renderer.setPredictedBodies(bodies);
   if (testEnabled)
     for (const predicted of bodies) {
@@ -189,7 +208,9 @@ session = new GameSession(
       predictor.setLocalPlayer(message.playerId);
     },
     world(message) {
+      document.body.dataset.playerViewReady = "false";
       renderer.setWorld(message);
+      worldAudio.setWorld(message.bundle);
       document.body.dataset.inputReady = "false";
       predictionWorldEpoch = null;
       snapshotEpochAfterTransport = null;
@@ -301,11 +322,19 @@ if (debugEnabled) {
 
 renderer.start();
 session.connect();
+const unlockAudio = (): void => {
+  void worldAudio.unlock();
+};
+addEventListener("pointerdown", unlockAudio, { passive: true, capture: true });
+addEventListener("keydown", unlockAudio, { capture: true });
 addEventListener("pagehide", () => {
   if (debugPoll !== null) clearInterval(debugPoll);
   debugRequest?.abort();
   session.close();
   input.dispose();
   predictor.dispose();
+  removeEventListener("pointerdown", unlockAudio, { capture: true });
+  removeEventListener("keydown", unlockAudio, { capture: true });
+  worldAudio.dispose();
   renderer.dispose();
 });

@@ -6,7 +6,7 @@ import type {
   Vec3,
   WorldSettings,
 } from "@gurgur/engine";
-import type { CompiledGameEntity } from "./world";
+import type { CompiledGameEntity, EntityInput, TriggerEntity } from "./world";
 
 export type PropertySource = {
   sourceName: string;
@@ -41,7 +41,20 @@ export type CompiledAuthoredEntity =
   | { kind: "world-settings"; settings: WorldSettings }
   | { kind: "player-spawn"; spawn: PlayerSpawn }
   | { kind: "reset-marker"; marker: ResetMarker }
-  | { kind: "game-entity"; entity: CompiledGameEntity };
+  | { kind: "game-entity"; entity: CompiledGameEntity }
+  | {
+      kind: "connected-trigger";
+      entity: Omit<TriggerEntity, "outputs">;
+      outputs: {
+        enter: AuthoredOutputConnection;
+        exit?: AuthoredOutputConnection;
+      };
+    };
+
+export type AuthoredOutputConnection = {
+  target: string;
+  input: EntityInput;
+};
 
 export type EntityDefinition<
   S extends Record<string, EntityProperty<unknown>>,
@@ -182,9 +195,20 @@ export function colorProperty(
 }
 
 export function targetProperty(
+  description?: string,
+  options?: { optional?: false },
+): EntityProperty<string>;
+export function targetProperty(
+  description: string,
+  options: { optional: true },
+): EntityProperty<string | undefined>;
+export function targetProperty(
   description = "Entity targetname to signal",
-): EntityProperty<string> {
-  const property = stringProperty(description);
+  options: { optional?: boolean } = {},
+): EntityProperty<string | undefined> {
+  const property = options.optional
+    ? stringProperty(description, { optional: true })
+    : stringProperty(description);
   return { ...property, editor: { ...property.editor, type: "target" } };
 }
 
@@ -228,6 +252,36 @@ export function logicalSpriteAssetProperty(
   description: string,
   options: PropertyOptions<string> = {},
 ): EntityProperty<SpriteAssetId> {
+  return logicalAssetProperty(description, options);
+}
+
+export function logicalAudioAssetProperty(
+  description: string,
+  options: PropertyOptions<string> = {},
+): EntityProperty<string> {
+  return logicalAssetProperty(description, options);
+}
+
+function entityInputProperty(
+  description: string,
+  defaultInput: EntityInput,
+): EntityProperty<EntityInput> {
+  const property = stringProperty(description, { default: defaultInput });
+  return {
+    editor: property.editor,
+    parse(raw, source) {
+      const input = property.parse(raw, source);
+      if (!["trigger", "open", "close", "play", "stop"].includes(input))
+        throw new Error(`${sourceLabel(source)} must be trigger, open, close, play, or stop`);
+      return input as EntityInput;
+    },
+  };
+}
+
+function logicalAssetProperty<T extends string>(
+  description: string,
+  options: PropertyOptions<string>,
+): EntityProperty<T> {
   const property = stringProperty(
     description,
     options.default === undefined ? {} : { default: options.default },
@@ -238,7 +292,7 @@ export function logicalSpriteAssetProperty(
       const value = property.parse(raw, source);
       if (!/^[a-z0-9][a-z0-9/_-]*$/.test(value))
         throw new Error(`${sourceLabel(source)} must be an extensionless logical asset ID`);
-      return value;
+      return value as T;
     },
   };
 }
@@ -492,6 +546,49 @@ export const entityDefinitions = {
       };
     },
   }),
+  ambient_audio: defineEntity({
+    editor: {
+      kind: "point",
+      description: "Per-listener audio controlled by typed trigger outputs",
+      color: [104, 205, 245],
+      size: [-16, -16, -16, 16, 16, 16],
+      ...transient,
+    },
+    properties: {
+      targetname: targetNameProperty(),
+      audio: logicalAudioAssetProperty("Logical audio asset ID", { default: "dylan" }),
+      volume: boundedNumberProperty("Playback volume", { default: 1, min: 0, max: 1 }),
+      fadeIn: boundedNumberProperty("Fade-in duration in seconds", { default: 0.75, min: 0 }),
+      fadeOut: boundedNumberProperty("Fade-out duration in seconds", { default: 1, min: 0 }),
+      loop: booleanProperty("Loop while the listener remains in a targeting volume", {
+        default: true,
+      }),
+      priority: boundedNumberProperty("Winner when different audio volumes overlap", {
+        default: 0,
+        min: -1_000,
+        max: 1_000,
+      }),
+    },
+    compile(_context, properties) {
+      if (!Number.isSafeInteger(properties.priority))
+        throw new Error("ambient_audio.priority must be an integer");
+      return {
+        kind: "game-entity",
+        entity: {
+          kind: "ambient-audio",
+          asset: properties.audio,
+          volume: properties.volume,
+          fadeInSeconds: properties.fadeIn,
+          fadeOutSeconds: properties.fadeOut,
+          loop: properties.loop,
+          priority: properties.priority,
+          body: null,
+          presentation: { kind: "none" },
+          interaction: "none",
+        },
+      };
+    },
+  }),
 } as const;
 
 function linearMover(
@@ -556,13 +653,18 @@ function trigger(
       kind: "solid",
       description:
         mode === "once"
-          ? "Sensor that emits its target once per world epoch"
-          : "Repeatable sensor signal source",
+          ? "Sensor that emits its enter output once per world epoch"
+          : "Repeatable sensor output source",
       color,
       ...persistent,
     },
     properties: {
-      target: targetProperty(),
+      onEnterTarget: targetProperty("Entity targetname to receive the enter input"),
+      onEnterInput: entityInputProperty("Typed input sent when a player enters", "trigger"),
+      onExitTarget: targetProperty("Entity targetname to receive the exit input", {
+        optional: true,
+      }),
+      onExitInput: entityInputProperty("Typed input sent when a player exits", "trigger"),
       wait: boundedNumberProperty("Minimum seconds between signals", {
         default: defaultWait,
         min: 0,
@@ -570,16 +672,29 @@ function trigger(
     },
     compile(context, properties) {
       return {
-        kind: "game-entity",
+        kind: "connected-trigger",
         entity: {
           kind: "trigger",
           authoredId: authoredId(context),
           mode,
-          target: properties.target,
           waitSeconds: properties.wait,
           body: { kind: "sensor-brush", brushIndices: context.brushIndices },
           presentation: { kind: "none" },
           interaction: "none",
+        },
+        outputs: {
+          enter: {
+            target: properties.onEnterTarget,
+            input: properties.onEnterInput,
+          },
+          ...(properties.onExitTarget
+            ? {
+                exit: {
+                  target: properties.onExitTarget,
+                  input: properties.onExitInput,
+                },
+              }
+            : {}),
         },
       };
     },

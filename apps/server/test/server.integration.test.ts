@@ -53,6 +53,7 @@ describe("authoritative server", () => {
           { url: string; width: number; height: number; renderMode: "retro" | "reality" }
         >;
         sprites: Record<string, string>;
+        audio: Record<string, string>;
       };
       const concreteManifest = textureManifest.materials["GURGUR/CONCRETE"]!;
       expect(concreteManifest.url).toMatch(/^\/textures\/GURGUR\/CONCRETE\.png\?v=[0-9a-f]{64}$/);
@@ -62,6 +63,7 @@ describe("authoritative server", () => {
       });
       expect(concreteManifest.renderMode).toBe("retro");
       expect(textureManifest.sprites.fern).toMatch(/^\/sprites\/fern\.png\?v=[0-9a-f]{64}$/);
+      expect(textureManifest.audio.dylan).toMatch(/^\/audio\/dylan\.mp3\?v=[0-9a-f]{64}$/);
       const concreteTextureUrl = new URL(concreteManifest.url, `http://127.0.0.1:${server.port}`);
       expect(concreteTextureUrl.pathname).toBe("/textures/GURGUR/CONCRETE.png");
       const concreteTexture = await fetch(concreteTextureUrl.href);
@@ -72,6 +74,12 @@ describe("authoritative server", () => {
       expect(new Uint8Array(await concreteTexture.arrayBuffer()).slice(0, 8)).toEqual(
         new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
       );
+      const dylanAudio = await fetch(
+        new URL(textureManifest.audio.dylan!, `http://127.0.0.1:${server.port}`),
+      );
+      expect(dylanAudio.headers.get("content-type")).toBe("audio/mpeg");
+      expect(dylanAudio.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+      expect(new TextDecoder().decode((await dylanAudio.bytes()).slice(0, 3))).toBe("ID3");
       const connected = await connectClient(`ws://127.0.0.1:${server.port}/game`);
       client = connected;
       expect(connected.stateChannel.maxRetransmits).toBe(STATE_MAX_RETRANSMITS);

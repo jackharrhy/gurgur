@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   loadAssetManifest,
+  loadAudioAsset,
   loadMaterialTextureAsset,
   loadMaterialTextureManifest,
   loadSpriteAsset,
@@ -43,18 +44,23 @@ describe("authored material texture assets", () => {
   test("resolves only safe authored PNG paths", async () => {
     const textureRoot = new URL("../../../content/textures/", import.meta.url);
     const spriteRoot = new URL("../../../content/sprites/", import.meta.url);
-    const manifest = await loadAssetManifest(textureRoot, spriteRoot);
+    const audioRoot = new URL("../../../content/audio/", import.meta.url);
+    const manifest = await loadAssetManifest(textureRoot, spriteRoot, audioRoot);
     expect(manifest.materials["GURGUR/CONCRETE"]?.url).toContain("/textures/");
     expect(manifest.sprites.fern).toContain("/sprites/");
+    expect(manifest.audio.dylan).toContain("/audio/");
     expect(
       (await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/CONCRETE.png"))?.key,
     ).toBe("GURGUR/CONCRETE");
     expect((await loadSpriteAsset(spriteRoot, "/sprites/fern.png"))?.key).toBe("fern");
+    expect((await loadAudioAsset(audioRoot, "/audio/dylan.mp3"))?.key).toBe("dylan");
     expect(
       await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/%2e%2e/package.json"),
     ).toBeNull();
     expect(await loadMaterialTextureAsset(textureRoot, "/textures/GURGUR/CONCRETE.jpg")).toBeNull();
     expect(await loadSpriteAsset(spriteRoot, "/sprites/%2e%2e/fern.png")).toBeNull();
+    expect(await loadAudioAsset(audioRoot, "/audio/%2e%2e/dylan.mp3")).toBeNull();
+    expect(await loadAudioAsset(audioRoot, "/audio/dylan.opus")).toBeNull();
   });
 });
 

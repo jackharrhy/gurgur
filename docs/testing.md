@@ -52,11 +52,17 @@ scenarios cover grab, touch, gamepad, reconnect, and ordinary movement. Browser
 automation appends `?test`; the grab scenario also enables the general `?debug`
 view and requires a non-empty authoritative Box3D debug frame, covering the server
 callback, JSON route, browser polling, and Three.js overlay together.
+The reconnect scenario first recovers from an invalid stored session and then
+performs three hard reloads, requiring each resumed page to reach usable WebRTC
+input before any stale-generation rejection.
+Every browser scenario samples pre-player animation frames and requires the
+canvas to remain hidden over a black page until the renderer reports a completed
+local-player presentation frame.
 
 `SMOKE_BROWSER=firefox bun run test:browser -- movement` runs the same movement
-contract in Playwright Firefox, including server-offer signaling and mDNS ICE
-candidate handling. `SMOKE_DENY_POINTER_LOCK=1 bun run test:browser -- movement`
-proves keyboard movement remains armed when pointer lock is rejected.
+contract in Playwright Firefox with normal mDNS host-candidate handling.
+`SMOKE_DENY_POINTER_LOCK=1 bun run test:browser -- movement` proves keyboard
+movement remains armed when pointer lock is rejected.
 
 ## Multiplayer harness
 

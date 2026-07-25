@@ -26,6 +26,7 @@ const bundle = (): WorldBundle => ({
       entityIndex: -1,
       sourceBrushIndex: 0,
       center: { x: 0, y: 0, z: 0 },
+      collisionOnlyFaceIndices: [],
       worldVertices: [
         { x: 0, y: 0, z: 0 },
         { x: 1, y: 0, z: 0 },
@@ -89,6 +90,18 @@ describe("v1 binary world bundle", () => {
     expect(encodeWorldBundle(bundle())).toEqual(first);
     expect(decode(first)).toEqual(bundle());
     expect(decode(first).bundleVersion).toBe(1);
+  });
+
+  test("keeps collision-only faces in physics while omitting their render batches", () => {
+    const collisionOnly = bundle();
+    collisionOnly.brushes[0]!.collisionOnlyFaceIndices = [4];
+    collisionOnly.renderBatches = [];
+    const decoded = decode(encodeWorldBundle(collisionOnly));
+    expect(decoded.staticCollision.triangles).toEqual([[0, 2, 1]]);
+    expect(decoded.staticCollision.triangleSources).toEqual([
+      { entityIndex: -1, brushIndex: 0, faceIndex: 4 },
+    ]);
+    expect(decoded.renderBatches).toEqual([]);
   });
 
   test("structurally rejects malformed entity capabilities", () => {

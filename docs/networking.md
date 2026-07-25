@@ -174,15 +174,21 @@ cannot create a prediction-only gap after the reliable initial snapshot.
 
 Reconnect replaces the prior socket generation and rejects stale work. Ordinary
 input, interpolation history, and prediction history never cross a reconnect or
-epoch boundary.
+epoch boundary. The browser keeps the next socket generation beside its
+per-tab session token in `sessionStorage`, so a hard reload resumes with a
+strictly newer generation instead of restarting at zero. A separately opened
+tab receives a separate session unless the browser explicitly clones tab
+storage.
 
 ## Gameplay transport
 
 The same Bun process terminates HTTP/WebSocket and a `werift@0.23.0` WebRTC peer
 per client. The server sends the offer and the browser returns the answer. This
-ordering lets Firefox begin checks against the server's public candidate. Browser
-mDNS host candidates are not resolvable from the remote server and are omitted
-from the answer before Werift consumes it; incoming checks still establish the
+ordering lets Firefox and Chromium begin checks against the server candidate.
+Browser mDNS host candidates remain available for Werift to resolve on a shared
+local network. When an answer contains mDNS candidates, its end-of-candidates
+marker is withheld so slow or unavailable mDNS resolution cannot make Werift
+prematurely fail an empty checklist; incoming checks can still establish the
 peer-reflexive path, while server-reflexive and relay candidates remain intact.
 The client creates `gurgur-input-v1` as unordered with no retransmissions. The
 server creates `gurgur-state-v1` as unordered with at most one retransmission.

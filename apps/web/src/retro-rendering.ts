@@ -89,7 +89,7 @@ export function createWorldNodeMaterial(
   const material = new THREE.MeshBasicNodeMaterial({
     color: sensor ? 0x56e0d2 : 0xffffff,
     map: textureMap,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
     transparent: sensor || water,
     opacity: sensor ? 0.16 : 1,
     depthWrite: !water,
@@ -109,7 +109,7 @@ export function createWorldNodeMaterial(
 export function createRealityNodeMaterial(textureMap: THREE.Texture): THREE.MeshBasicNodeMaterial {
   return new THREE.MeshBasicNodeMaterial({
     map: textureMap,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
     fog: false,
     toneMapped: false,
   });

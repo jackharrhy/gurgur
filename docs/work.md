@@ -32,6 +32,20 @@ slice:
 - prop pickup uses a camera-forward, obstruction-aware target controller with
   mass-scaled bounded impulses and yaw-relative angular stabilization instead of
   the former fixed-length orbiting distance joint;
+- regular typed triggers now send paired `play`/`stop` outputs to
+  `ambient_audio` nodes by compiled entity index, with listener-local overlap
+  priority, crossfades, logical MP3 assets, and no new transport or persistence
+  state;
+- hard reloads now preserve the per-tab socket-generation sequence alongside
+  the resumable session token, preventing progressively slower stale-generation
+  reconnect loops;
+- the play canvas remains black until a predicted local-player pose has actually
+  driven a rendered camera frame, eliminating the initial default-camera flash;
+- `GURGUR/SKIP` is a generated transparent TrenchBroom face tag whose compiled
+  faces remain authoritative collision while being absent from static and moving
+  brush presentation;
+- static and moving brush presentation now front-face culls the compiler's
+  outward triangle winding in both retro and reality passes;
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
   prediction worker, Box3D Wasm, and Three.js presentation.
 

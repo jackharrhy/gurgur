@@ -100,6 +100,7 @@ export function deriveWorldBuffers(
   });
   for (const [brushIndex, brush] of brushes.entries()) {
     const owner = bodyBrushes.get(brushIndex);
+    const collisionOnlyFaces = new Set(brush.collisionOnlyFaceIndices);
     if (!owner) {
       const offset = staticCollision.vertices.length;
       staticCollision.vertices.push(...brush.worldVertices.map((vertex) => ({ ...vertex })));
@@ -115,6 +116,7 @@ export function deriveWorldBuffers(
     if (owner && owner.presentation.kind !== "brush") continue;
     if (owner?.presentation.kind === "brush" && owner.presentation.transform === "body") continue;
     brush.triangles.forEach((triangle, triangleIndex) => {
+      if (collisionOnlyFaces.has(brush.triangleSourceFaces[triangleIndex]!)) return;
       const material = brush.triangleMaterials[triangleIndex]!;
       const sensor = owner?.body?.kind === "sensor-brush";
       const key = `${material}\0${Number(sensor)}`;
@@ -296,7 +298,7 @@ function decodeGeometry(bytes: Uint8Array, metadata: BrushMetadata[]): CompiledB
     }
     if (brush.triangleMaterials.length !== triangleCount)
       throw new Error("world bundle material count mismatch");
-    brushes.push({
+    const compiledBrush: CompiledBrush = {
       ...brush,
       worldVertices,
       localVertices: worldVertices.map((vertex) => ({
@@ -308,7 +310,9 @@ function decodeGeometry(bytes: Uint8Array, metadata: BrushMetadata[]): CompiledB
       triangleSourceFaces,
       triangleNormals,
       triangleUvs,
-    });
+    };
+    assertParallelBrushData(compiledBrush);
+    brushes.push(compiledBrush);
   }
   if (offset !== view.byteLength) throw new Error("world bundle geometry has trailing bytes");
   return brushes;
@@ -345,6 +349,16 @@ function assertParallelBrushData(brush: CompiledBrush): void {
   )
     throw new Error(
       `compiled brush ${brush.entityIndex}:${brush.sourceBrushIndex} has inconsistent triangle data`,
+    );
+  const sourceFaces = new Set(brush.triangleSourceFaces);
+  if (
+    new Set(brush.collisionOnlyFaceIndices).size !== brush.collisionOnlyFaceIndices.length ||
+    brush.collisionOnlyFaceIndices.some(
+      (faceIndex) => !Number.isSafeInteger(faceIndex) || !sourceFaces.has(faceIndex),
+    )
+  )
+    throw new Error(
+      `compiled brush ${brush.entityIndex}:${brush.sourceBrushIndex} has invalid collision-only faces`,
     );
 }
 
@@ -401,6 +415,13 @@ function assertMetadata(value: unknown): asserts value is {
       !brush.triangleMaterials.every((material) => typeof material === "string")
     )
       throw new Error("world bundle brush materials must be strings");
+    if (
+      !Array.isArray(brush.collisionOnlyFaceIndices) ||
+      !brush.collisionOnlyFaceIndices.every(
+        (faceIndex) => Number.isSafeInteger(faceIndex) && Number(faceIndex) >= 0,
+      )
+    )
+      throw new Error("world bundle collision-only face indices must be non-negative integers");
   }
 }
 

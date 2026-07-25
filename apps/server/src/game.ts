@@ -410,7 +410,7 @@ export class AuthoritativeGame {
           this.#serverTick + TERMINAL_BODY_REPEAT_TICKS,
         );
     }
-    this.#simulation.processSensorBegins(events.sensorBegin);
+    this.#simulation.processSensorEvents(events.sensorBegin, events.sensorEnd);
   }
 
   #snapshotFlags(id: RuntimeId, position: Vec3, awake: boolean): number {

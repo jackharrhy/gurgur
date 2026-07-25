@@ -46,7 +46,7 @@ export class GameSession {
   #jitterMs = 0;
   #mapRevision: string | null = null;
   #sessionToken: string | null = readSessionToken();
-  #socketGeneration = 0;
+  #socketGeneration = readSocketGeneration();
   #worldLoadGeneration = 0;
   #loadedWorldEpoch: number | null = null;
   #snapshotQueue: Snapshot[] = [];
@@ -67,6 +67,7 @@ export class GameSession {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/game`);
     const socketGeneration = this.#socketGeneration++;
+    writeSocketGeneration(this.#socketGeneration);
     socket.binaryType = "arraybuffer";
     this.#socket = socket;
     socket.addEventListener("open", () => {
@@ -122,7 +123,9 @@ export class GameSession {
         this.#worldEpoch = message.worldEpoch;
         this.#mapRevision = message.mapRevision;
         this.#sessionToken = message.sessionToken;
+        this.#socketGeneration = Math.max(this.#socketGeneration, message.socketGeneration + 1);
         writeSessionToken(message.sessionToken);
+        writeSocketGeneration(this.#socketGeneration);
         this.#retryAttempt = 0;
         this.#callbacks.welcome(message);
         this.#startPings();
@@ -412,6 +415,23 @@ function writeSessionToken(token: string): void {
 function clearSessionToken(): void {
   try {
     sessionStorage.removeItem("gurgur.session");
+  } catch {
+    /* memory-only fallback */
+  }
+}
+
+function readSocketGeneration(): number {
+  try {
+    const generation = Number(sessionStorage.getItem("gurgur.socket-generation"));
+    return Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSocketGeneration(generation: number): void {
+  try {
+    sessionStorage.setItem("gurgur.socket-generation", String(generation));
   } catch {
     /* memory-only fallback */
   }

@@ -3,6 +3,7 @@ export * from "./controller";
 export * from "./entities";
 export * from "./engine-api";
 export * from "./grab";
+export * from "./materials";
 export * from "./players";
 export * from "./simulation";
 export * from "./state";

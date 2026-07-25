@@ -147,6 +147,8 @@ A kinematic proxy capsule follows the geometric mover after resolution. The prox
 exists for sensors, raycasts, projectiles, and contact identity; it does not drive
 player movement. Teleport, respawn, crouch-size change, and epoch reset update the
 mover and proxy atomically and clear prediction/interpolation history.
+Sensor shapes remain visible to proxy overlap events but are excluded from
+geometric mover, capsule-fit, sweep, and ordinary controller-ray queries.
 
 ## Prop carry controller
 

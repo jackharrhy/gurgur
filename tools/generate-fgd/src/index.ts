@@ -1,4 +1,4 @@
-import { entityDefinitions, type PropertyDefinition } from "@gurgur/game";
+import { entityDefinitions, SKIP_MATERIAL, type PropertyDefinition } from "@gurgur/game";
 
 const fgdType = (property: PropertyDefinition): string =>
   ({
@@ -73,6 +73,12 @@ const gameConfig = {
       { name: "Trigger", attribs: ["transparent"], match: "classname", pattern: "trigger_*" },
     ],
     brushface: [
+      {
+        name: "Skip",
+        attribs: ["transparent"],
+        match: "material",
+        pattern: SKIP_MATERIAL,
+      },
       { name: "Reality", attribs: [], match: "material", pattern: "GURGUR/REAL/*" },
       { name: "Reality (Dylan)", attribs: [], match: "material", pattern: "GURGUR/dylans*" },
     ],

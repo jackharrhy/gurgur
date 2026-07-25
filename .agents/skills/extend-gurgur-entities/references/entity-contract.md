@@ -21,7 +21,7 @@ schema, and one explicit compile callback.
 
 Use the helpers in `packages/game/src/entities.ts` for strings, bounded
 numbers, booleans, vectors, colors, targets, target names, map distances, map
-speeds, yaw angles, and logical sprite IDs. Do not recreate conversions in a
+speeds, yaw angles, and logical sprite/audio IDs. Do not recreate conversions in a
 catalog entry.
 
 Persistent definitions receive `context.authoredId`. The compiler validates
@@ -39,6 +39,7 @@ names, and exactly one `default` spawn.
 - `relay`
 - `button`
 - `sprite`
+- `ambient-audio`
 
 Every member declares body, presentation, and interaction capabilities. Special
 authored entities compile into `settings`, `playerSpawns`, or `resetMarkers`
@@ -46,6 +47,14 @@ instead of the entity array.
 
 Do not add a new union member for a cosmetic mapper alias. Add a member only
 when simulation or persistence semantics differ.
+
+Triggers own typed enter and optional exit output connections. Mapper target
+names are resolved during compilation to recipient entity indices and do not
+enter the bundle. The closed input vocabulary is `trigger`, `open`, `close`,
+`play`, and `stop`; extend it only alongside receiver validation and behavior.
+Listener-local audio uses paired `play` on enter and `stop` on exit against the
+same `ambient-audio` recipients. It does not require a special trigger
+archetype, server state, or transport message.
 
 ## Runtime and persistence
 
@@ -68,7 +77,8 @@ boundary; do not enumerate game union members in the server.
 
 ### Content using an existing entity
 
-- Edit a non-autosave `.map` or add `content/sprites/<logical-id>.png`.
+- Edit a non-autosave `.map`, add `content/sprites/<logical-id>.png`, or add
+  `content/audio/<logical-id>.mp3`.
 - Compile content and inspect deterministic generated artifacts.
 - Do not touch engine, protocol, renderer dispatch, or simulation.
 
@@ -76,6 +86,8 @@ boundary; do not enumerate game union members in the server.
 
 - Add one catalog definition with typed properties and `compile`.
 - Reuse an existing archetype/capability.
+- Prefer typed trigger outputs and existing receiver inputs over a new
+  trigger-shaped union member.
 - Add required/default/conversion and target-resolution tests.
 - Regenerate the FGD, game config, and world bundle.
 
