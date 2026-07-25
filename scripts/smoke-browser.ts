@@ -107,10 +107,14 @@ if (process.env.GURGUR_TEST_MODE === "1") url.searchParams.set("test", "1");
 if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1")
   url.searchParams.set("debug", "1");
 const browserName = process.env.SMOKE_BROWSER === "firefox" ? "firefox" : "chromium";
+const chromiumArgs =
+  process.platform === "linux"
+    ? ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--use-gpu-in-tests"]
+    : [];
 const browser =
   browserName === "firefox"
     ? await firefox.launch({ headless: true })
-    : await chromium.launch({ executablePath, headless: true });
+    : await chromium.launch({ executablePath, headless: true, args: chromiumArgs });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 await page.addInitScript(() => {
   const state = { exposed: false, hiddenSamples: 0 };
