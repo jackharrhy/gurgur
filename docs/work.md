@@ -20,9 +20,12 @@ slice:
 - the browser restores and replays only its geometric player controller.
   Prediction history is indexed by a server-disciplined tick estimate, so neither
   input acknowledgement cadence nor quantized browser timer callbacks can
-  manufacture or remove fixed simulation steps. Authoritative moving bodies are
-  kinematic collision proxies, never locally simulated rigid-body truth. Prop
-  motion extrapolates for at most 100 ms, while collision and current-contact
+  manufacture or remove fixed simulation steps. Post-step tick labels target the
+  next completed state, and predicted presentation samples those poses at the
+  fractional server phase instead of adding an arrival-relative frame of lag or
+  displaying a whole future tick. Authoritative moving bodies are kinematic
+  collision proxies, never locally simulated rigid-body truth. Prop motion
+  extrapolates for at most 100 ms, while collision and current-contact
   presentation share the same real-time freshness expiry;
 - per-client 1,200-byte interest selection keeps delivery history: interaction
   and recent-release state uses a fast lane, nearby awake state has a bounded
@@ -145,6 +148,18 @@ error. The replacement real-browser gate failed the old path at 1.0833 m after
 6.5 seconds, then passed the server-disciplined path at 60.00 Hz, zero accumulated
 tick lead, and 0.0833 m ordinary moving lead. That Chromium-to-Bun scenario is
 now part of `bun run check`, not an optional smoke invoked only after unit tests.
+
+A subsequent lossless local trace isolated a second tick-phase error: all 451
+selected snapshots arrived, RTT remained below 4 ms, and no prop record was
+starved, but prediction commonly had no frame for the incoming post-step tick.
+Its correction p95 was exactly one 5 m/s fixed step (0.083333 m), and 123 of 136
+material samples matched server tick `S - 1` better than `S`. Targeting the next
+completed post-step tick removed that steady one-tick underprediction. Predicted
+poses are now rendered at their fractional server phase, avoiding both the old
+extra smoothing tick and an immediate whole-tick lead. The real grab browser
+scenario records its own carry-turn-release trace and gates the released prop
+for the first half-second rather than checking only that authority eventually
+moved it.
 
 The map/prediction regressions additionally prove that only the authority moves
 props, latest intent replaces stale queued intent, action counters survive loss,

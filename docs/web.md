@@ -28,8 +28,9 @@ apps/web/
   session.ts            WebSocket control, WebRTC signaling, datagram dispatch
   prediction-worker.ts  Box3D worker entrypoint
   prediction-client.ts  worker ownership and message bridge
+  prediction-clock.ts   server-phase target selection
   prediction.ts         replay and reconciliation implementation
-  presentation.ts       fixed-pose/display-frame smoothing
+  presentation.ts       tick-labelled predicted-pose sampling
   renderer.ts           Three.js scene, camera, objects, render loop
   interpolation.ts      remote snapshot histories and visual sampling
   input.ts              keyboard, pointer lock, gamepad, touch intent
@@ -59,7 +60,9 @@ There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
 objects are keyed by generation-bearing network identity. Each frame samples
 interpolated visual transforms from client state and applies them directly to
-Three.js objects.
+Three.js objects. Buffered remote state samples an adaptive delayed tick.
+Predicted local-player and contact-proxy state instead samples between completed
+prediction ticks at the current fractional server-clock phase.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission without advancing local physics by

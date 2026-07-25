@@ -14,6 +14,7 @@ import {
   type RuntimeId,
   type StateAcknowledgement,
 } from "@gurgur/engine";
+import { nextPredictionTargetTick } from "../../web/src/prediction-clock";
 import { PlayerPredictor } from "../../web/src/prediction";
 import { AuthoritativeGame } from "../src/game";
 import { ClientSnapshotScheduler } from "../src/snapshot-scheduler";
@@ -180,15 +181,19 @@ function simulateNetworkTimeline(options: {
   const acknowledgementDeltas: number[] = [];
   let acknowledgement: StateAcknowledgement | null = null;
   let nextClientAtMs = options.clientPhaseMs;
-  let nextServerAtMs = 0;
+  let nextServerAtMs = FIXED_STEP_MS;
   let sequence = 0;
   let latestAuthorityTick = -1;
   let lastAcknowledgedSequence: number | null = null;
+  const predictionClockStartTick = options.game.serverTick;
 
   for (let nowMs = 0; nowMs <= options.durationMs; nowMs += 1) {
     while (nextClientAtMs <= nowMs) {
       const command = options.command(sequence++, nextClientAtMs);
-      options.predictor.pushInput(command);
+      options.predictor.pushInput(
+        command,
+        nextPredictionTargetTick(predictionClockStartTick + nextClientAtMs / FIXED_STEP_MS),
+      );
       inputHistory.push(command);
       if (inputHistory.length > INPUT_REDUNDANCY) inputHistory.shift();
       inputPackets.push({

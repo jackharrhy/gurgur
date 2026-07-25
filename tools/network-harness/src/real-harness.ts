@@ -22,6 +22,7 @@ import {
 } from "@gurgur/engine";
 import { decodeWorldBundle, type WorldMessage } from "@gurgur/game";
 import type { ServerMetrics } from "../../../apps/server/src/server";
+import { nextPredictionTargetTick } from "../../../apps/web/src/prediction-clock";
 import { PlayerPredictor } from "../../../apps/web/src/prediction";
 import { createSnapshotTimeline, type SnapshotTimeline } from "../../../apps/web/src/interpolation";
 import { NETWORK_PROFILES } from "./profiles";
@@ -542,7 +543,7 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
       const encoded = encodeInputBundle(client.inputHistory, client.stateAcknowledgement);
       client.predictor?.pushInput(
         command,
-        Math.floor(client.history.serverTickAt(client.nextInputAtMs)),
+        nextPredictionTargetTick(client.history.serverTickAt(client.nextInputAtMs)),
       );
       client.inputTimes.set(command.sequence, client.nextInputAtMs);
       client.inbound.send(client.nextInputAtMs, encoded.byteLength, encoded);

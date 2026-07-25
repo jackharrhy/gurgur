@@ -3,6 +3,7 @@ import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createPredictionClient } from "./prediction-client";
+import { nextPredictionTargetTick } from "./prediction-clock";
 import { WorldAudio } from "./audio";
 import { installNetworkTraceControls, type ClientNetworkTraceRecorder } from "./network-trace";
 import type { PhysicsDebugFrame, RuntimeId } from "@gurgur/engine";
@@ -195,10 +196,10 @@ if (followCamera) {
 }
 const predictor = createPredictionClient(
   (body, bodies, correctionMagnitude, diagnostics) => {
-    renderer.setPredictedPlayer(body);
+    renderer.setPredictedPlayer(body, diagnostics.predictionTick);
     if (!body && !followCamera) document.body.dataset.playerViewReady = "false";
     if (body) worldAudio.update(body.position);
-    renderer.setPredictedBodies(bodies);
+    renderer.setPredictedBodies(bodies, diagnostics.predictionTick);
     if (testEnabled)
       for (const predicted of bodies) {
         const diagnostic = diagnosticBodies.get(`${predicted.id.index}:${predicted.id.generation}`);
@@ -246,7 +247,7 @@ const input = createPlayerInput(
     document.body.dataset.inputButtons = String(command.buttons);
     document.body.dataset.inputSequence = String(command.sequence);
     session.sendInput(command);
-    predictor.pushInput(command, Math.floor(history.serverTickAt(performance.now())));
+    predictor.pushInput(command, nextPredictionTargetTick(history.serverTickAt(performance.now())));
   },
   (yaw, pitch) => {
     if (!followCamera) renderer.setViewAngles(yaw, pitch);

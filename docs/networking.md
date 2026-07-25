@@ -88,11 +88,20 @@ Input sequence and simulation time are deliberately separate. Each local
 controller step records its predicted server tick, effective intent, and
 resulting controller state. The predictor advances exactly once per predicted
 server tick while holding the newest sampled intent. The client clock estimates
-the current authoritative tick from timestamped state and ping observations.
-Repeated intent callbacks targeting the same estimated tick only replace intent;
-a callback can never mint another simulation step. Input sequence acknowledgement
-remains transport and diagnostic metadata; packet arrival count and sequence
-deltas never create or remove simulation steps.
+the current authoritative tick from timestamped state and ping observations. A
+snapshot tick names the state after that fixed step, so an input sampled while
+the estimate is between `S` and `S + 1` targets the next completed state,
+`floor(estimate) + 1`. Repeated intent callbacks targeting the same tick only
+replace intent; a callback can never mint another simulation step. Input sequence
+acknowledgement remains transport and diagnostic metadata; packet arrival count
+and sequence deltas never create or remove simulation steps.
+
+Predicted player and contact-proxy poses retain their completed server-tick
+labels. The render loop samples between the surrounding predicted poses at the
+clock's fractional server phase. It does not ease for one frame from the moment
+a worker message arrives, which would add a fixed tick of latency, and it does
+not immediately display the entire next-tick pose, which would put a fast throw
+ahead of current presentation time.
 
 On an authoritative player sample for tick `S` the predictor:
 

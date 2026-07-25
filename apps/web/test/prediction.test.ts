@@ -12,11 +12,21 @@ import {
   type Vec3,
 } from "@gurgur/engine";
 import { PLAYER_SPEED, compileWorld, type WorldBundle, type WorldMessage } from "@gurgur/game";
+import { nextPredictionTargetTick } from "../src/prediction-clock";
 import { PlayerPredictor } from "../src/prediction";
 
 const playerId = { index: 0x8000_0000, generation: 1 };
 
 describe("player-only prediction", () => {
+  test("targets the next post-step server tick from every clock phase", () => {
+    expect(nextPredictionTargetTick(100)).toBe(101);
+    expect(nextPredictionTargetTick(100.001)).toBe(101);
+    expect(nextPredictionTargetTick(100.999)).toBe(101);
+    expect(nextPredictionTargetTick(101)).toBe(102);
+    expect(() => nextPredictionTargetTick(-0.001)).toThrow();
+    expect(() => nextPredictionTargetTick(Number.NaN)).toThrow();
+  });
+
   test("emits tick- and sequence-correlated trace events only while enabled", async () => {
     const bundle = await fixture("network-push-corridor");
     const events: TracePredictionEvent[] = [];

@@ -429,19 +429,22 @@ export class WorldRenderer {
     this.#localPlayer = id;
   }
 
-  setPredictedPlayer(body: BodySnapshot | null): void {
-    if (body) this.#predictedLocal.push(body, performance.now());
+  setPredictedPlayer(body: BodySnapshot | null, predictionTick: number | null): void {
+    if (body && predictionTick !== null) this.#predictedLocal.push(body, predictionTick);
     else this.#predictedLocal.clear();
   }
 
-  setPredictedBodies(bodies: BodySnapshot[]): void {
-    const now = performance.now();
+  setPredictedBodies(bodies: BodySnapshot[], predictionTick: number | null): void {
+    if (predictionTick === null) {
+      this.#predictedBodies.clear();
+      return;
+    }
     const retained = new Set<string>();
     for (const body of bodies) {
       const identity = idKey(body.id);
       retained.add(identity);
       const timeline = this.#predictedBodies.get(identity) ?? createPredictedPoseTimeline();
-      timeline.push(body, now);
+      timeline.push(body, predictionTick);
       this.#predictedBodies.set(identity, timeline);
     }
     for (const identity of this.#predictedBodies.keys()) {
@@ -600,9 +603,9 @@ export class WorldRenderer {
         const currentSample = this.#history.sampleWithMetadata(estimatedServerTick);
         const authoritative = authoritativeSample.bodies;
         const current = currentSample.bodies;
-        const predictedLocal = this.#predictedLocal.sample(now);
+        const predictedLocal = this.#predictedLocal.sample(estimatedServerTick);
         const predictedBodies = [...this.#predictedBodies.values()].flatMap((timeline) => {
-          const body = timeline.sample(now);
+          const body = timeline.sample(estimatedServerTick);
           return body ? [body] : [];
         });
         const renderedBodies = mergeBodySamples(authoritative, predictedBodies);

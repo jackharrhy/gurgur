@@ -107,22 +107,30 @@ test("billboard geometry preserves the authored origin inside a lit plane", () =
   geometry.dispose();
 });
 
-describe("predicted display-rate presentation", () => {
-  test("fills 120 Hz render frames between 60 Hz fixed poses", () => {
-    const buffer = createPredictedPoseTimeline();
-    buffer.push(pose(0), 0);
-    buffer.push(pose(0.1), 1000 / 60);
+describe("predicted server-phase presentation", () => {
+  test("samples between completed fixed-tick poses at the current server phase", () => {
+    const timeline = createPredictedPoseTimeline();
+    timeline.push(pose(0), 100);
+    timeline.push(pose(0.1), 101);
 
-    expect(buffer.sample(1000 / 60)?.position.x).toBeCloseTo(0);
-    expect(buffer.sample(1000 / 60 + 1000 / 120)?.position.x).toBeCloseTo(0.05);
-    expect(buffer.sample(1000 / 60 + 1000 / 60)?.position.x).toBeCloseTo(0.1);
+    expect(timeline.sample(100)?.position.x).toBe(0);
+    expect(timeline.sample(100.5)?.position.x).toBeCloseTo(0.05);
+    expect(timeline.sample(101)?.position.x).toBe(0.1);
   });
 
-  test("does not smear teleports across a frame", () => {
-    const buffer = createPredictedPoseTimeline();
-    buffer.push(pose(0), 0);
-    buffer.push(pose(2), 1000 / 60);
-    expect(buffer.sample(1000 / 60)?.position.x).toBe(2);
+  test("does not smear discontinuous poses across a tick", () => {
+    const timeline = createPredictedPoseTimeline();
+    timeline.push(pose(0), 100);
+    timeline.push(pose(2), 101);
+    expect(timeline.sample(100.5)?.position.x).toBe(2);
+  });
+
+  test("replaces repeated output for one predicted tick without shifting its phase", () => {
+    const timeline = createPredictedPoseTimeline();
+    timeline.push(pose(0), 100);
+    timeline.push(pose(0.1), 101);
+    timeline.push(pose(0.12), 101);
+    expect(timeline.sample(100.5)?.position.x).toBeCloseTo(0.06);
   });
 
   test("lets a current authoritative contact proxy override its buffered sample", () => {

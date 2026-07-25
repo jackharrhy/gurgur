@@ -48,12 +48,14 @@ proxies, but player contact cannot apply local rigid-body motion to them.
 The phase regression runs client sampling, server ticks, input delivery, snapshot
 delivery, and codec round trips on independent schedules. Client phases of 0, 3,
 8, and 13 ms plus deterministic reordering force zero- and multi-sequence
-acknowledgement advances. It requires tick-indexed replay to remain below 5 mm
-p95, 1 cm p99, and 2 cm maximum in the focused no-contact path. Its interaction
-case uses the authored 0.8128 m cube plus 32 stress bodies to reproduce
-grab-carry-turn-release motion under packet saturation. Scheduler tests separately
-prove the four-record sleep-commit cap, selective terminal acknowledgement,
-500 ms release lane, and two-snapshot nearby-awake deadline.
+acknowledgement advances. It drives the same `floor(estimated tick) + 1`
+post-step target calculation as the production browser and requires tick-indexed
+replay to remain below 5 mm p95, 1 cm p99, and 2 cm maximum in the focused
+no-contact path. Its interaction case uses the authored 0.8128 m cube plus 32
+stress bodies to reproduce grab-carry-turn-release motion under packet
+saturation. Scheduler tests separately prove the four-record sleep-commit cap,
+selective terminal acknowledgement, 500 ms release lane, and two-snapshot
+nearby-awake deadline.
 
 Browser scenarios run the actual Bun server, WebSocket signaling, WebRTC data
 channels, codecs, prediction worker, Box3D Wasm, Three.js renderer, and input
@@ -67,8 +69,12 @@ Browser automation
 appends `?test`; the grab scenario also enables the general `?debug` view and
 requires a non-empty authoritative Box3D debug frame, covering the server
 callback, JSON route, browser polling, and Three.js overlay together. It acquires,
-carries, releases, and then requires continued finite authoritative prop motion
-after the release.
+carries, turns, releases, and then requires continued finite authoritative prop
+motion after the release. That scenario also records and validates a bounded
+development trace. It gates raw and visible player correction, current contact
+proxy error, and the released prop's proxy error for the first half-second after
+the ownership transition, so a responsive-looking input test cannot hide a
+stale thrown box.
 The follow-camera scenario starts the real loopback MCP listener, spawns an
 ephemeral authoritative player at a fixed pose, opens a browser with that
 generation-bearing runtime ID plus explicit yaw and pitch, and requires the

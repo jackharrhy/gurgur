@@ -1,44 +1,59 @@
-import { PHYSICS_DT, type BodySnapshot, type Quat, type Vec3 } from "@gurgur/engine";
+import type { BodySnapshot, Quat, Vec3 } from "@gurgur/engine";
 
-const FRAME_MILLISECONDS = PHYSICS_DT * 1_000;
 const TELEPORT_METRES = 0.75;
 
+type TickPose = {
+  tick: number;
+  body: BodySnapshot;
+};
+
 export type PredictedPoseTimeline = {
-  push(body: BodySnapshot, now: number): void;
-  sample(now: number): BodySnapshot | null;
+  push(body: BodySnapshot, tick: number): void;
+  sample(tick: number): BodySnapshot | null;
   clear(): void;
 };
 
 export function createPredictedPoseTimeline(): PredictedPoseTimeline {
-  let previous: BodySnapshot | null = null;
-  let current: BodySnapshot | null = null;
-  let receivedAt = 0;
+  let previous: TickPose | null = null;
+  let current: TickPose | null = null;
 
-  const sample = (now: number): BodySnapshot | null => {
-    if (!previous || !current) return null;
-    const amount = clamp((now - receivedAt) / FRAME_MILLISECONDS, 0, 1);
+  const sample = (tick: number): BodySnapshot | null => {
+    if (!current) return null;
+    if (!previous || tick >= current.tick) return clone(current.body);
+    if (tick <= previous.tick) return clone(previous.body);
+    const amount = (tick - previous.tick) / (current.tick - previous.tick);
     return {
-      ...current,
-      position: mixVec3(previous.position, current.position, amount),
-      rotation: mixQuat(previous.rotation, current.rotation, amount),
+      ...current.body,
+      position: mixVec3(previous.body.position, current.body.position, amount),
+      rotation: mixQuat(previous.body.rotation, current.body.rotation, amount),
     };
   };
 
-  const push = (body: BodySnapshot, now: number): void => {
-    const presented = sample(now);
-    const teleport =
-      !presented ||
-      key(presented) !== key(body) ||
-      distance(presented.position, body.position) >= TELEPORT_METRES;
-    previous = teleport ? clone(body) : presented;
-    current = clone(body);
-    receivedAt = now;
+  const push = (body: BodySnapshot, tick: number): void => {
+    if (!Number.isSafeInteger(tick) || tick < 0)
+      throw new Error("predicted presentation tick is invalid");
+    const next = { tick, body: clone(body) };
+    if (
+      !current ||
+      key(current.body) !== key(body) ||
+      tick < current.tick ||
+      distance(current.body.position, body.position) >= TELEPORT_METRES
+    ) {
+      previous = next;
+      current = next;
+      return;
+    }
+    if (tick === current.tick) {
+      current = next;
+      return;
+    }
+    previous = current;
+    current = next;
   };
 
   const clear = (): void => {
     previous = null;
     current = null;
-    receivedAt = 0;
   };
 
   return { push, sample, clear };
@@ -69,12 +84,11 @@ function clone(body: BodySnapshot): BodySnapshot {
 function key(body: BodySnapshot): string {
   return `${body.id.index}:${body.id.generation}`;
 }
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.max(minimum, Math.min(maximum, value));
-}
+
 function distance(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
+
 function mixVec3(a: Vec3, b: Vec3, amount: number): Vec3 {
   return {
     x: a.x + (b.x - a.x) * amount,
@@ -82,6 +96,7 @@ function mixVec3(a: Vec3, b: Vec3, amount: number): Vec3 {
     z: a.z + (b.z - a.z) * amount,
   };
 }
+
 function mixQuat(a: Quat, b: Quat, amount: number): Quat {
   const sign = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0 ? -1 : 1;
   const mixed = {
@@ -90,7 +105,7 @@ function mixQuat(a: Quat, b: Quat, amount: number): Quat {
     z: a.z + (b.z * sign - a.z) * amount,
     w: a.w + (b.w * sign - a.w) * amount,
   };
-  const inverseLength = 1 / Math.hypot(mixed.x, mixed.y, mixed.z, mixed.w);
+  const inverseLength = 1 / (Math.hypot(mixed.x, mixed.y, mixed.z, mixed.w) || 1);
   return {
     x: mixed.x * inverseLength,
     y: mixed.y * inverseLength,

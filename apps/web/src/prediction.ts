@@ -40,6 +40,7 @@ const CORRECTION_SECONDS = 0.1;
 const PROXY_FRESHNESS_MS = STATE_EXTRAPOLATION_MAX_TICKS * PHYSICS_DT * 1_000;
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
+
 type PredictedFrame = {
   tick: number;
   command: InputCommand;

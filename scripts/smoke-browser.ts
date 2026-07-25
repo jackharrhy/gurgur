@@ -7,6 +7,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createGurgurServer, type GurgurServer } from "../apps/server/src/server";
 import worldBundleJson from "../content/generated/systems-garden.json";
 import {
+  validateGurgurNetworkTrace,
+  type GurgurNetworkTrace,
+} from "../packages/engine/src/network-trace";
+import {
   PLAYER_CAPSULE_HALF_SEGMENT,
   PLAYER_CAPSULE_RADIUS,
   PLAYER_HALF_HEIGHT,
@@ -20,8 +24,7 @@ const interactionScenario = ["dynamic-landing", "dynamic-push", "grab"].includes
 const lightingScenario = scenario === "lighting";
 const followScenario = scenario === "follow-camera";
 const fixtureScenario = interactionScenario || scenario === "prediction-drift";
-const interactionFixture =
-  scenario === "dynamic-push" || scenario === "grab" ? "network-push-corridor" : "network-boxes";
+const interactionFixture = scenario === "dynamic-push" ? "network-push-corridor" : "network-boxes";
 const bundle = fixtureScenario
   ? compileWorld(
       await Bun.file(
@@ -717,6 +720,18 @@ try {
         { timeout: 5_000 },
       );
     }
+    const traceButton =
+      process.env.SMOKE_DISABLE_DEBUG === "1"
+        ? null
+        : page.locator("#network-trace-controls button");
+    if (traceButton) {
+      await traceButton.click();
+      await page.waitForFunction(
+        () =>
+          document.querySelector("#network-trace-controls button")?.textContent ===
+          "Stop and download",
+      );
+    }
     const beforeZ = await page.evaluate(
       (entityIndex) =>
         (
@@ -774,6 +789,24 @@ try {
       { z: beforeZ, entityIndex: heavyEntityIndex },
       { timeout: 4_000 },
     );
+    await page.dispatchEvent("canvas", "pointerdown", {
+      pointerId: 93,
+      pointerType: "touch",
+      clientX: 960,
+      clientY: 360,
+    });
+    await page.dispatchEvent("canvas", "pointermove", {
+      pointerId: 93,
+      pointerType: "touch",
+      clientX: 1_040,
+      clientY: 340,
+    });
+    await page.dispatchEvent("canvas", "pointerup", {
+      pointerId: 93,
+      pointerType: "touch",
+      clientX: 1_040,
+      clientY: 340,
+    });
     await page.evaluate(() => {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 0;
     });
@@ -831,6 +864,56 @@ try {
       { z: releaseZ, entityIndex: heavyEntityIndex },
       { timeout: 2_000 },
     );
+    if (traceButton) {
+      await page.waitForTimeout(250);
+      const downloadPromise = page.waitForEvent("download");
+      await traceButton.click();
+      const download = await downloadPromise;
+      const tracePath = await download.path();
+      if (!tracePath) throw new Error("browser grab trace download has no local path");
+      const trace = validateGurgurNetworkTrace(await Bun.file(tracePath).json());
+      const correctionP95 =
+        trace.analysis.prediction.rawCorrectionMetres.p95 ?? Number.POSITIVE_INFINITY;
+      const correctionMax =
+        trace.analysis.prediction.rawCorrectionMetres.max ?? Number.POSITIVE_INFINITY;
+      const visibleCorrectionMax = Math.max(
+        0,
+        ...trace.client.prediction.flatMap(({ event }) =>
+          event.kind === "reconciliation" ? [event.visibleCorrectionMetres] : [],
+        ),
+      );
+      const proxyPosition = trace.analysis.presentation.bySource["predicted-proxy"]?.positionMetres;
+      const proxyP95 = proxyPosition?.p95 ?? Number.POSITIVE_INFINITY;
+      const proxyMax = proxyPosition?.max ?? Number.POSITIVE_INFINITY;
+      const releaseProxy = releasedPropProxyError(trace);
+      const worstProxy = trace.analysis.presentation.worst
+        .filter(({ source }) => source === "predicted-proxy")
+        .slice(0, 5);
+      if (
+        correctionP95 > 0.09 ||
+        correctionMax > 0.22 ||
+        visibleCorrectionMax > 0.22 ||
+        proxyP95 > 0.1 ||
+        proxyMax > 0.25 ||
+        releaseProxy.samples === 0 ||
+        releaseProxy.maxMetres > 0.25
+      )
+        throw new Error(
+          `browser grab prediction diverged: ${JSON.stringify({
+            correctionP95,
+            correctionMax,
+            visibleCorrectionMax,
+            proxyP95,
+            proxyMax,
+            releaseProxy,
+            worstProxy,
+          })}`,
+        );
+      console.log(
+        `grab trace: ${(correctionP95 * 100).toFixed(2)}cm correction p95, ` +
+          `${(releaseProxy.maxMetres * 100).toFixed(2)}cm post-release proxy max`,
+      );
+    }
   } else if (scenario === "touch") {
     const before = await page.evaluate(() => ({
       x: Number(document.body.dataset.predictedX),
@@ -1057,6 +1140,89 @@ try {
   await mcpClient?.close();
   server?.stop();
   if (directory) await rm(directory, { recursive: true, force: true });
+}
+
+function releasedPropProxyError(trace: GurgurNetworkTrace): {
+  id: { index: number; generation: number } | null;
+  releaseTick: number | null;
+  samples: number;
+  maxMetres: number;
+} {
+  let previousTarget: { index: number; generation: number } | null = null;
+  let releasedTarget: { index: number; generation: number } | null = null;
+  let releaseTick: number | null = null;
+  for (const frame of trace.server.frames) {
+    const target =
+      frame.players.find(({ id }) => sameRuntimeId(id, trace.session.playerId))?.grabTarget ?? null;
+    if (previousTarget && !target) {
+      releasedTarget = previousTarget;
+      releaseTick = frame.serverTick;
+      break;
+    }
+    previousTarget = target ? { ...target } : null;
+  }
+  if (!releasedTarget || releaseTick === null)
+    return { id: null, releaseTick: null, samples: 0, maxMetres: Number.POSITIVE_INFINITY };
+
+  let samples = 0;
+  let maxMetres = 0;
+  for (const frame of trace.client.presentation) {
+    const presented = frame.bodies.find(
+      ({ body, source }) => source === "predicted-proxy" && sameRuntimeId(body.id, releasedTarget),
+    );
+    if (
+      !presented ||
+      presented.comparisonServerTick < releaseTick ||
+      presented.comparisonServerTick > releaseTick + 30
+    )
+      continue;
+    const authority = traceBodyPositionAt(trace, releasedTarget, presented.comparisonServerTick);
+    if (!authority) continue;
+    samples += 1;
+    maxMetres = Math.max(
+      maxMetres,
+      Math.hypot(
+        presented.body.position.x - authority.x,
+        presented.body.position.y - authority.y,
+        presented.body.position.z - authority.z,
+      ),
+    );
+  }
+  return { id: releasedTarget, releaseTick, samples, maxMetres };
+}
+
+function traceBodyPositionAt(
+  trace: GurgurNetworkTrace,
+  id: { index: number; generation: number },
+  tick: number,
+): { x: number; y: number; z: number } | null {
+  let before: GurgurNetworkTrace["server"]["frames"][number] | null = null;
+  let after: GurgurNetworkTrace["server"]["frames"][number] | null = null;
+  for (const frame of trace.server.frames) {
+    if (frame.serverTick <= tick) before = frame;
+    if (frame.serverTick >= tick) {
+      after = frame;
+      break;
+    }
+  }
+  if (!before || !after) return null;
+  const left = before.bodies.find((body) => sameRuntimeId(body.id, id));
+  const right = after.bodies.find((body) => sameRuntimeId(body.id, id));
+  if (!left || !right) return null;
+  const span = after.serverTick - before.serverTick;
+  const amount = span <= 0 ? 0 : (tick - before.serverTick) / span;
+  return {
+    x: left.position.x + (right.position.x - left.position.x) * amount,
+    y: left.position.y + (right.position.y - left.position.y) * amount,
+    z: left.position.z + (right.position.z - left.position.z) * amount,
+  };
+}
+
+function sameRuntimeId(
+  left: { index: number; generation: number },
+  right: { index: number; generation: number },
+): boolean {
+  return left.index === right.index && left.generation === right.generation;
 }
 
 function capsuleBoxPenetration(

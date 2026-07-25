@@ -23,6 +23,17 @@ seconds and presenting the local player as much as 4.75 m ahead. Input packet
 production and fixed simulation time are therefore separate even when both
 normally operate near 60 Hz.
 
+Snapshot tick `S` names the completed post-step state at `S`; it is not the
+interval about to be simulated. A later local trace delivered all 451 snapshots
+with sub-4-ms RTT yet showed an exact 0.083333 m correction at 5 m/s whenever
+prediction targeted `floor(estimated tick)`. In 123 of 136 material corrections,
+the pre-reconciliation pose matched server tick `S - 1` better than `S`.
+Prediction therefore targets `floor(estimated tick) + 1`. Rendering keeps the
+completed tick labels and samples their fractional server phase. Arrival-relative
+one-frame easing is rejected because it delays already phase-correct poses;
+immediately showing the entire next-tick pose is also rejected because it leads
+fast player and prop motion by as much as one fixed step.
+
 Each connection also owns a coalescing body-state scheduler. Held and recently
 released bodies use an eight-record fast lane, nearby awake state has a
 two-snapshot deadline, transition and terminal-sleep commits are capped at four
