@@ -109,7 +109,12 @@ if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1")
 const browserName = process.env.SMOKE_BROWSER === "firefox" ? "firefox" : "chromium";
 const chromiumArgs =
   process.platform === "linux"
-    ? ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--use-gpu-in-tests"]
+    ? [
+        "--use-angle=vulkan",
+        "--enable-features=Vulkan",
+        "--disable-vulkan-surface",
+        "--enable-unsafe-webgpu",
+      ]
     : [];
 const browser =
   browserName === "firefox"
@@ -195,11 +200,22 @@ if (scenario === "webgpu-unsupported")
 const smokeComplete = Symbol("smoke complete");
 try {
   const pageErrors: string[] = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const recordPageError = (message: string): void => {
+    // Debian's software Vulkan adapter emits this during Three's error-scope
+    // teardown even when the WebGPU readiness and rendered-frame gates pass.
+    if (
+      process.env.SMOKE_SOFTWARE_WEBGPU === "1" &&
+      message === "Instance dropped in popErrorScope"
+    )
+      return;
+    pageErrors.push(message);
+  };
+  page.on("pageerror", (error) => recordPageError(error.message));
   page.on("console", (message) => {
     if (message.type() === "error" && !message.text().startsWith("Failed to load resource")) {
-      pageErrors.push(message.text());
-      console.error(`browser console: ${message.text()}`);
+      const error = message.text();
+      recordPageError(error);
+      if (pageErrors.at(-1) === error) console.error(`browser console: ${error}`);
     }
   });
   await page.goto(url.href);

@@ -5,7 +5,8 @@ COPY package.json bun.lock tsconfig.json .oxfmtrc.json .oxlintrc.json ./
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends chromium \
     && rm -rf /var/lib/apt/lists/*
-ENV CHROME_PATH=/usr/bin/chromium
+ENV CHROME_PATH=/usr/bin/chromium \
+    SMOKE_SOFTWARE_WEBGPU=1
 COPY apps ./apps
 COPY content ./content
 COPY docs ./docs
