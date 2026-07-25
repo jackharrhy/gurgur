@@ -3,14 +3,15 @@ import type { BodySnapshot } from "@gurgur/engine";
 import * as THREE from "three/webgpu";
 import { createPredictedPoseTimeline, mergeBodySamples } from "../src/presentation";
 import {
+  createBillboardGeometry,
   normalizeMaterialUv,
   renderableBrushTriangleIndices,
-  shouldForceWebGL,
 } from "../src/renderer";
 import {
   createInteractionOutlineMaterial,
   createInteractionOutlineMaskMaterial,
   createRealityNodeMaterial,
+  createSpriteNodeMaterial,
   createWorldNodeMaterial,
   INTERACTION_OUTLINE_MASK_RENDER_ORDER,
   INTERACTION_OUTLINE_RENDER_ORDER,
@@ -30,27 +31,6 @@ test("material UVs normalize against each authored PNG's real dimensions", () =>
   ]);
 });
 
-test("Safari uses the stable WebGL renderer backend for retro materials", () => {
-  expect(
-    shouldForceWebGL(
-      "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/26.0 Safari/605.1.15",
-      "Apple Computer, Inc.",
-    ),
-  ).toBeTrue();
-  expect(
-    shouldForceWebGL(
-      "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36",
-      "Google Inc.",
-    ),
-  ).toBeFalse();
-  expect(
-    shouldForceWebGL(
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:143.0) Gecko/20100101 Firefox/143.0",
-      "",
-    ),
-  ).toBeFalse();
-});
-
 test("moving brush presentation omits collision-only faces", () => {
   expect(
     renderableBrushTriangleIndices({
@@ -65,9 +45,11 @@ test("moving brush presentation omits collision-only faces", () => {
   ).toEqual([2]);
 });
 
-test("reality materials bypass retro lighting, fog, and vertex treatment", () => {
+test("reality materials use native scene lighting while bypassing fog and vertex treatment", () => {
   const texture = new THREE.Texture();
   const material = createRealityNodeMaterial(texture);
+  expect(material).toBeInstanceOf(THREE.MeshLambertNodeMaterial);
+  expect(material.lights).toBeTrue();
   expect(material.map).toBe(texture);
   expect(material.fog).toBeFalse();
   expect(material.toneMapped).toBeFalse();
@@ -85,6 +67,44 @@ test("retro and reality brush materials cull backfaces", () => {
   retro.dispose();
   reality.dispose();
   texture.dispose();
+});
+
+test("retro world geometry and textures use the ordinary perspective projection", () => {
+  const texture = new THREE.Texture();
+  for (const name of ["FIXTURE", "WATER"]) {
+    const material = createWorldNodeMaterial(texture, name, false);
+    const nodeKinds = new Set<string>();
+    material.colorNode?.traverse((node) => nodeKinds.add(node.constructor.name));
+    expect(material.vertexNode).toBeNull();
+    expect(nodeKinds.has("VaryingNode")).toBeFalse();
+    material.dispose();
+  }
+  texture.dispose();
+});
+
+test("ordinary world and billboard materials participate in native scene lighting", () => {
+  const texture = new THREE.Texture();
+  const world = createWorldNodeMaterial(texture, "FIXTURE", false);
+  const sprite = createSpriteNodeMaterial(texture, false);
+  const glow = createSpriteNodeMaterial(texture, true);
+  expect(world).toBeInstanceOf(THREE.MeshLambertNodeMaterial);
+  expect(sprite).toBeInstanceOf(THREE.MeshLambertNodeMaterial);
+  expect(glow).toBeInstanceOf(THREE.MeshBasicNodeMaterial);
+  expect(world.lights).toBeTrue();
+  expect(sprite.lights).toBeTrue();
+  expect(glow).not.toBeInstanceOf(THREE.MeshLambertNodeMaterial);
+  world.dispose();
+  sprite.dispose();
+  glow.dispose();
+  texture.dispose();
+});
+
+test("billboard geometry preserves the authored origin inside a lit plane", () => {
+  const geometry = createBillboardGeometry(2, 4, { x: 0.5, y: 0.25 });
+  geometry.computeBoundingBox();
+  expect(geometry.boundingBox?.min.y).toBeCloseTo(-1);
+  expect(geometry.boundingBox?.max.y).toBeCloseTo(3);
+  geometry.dispose();
 });
 
 describe("predicted display-rate presentation", () => {

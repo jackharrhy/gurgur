@@ -1,4 +1,11 @@
-import type { BodyKind, PhysicsWorld, RuntimeEntityRef, RuntimeId } from "@gurgur/engine";
+import type {
+  BodyKind,
+  PhysicsWorld,
+  Quat,
+  RuntimeEntityRef,
+  RuntimeId,
+  Vec3,
+} from "@gurgur/engine";
 import type { WorldBundle } from "@gurgur/game";
 import type { PersistedWorld } from "./store";
 
@@ -22,6 +29,50 @@ export function createRuntimeBodies(
   const bodies = createAuthoredBodies(physics, bundle, restored);
   bodies.push(...createStressBodies(physics, bundle, restored, extraDynamicBodyCount));
   return bodies;
+}
+
+export function createRuntimeProp(
+  physics: PhysicsWorld,
+  bundle: WorldBundle,
+  entityIndex: number,
+  position: Vec3,
+  rotation: Quat,
+  authoredId: string,
+): RuntimeBody {
+  const entity = bundle.entities[entityIndex];
+  if (!entity || entity.kind !== "physics-prop")
+    throw new Error(`world entity ${entityIndex} is not a physics prop`);
+  const brushIndex = entity.body.brushIndices[0];
+  const firstBrush = brushIndex === undefined ? null : bundle.brushes[brushIndex];
+  if (!firstBrush) throw new Error(`physics prop ${entityIndex} has no source brush`);
+  const material = {
+    density: entity.body.density,
+    friction: entity.body.friction,
+    restitution: entity.body.restitution,
+  };
+  const handle =
+    entity.body.brushIndices.length === 1
+      ? physics.createHull({
+          type: "dynamic",
+          position,
+          rotation,
+          vertices: firstBrush.localVertices,
+          ...material,
+        })
+      : physics.createCompoundHulls({
+          type: "dynamic",
+          position,
+          rotation,
+          hulls: entity.body.brushIndices.map((index) => ({
+            vertices: bundle.brushes[index]!.worldVertices.map((vertex) => ({
+              x: vertex.x - firstBrush.center.x,
+              y: vertex.y - firstBrush.center.y,
+              z: vertex.z - firstBrush.center.z,
+            })),
+          })),
+          ...material,
+        });
+  return { handle, id: handle, entityIndex, authoredId };
 }
 
 function createAuthoredBodies(

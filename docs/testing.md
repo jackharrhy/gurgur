@@ -61,12 +61,19 @@ path. `test:browser -- dynamic` covers moving support, `-- push` covers visible
 prop response under shaped latency, `-- latency` covers held input, and `-- drift`
 holds a real page open for 6.5 seconds before moving so browser timer quantization
 cannot accumulate an unbounded predicted-tick lead. The other scenarios cover
-grab, touch, gamepad, reconnect, and ordinary movement. Browser automation
+grab, touch, gamepad, reconnect, ordinary movement, and a stable authored
+viewpoint inside the native-resolution reality room for lighting screenshots.
+Browser automation
 appends `?test`; the grab scenario also enables the general `?debug` view and
 requires a non-empty authoritative Box3D debug frame, covering the server
 callback, JSON route, browser polling, and Three.js overlay together. It acquires,
 carries, releases, and then requires continued finite authoritative prop motion
 after the release.
+The follow-camera scenario starts the real loopback MCP listener, spawns an
+ephemeral authoritative player at a fixed pose, opens a browser with that
+generation-bearing runtime ID plus explicit yaw and pitch, and requires the
+renderer to acquire the same replicated pose before cleanup. Stable follow
+screenshots provide a repeatable visual comparison for lighting regressions.
 Camera tests cover same-frame inward clamping, rate-independent held recovery,
 double-sided thin-wall probes, and offset-ray corner clearance. Every browser
 scenario also requires the live boom distance to remain finite and no greater
@@ -78,8 +85,11 @@ Every browser scenario samples pre-player animation frames and requires the
 canvas to remain hidden over a black page until the renderer reports a completed
 local-player presentation frame.
 
-`SMOKE_BROWSER=firefox bun run test:browser -- movement` runs the same movement
-contract in Playwright Firefox with normal mDNS host-candidate handling.
+Every supported browser scenario requires a successfully acquired WebGPU adapter
+and verifies that Three.js selected `WebGPUBackend`. The
+`bun run test:browser -- unsupported` scenario removes `navigator.gpu` before
+startup and requires the accessible unsupported message without a canvas, world
+request, asset request, or gameplay-client error.
 `SMOKE_DENY_POINTER_LOCK=1 bun run test:browser -- movement` proves keyboard
 movement remains armed when pointer lock is rejected.
 
@@ -117,6 +127,13 @@ events, embedded analysis, joined HTTP response, download filename, and disabled
 route. Browser smoke requires the idle Record control in the existing debug
 scenario but never starts a trace. Real traces are deliberate user artifacts,
 not routine test output.
+
+The dev-control integration starts the real loopback Streamable HTTP listener
+and connects the official MCP TypeScript client. It lists tools, reads live
+ticks, spawns a player, drives that player through fixed-tick intent until its
+automatic stop, spawns/removes a compiled prop clone, and removes the player. It
+also proves the listener is opt-in for programmatic servers and rejects requests
+with a browser `Origin`.
 
 ## Profiles
 

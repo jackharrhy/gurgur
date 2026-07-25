@@ -217,6 +217,16 @@ export class ClientSnapshotScheduler {
     }
   }
 
+  remove(id: RuntimeId): void {
+    const identity = key(id);
+    this.#states.delete(identity);
+    for (const [serverTick, records] of this.#sentPackets) {
+      const retained = records.filter((record) => record.key !== identity);
+      if (retained.length > 0) this.#sentPackets.set(serverTick, retained);
+      else this.#sentPackets.delete(serverTick);
+    }
+  }
+
   #observe(snapshot: Snapshot, playerIds: Set<string>, localGrabbedTarget: RuntimeId | null): void {
     for (const source of snapshot.bodies) {
       const identity = key(source.id);

@@ -126,6 +126,10 @@ The base schema contains:
 | `info_world_reset`  | authenticated administrative reset marker       |
 | `env_sprite`        | camera-facing render-only pixel-art prop        |
 | `ambient_audio`     | targeted per-listener music node                |
+| `light_ambient`     | world ambient light and volume density          |
+| `light_directional` | directional light and shadow coverage           |
+| `light_point`       | finite omnidirectional light                    |
+| `light_spot`        | finite cone light                               |
 
 The schema drives compiler validation, FGD generation, and the TrenchBroom game
 configuration. The authoritative server constructs the corresponding runtime
@@ -180,3 +184,12 @@ surface and versioned independently from authored truth.
 `env_sprite` is deliberately render-only. Its map-space origin, sprite name,
 height, and glow flag compile into the immutable bundle, but the authoritative
 server creates no body, mechanism, persistence record, or runtime identity for it.
+
+The four mapper light classnames compile into one closed, generic `light`
+presentation capability. Colors are authored as linear RGB components.
+Directions use the canonical map-to-world transform, and finite ranges plus
+directional shadow coverage are authored in map units and compiled to metres.
+Ambient light controls world-medium density; finite point and spot lights opt
+into volumetric scattering independently. Light entities create no body,
+mechanism, network identity, or persistence state, and the renderer never
+dispatches on mapper classnames.

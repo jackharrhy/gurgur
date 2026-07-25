@@ -490,7 +490,79 @@ function assertPresentation(value: unknown): void {
       throw new Error("world bundle sprite presentation is invalid");
     return;
   }
+  if (value.kind === "light") {
+    assertRgb(value.color, "world bundle light color");
+    if (!finite(value.intensity) || value.intensity < 0)
+      throw new Error("world bundle light intensity must not be negative");
+    if (value.mode === "ambient") {
+      if (!finite(value.volumeDensity) || value.volumeDensity < 0)
+        throw new Error("world bundle ambient light volume density must not be negative");
+      return;
+    }
+    if (value.mode === "directional") {
+      assertDirection(value.direction, "world bundle directional light direction");
+      if (
+        typeof value.castShadow !== "boolean" ||
+        !finite(value.shadowDistance) ||
+        value.shadowDistance <= 0
+      )
+        throw new Error("world bundle directional light presentation is invalid");
+      return;
+    }
+    if (value.mode === "point") {
+      assertLocalLight(value);
+      return;
+    }
+    if (value.mode === "spot") {
+      assertLocalLight(value);
+      assertDirection(value.direction, "world bundle spot light direction");
+      if (
+        !finite(value.angle) ||
+        value.angle <= 0 ||
+        value.angle > Math.PI / 2 ||
+        !finite(value.penumbra) ||
+        value.penumbra < 0 ||
+        value.penumbra > 1
+      )
+        throw new Error("world bundle spot light cone is invalid");
+      return;
+    }
+    throw new Error("world bundle light mode is invalid");
+  }
   throw new Error("world bundle presentation kind is invalid");
+}
+
+function assertLocalLight(value: Record<string, unknown>): void {
+  if (
+    !finite(value.range) ||
+    value.range <= 0 ||
+    !finite(value.decay) ||
+    value.decay < 0 ||
+    typeof value.castShadow !== "boolean" ||
+    typeof value.volumetric !== "boolean"
+  )
+    throw new Error("world bundle local light presentation is invalid");
+}
+
+function assertDirection(value: unknown, label: string): void {
+  assertVec3(value, label);
+  if (Math.hypot(value.x, value.y, value.z) < 1e-6) throw new Error(`${label} must not be zero`);
+}
+
+function assertRgb(value: unknown, label: string): void {
+  if (
+    !isRecord(value) ||
+    !finite(value.r) ||
+    !finite(value.g) ||
+    !finite(value.b) ||
+    value.r < 0 ||
+    value.r > 1 ||
+    value.g < 0 ||
+    value.g > 1 ||
+    value.b < 0 ||
+    value.b > 1
+  )
+    throw new Error(`${label} must contain RGB components between zero and one`);
 }
 
 function assertFiniteFields(value: Record<string, unknown>, fields: string[]): void {

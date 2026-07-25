@@ -2,6 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, firefox } from "playwright-core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createGurgurServer, type GurgurServer } from "../apps/server/src/server";
 import worldBundleJson from "../content/generated/systems-garden.json";
 import {
@@ -15,6 +17,8 @@ import { compileWorld } from "../packages/game/src/index";
 const directory = process.env.GURGUR_URL ? null : await mkdtemp(join(tmpdir(), "gurgur-browser-"));
 const scenario = process.env.SMOKE_SCENARIO ?? "movement";
 const interactionScenario = ["dynamic-landing", "dynamic-push", "grab"].includes(scenario);
+const lightingScenario = scenario === "lighting";
+const followScenario = scenario === "follow-camera";
 const fixtureScenario = interactionScenario || scenario === "prediction-drift";
 const interactionFixture =
   scenario === "dynamic-push" || scenario === "grab" ? "network-push-corridor" : "network-boxes";
@@ -34,31 +38,33 @@ const heavyBrush =
   heavyEntity?.kind === "physics-prop" ? bundle.brushes[heavyEntity.body.brushIndices[0]!] : null;
 if (interactionScenario && !heavyBrush)
   throw new Error("Systems Garden physics-prop fixture is missing");
-const playerSpawn = heavyBrush
-  ? scenario === "grab"
-    ? {
-        x: heavyBrush.center.x,
-        y: PLAYER_HALF_HEIGHT,
-        z: heavyBrush.center.z + 2.5,
-      }
-    : scenario === "dynamic-push"
+const playerSpawn = lightingScenario
+  ? { x: -24.5, y: 2, z: -3 }
+  : heavyBrush
+    ? scenario === "grab"
       ? {
-          x:
-            heavyBrush.center.x -
-            Math.max(...heavyBrush.localVertices.map((vertex) => Math.abs(vertex.x))) -
-            1.2,
-          y: PLAYER_HALF_HEIGHT,
-          z: heavyBrush.center.z,
-        }
-      : {
           x: heavyBrush.center.x,
-          y:
-            heavyBrush.center.y +
-            Math.max(...heavyBrush.localVertices.map((vertex) => vertex.y)) +
-            2.5,
-          z: heavyBrush.center.z,
+          y: PLAYER_HALF_HEIGHT,
+          z: heavyBrush.center.z + 2.5,
         }
-  : undefined;
+      : scenario === "dynamic-push"
+        ? {
+            x:
+              heavyBrush.center.x -
+              Math.max(...heavyBrush.localVertices.map((vertex) => Math.abs(vertex.x))) -
+              1.2,
+            y: PLAYER_HALF_HEIGHT,
+            z: heavyBrush.center.z,
+          }
+        : {
+            x: heavyBrush.center.x,
+            y:
+              heavyBrush.center.y +
+              Math.max(...heavyBrush.localVertices.map((vertex) => vertex.y)) +
+              2.5,
+            z: heavyBrush.center.z,
+          }
+    : undefined;
 const executablePath =
   process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const server: GurgurServer | null = directory
@@ -66,11 +72,32 @@ const server: GurgurServer | null = directory
       port: 0,
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
-      playerSpawn: interactionScenario ? playerSpawn : undefined,
+      playerSpawn: interactionScenario || lightingScenario ? playerSpawn : undefined,
       worldBundle: fixtureScenario ? bundle : undefined,
+      devMcpPort: followScenario ? 0 : undefined,
     })
   : null;
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
+let mcpClient: Client | null = null;
+let followedControllerId: string | null = null;
+const followedPosition = { x: -3.3329509925322056, y: 0.89, z: 3.7595095072943114 };
+if (followScenario) {
+  if (!server?.devMcpUrl) throw new Error("follow-camera smoke requires the development MCP");
+  mcpClient = new Client({ name: "gurgur-follow-camera-smoke", version: "1.0.0" });
+  await mcpClient.connect(new StreamableHTTPClientTransport(new URL(server.devMcpUrl)));
+  const result = await mcpClient.callTool({
+    name: "spawn_player",
+    arguments: { position: followedPosition, yaw: -0.6776000261306763 },
+  });
+  const spawned = result.structuredContent as {
+    controllerId: string;
+    player: { id: { index: number; generation: number } };
+  };
+  followedControllerId = spawned.controllerId;
+  url.searchParams.set("follow", `${spawned.player.id.index}:${spawned.player.id.generation}`);
+  url.searchParams.set("yaw", "-0.6776000261306763");
+  url.searchParams.set("pitch", "-1.2");
+}
 const simulatedLatencyMs = Number(process.env.SMOKE_LATENCY_MS ?? 0);
 if (simulatedLatencyMs > 0) url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
 if (process.env.GURGUR_TEST_MODE === "1") url.searchParams.set("test", "1");
@@ -151,6 +178,14 @@ if (scenario === "stale-session")
   await page.addInitScript(() => {
     sessionStorage.setItem("gurgur.session", "stale-session-token-for-browser-smoke");
   });
+if (scenario === "webgpu-unsupported")
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      get: () => undefined,
+    });
+  });
+const smokeComplete = Symbol("smoke complete");
 try {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -161,11 +196,60 @@ try {
     }
   });
   await page.goto(url.href);
+  if (scenario === "webgpu-unsupported") {
+    await page.locator('body[data-webgpu="unsupported"]').waitFor({ timeout: 5_000 });
+    const unsupported = await page.evaluate(() => ({
+      canvasCount: document.querySelectorAll("canvas").length,
+      mainChildren: document.querySelector("main")?.childElementCount,
+      text: document.querySelector("#webgpu-unsupported")?.textContent ?? "",
+    }));
+    if (
+      unsupported.canvasCount !== 0 ||
+      unsupported.mainChildren !== 1 ||
+      !unsupported.text.includes("WebGPU is required") ||
+      worldBundleRequests.length !== 0 ||
+      materialTextureRequests.length !== 0 ||
+      pageErrors.length !== 0
+    )
+      throw new Error(
+        `unsupported WebGPU gate failed: ${JSON.stringify({
+          unsupported,
+          worldBundleRequests,
+          materialTextureRequests,
+          pageErrors,
+        })}`,
+      );
+    if (process.env.SMOKE_SCREENSHOT) await page.screenshot({ path: process.env.SMOKE_SCREENSHOT });
+    console.log("browser WebGPU unsupported-state smoke passed without loading the game client");
+    throw smokeComplete;
+  }
   await page.locator('body[data-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-world-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-input-ready="true"]').waitFor({ timeout: 5_000 });
+  if (followScenario) {
+    await page.locator('body[data-follow-camera="ready"]').waitFor({ timeout: 5_000 });
+    const followed = await page.evaluate(() => ({
+      x: Number(document.body.dataset.followX),
+      y: Number(document.body.dataset.followY),
+      z: Number(document.body.dataset.followZ),
+      yaw: Number(document.body.dataset.followYaw),
+      pitch: Number(document.body.dataset.followPitch),
+    }));
+    if (
+      Math.hypot(
+        followed.x - followedPosition.x,
+        followed.y - followedPosition.y,
+        followed.z - followedPosition.z,
+      ) > 0.05 ||
+      followed.yaw !== -0.6776000261306763 ||
+      followed.pitch !== -1.2
+    )
+      throw new Error(
+        `follow camera did not acquire the requested pose: ${JSON.stringify(followed)}`,
+      );
+  }
   if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1") {
     const traceButton = page.locator("#network-trace-controls button");
     await traceButton.waitFor({ timeout: 5_000 });
@@ -283,7 +367,10 @@ try {
     );
   }
   await page.waitForFunction(() => Number(document.body.dataset.serverTick) >= 6);
-  if (scenario === "prediction-drift") {
+  if (scenario === "lighting") {
+    await waitForStablePlayerHeight();
+    await page.waitForTimeout(250);
+  } else if (scenario === "prediction-drift") {
     const driftDurationMs = Number(process.env.SMOKE_DRIFT_DURATION_MS ?? 6_500);
     const started = await page.evaluate(() => ({
       serverTick: Number(document.body.dataset.serverTick),
@@ -908,6 +995,8 @@ try {
   }
   const result = await page.evaluate(() => ({
     status: document.body.dataset.connection,
+    webgpu: document.body.dataset.webgpu,
+    rendererBackend: document.body.dataset.rendererBackend,
     tick: Number(document.body.dataset.serverTick),
     canvasWidth: document.querySelector("canvas")?.width,
     canvasHeight: document.querySelector("canvas")?.height,
@@ -924,6 +1013,8 @@ try {
   }));
   if (
     result.status !== "connected" ||
+    result.webgpu !== "ready" ||
+    result.rendererBackend !== "webgpu" ||
     !result.canvasWidth ||
     !result.canvasHeight ||
     pageErrors.length > 0
@@ -934,21 +1025,36 @@ try {
   const latencyLabel =
     simulatedLatencyMs > 0 ? ` with ${simulatedLatencyMs * 2}ms simulated RTT` : "";
   const resolution = `${result.canvasWidth}x${result.canvasHeight}`;
+  if (lightingScenario)
+    console.log(
+      `lighting viewpoint: ${result.player.x.toFixed(2)}, ${result.player.y.toFixed(2)}, ${result.player.z.toFixed(2)}`,
+    );
   console.log(
     `browser ${scenario} prediction smoke passed${latencyLabel} at tick ${result.tick} (${resolution})`,
   );
 } catch (error) {
-  const failurePath =
-    process.env.SMOKE_SCREENSHOT ?? join(tmpdir(), `gurgur-browser-${scenario}-failure.png`);
-  await page.screenshot({ path: failurePath });
-  console.error(
-    "browser smoke failure state",
-    await page.evaluate(() => ({ ...document.body.dataset })),
-  );
-  console.error(`browser smoke failure screenshot: ${failurePath}`);
-  throw error;
+  if (error === smokeComplete) {
+    // The unsupported-capability path deliberately exits before creating a
+    // renderer, network session, or prediction worker.
+  } else {
+    const failurePath =
+      process.env.SMOKE_SCREENSHOT ?? join(tmpdir(), `gurgur-browser-${scenario}-failure.png`);
+    await page.screenshot({ path: failurePath });
+    console.error(
+      "browser smoke failure state",
+      await page.evaluate(() => ({ ...document.body.dataset })),
+    );
+    console.error(`browser smoke failure screenshot: ${failurePath}`);
+    throw error;
+  }
 } finally {
   await browser.close();
+  if (mcpClient && followedControllerId)
+    await mcpClient.callTool({
+      name: "remove_player",
+      arguments: { controllerId: followedControllerId },
+    });
+  await mcpClient?.close();
   server?.stop();
   if (directory) await rm(directory, { recursive: true, force: true });
 }

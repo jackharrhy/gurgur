@@ -56,6 +56,9 @@ const browserScenarios = {
   gamepad: { SMOKE_SCENARIO: "gamepad" },
   reconnect: { SMOKE_SCENARIO: "stale-session" },
   drift: { SMOKE_SCENARIO: "prediction-drift", SMOKE_DRIFT_DURATION_MS: "6500" },
+  lighting: { SMOKE_SCENARIO: "lighting" },
+  follow: { SMOKE_SCENARIO: "follow-camera" },
+  unsupported: { SMOKE_SCENARIO: "webgpu-unsupported" },
 } as const;
 
 async function testBrowser(action = "movement"): Promise<void> {
@@ -66,7 +69,7 @@ async function testBrowser(action = "movement"): Promise<void> {
   const environment = browserScenarios[action as keyof typeof browserScenarios];
   if (!environment)
     throw new Error(
-      "test:browser requires movement, latency, dynamic, push, grab, touch, gamepad, reconnect, drift, or all",
+      "test:browser requires movement, latency, dynamic, push, grab, touch, gamepad, reconnect, drift, lighting, follow, unsupported, or all",
     );
   await run(["bun", "scripts/smoke-browser.ts"], {
     env: { ...environment, GURGUR_TEST_MODE: "1" },

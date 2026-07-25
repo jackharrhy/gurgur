@@ -79,6 +79,10 @@ describe("typed entity catalog", () => {
         "func_platform",
         "info_player_start",
         "info_world_reset",
+        "light_ambient",
+        "light_directional",
+        "light_point",
+        "light_spot",
         "logic_relay",
         "trigger_multiple",
         "trigger_once",
@@ -166,6 +170,91 @@ describe("typed entity catalog", () => {
         interaction: "none",
       },
     ]);
+  });
+
+  test("compiles mapper light aliases into one typed presentation capability", () => {
+    const bundle = compileWorld(
+      baseMap(`
+{
+"classname" "light_ambient"
+"origin" "0 0 64"
+"color" "0.2 0.3 0.4"
+"intensity" "0.6"
+"volumeDensity" "0.35"
+}
+{
+"classname" "light_directional"
+"origin" "0 0 128"
+"direction" "0 0 -1"
+"shadowDistance" "512"
+}
+{
+"classname" "light_point"
+"origin" "64 32 96"
+"range" "256"
+"volumetric" "0"
+}
+{
+"classname" "light_spot"
+"origin" "128 0 192"
+"direction" "1 0 -1"
+"range" "640"
+"angle" "30"
+"penumbra" "0.25"
+}`),
+      "lights.map",
+    );
+    expect(bundle.entities.map((entity) => entity.kind)).toEqual([
+      "light",
+      "light",
+      "light",
+      "light",
+    ]);
+    expect(bundle.entities.map((entity) => entity.presentation.kind)).toEqual([
+      "light",
+      "light",
+      "light",
+      "light",
+    ]);
+    const [ambient, directional, point, spot] = bundle.entities;
+    expect(ambient).toMatchObject({
+      origin: { x: 0, y: 1.6256, z: 0 },
+      presentation: {
+        mode: "ambient",
+        color: { r: 0.2, g: 0.3, b: 0.4 },
+        intensity: 0.6,
+        volumeDensity: 0.35,
+      },
+    });
+    expect(directional).toMatchObject({
+      presentation: {
+        mode: "directional",
+        direction: { x: 0, y: -1, z: 0 },
+        castShadow: true,
+        shadowDistance: 13.0048,
+      },
+    });
+    expect(point).toMatchObject({
+      presentation: {
+        mode: "point",
+        range: 6.5024,
+        decay: 2,
+        castShadow: true,
+        volumetric: false,
+      },
+    });
+    expect(point?.origin?.x).toBeCloseTo(1.6256);
+    expect(point?.origin?.y).toBeCloseTo(2.4384);
+    expect(point?.origin?.z).toBeCloseTo(-0.8128);
+    expect(spot).toMatchObject({
+      presentation: {
+        mode: "spot",
+        range: 16.256,
+        angle: Math.PI / 6,
+        penumbra: 0.25,
+        volumetric: true,
+      },
+    });
   });
 
   test("enforces authored identity, required links, and spawn invariants", () => {

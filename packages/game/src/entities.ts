@@ -320,6 +320,18 @@ function mapDirectionProperty(description: string, fallback: string): EntityProp
   };
 }
 
+function coneAngleProperty(description: string, fallback: number): EntityProperty<number> {
+  const property = boundedNumberProperty(description, {
+    default: fallback,
+    min: 0.1,
+    max: 90,
+  });
+  return {
+    editor: property.editor,
+    parse: (raw, source) => (property.parse(raw, source) * Math.PI) / 180,
+  };
+}
+
 function defineEntity<
   S extends Record<string, EntityProperty<unknown>>,
   O extends CompiledAuthoredEntity,
@@ -541,6 +553,158 @@ export const entityDefinitions = {
             height: properties.scale,
             glow: properties.glow,
           },
+          interaction: "none",
+        },
+      };
+    },
+  }),
+  light_ambient: defineEntity({
+    editor: {
+      kind: "point",
+      description: "Scene-wide ambient light and volumetric medium",
+      color: [164, 190, 176],
+      size: [-12, -12, -12, 12, 12, 12],
+      ...transient,
+    },
+    properties: {
+      color: colorProperty("Linear RGB light color", { default: "0.45 0.5 0.48" }),
+      intensity: boundedNumberProperty("Ambient light intensity", {
+        default: 0.65,
+        min: 0,
+        max: 100,
+      }),
+      volumeDensity: boundedNumberProperty("World volumetric medium density", {
+        default: 0.06,
+        min: 0,
+        max: 3,
+      }),
+    },
+    compile(context, properties) {
+      return {
+        kind: "game-entity",
+        entity: {
+          kind: "light",
+          origin: origin(context),
+          body: null,
+          presentation: { kind: "light", mode: "ambient", ...properties },
+          interaction: "none",
+        },
+      };
+    },
+  }),
+  light_directional: defineEntity({
+    editor: {
+      kind: "point",
+      description: "Infinite directional scene light centered for shadow coverage",
+      color: [255, 224, 154],
+      size: [-16, -16, -16, 16, 16, 16],
+      ...transient,
+    },
+    properties: {
+      color: colorProperty("Linear RGB light color", { default: "1 0.88 0.65" }),
+      intensity: boundedNumberProperty("Directional light intensity", {
+        default: 1,
+        min: 0,
+        max: 100,
+      }),
+      direction: mapDirectionProperty("Map-space direction the light travels", "0.35 -0.45 -1"),
+      castShadow: booleanProperty("Cast a shadow map", { default: true }),
+      shadowDistance: mapDistanceProperty("Shadow coverage radius in map units", {
+        default: 1024,
+        min: 1,
+      }),
+    },
+    compile(context, properties) {
+      return {
+        kind: "game-entity",
+        entity: {
+          kind: "light",
+          origin: origin(context),
+          body: null,
+          presentation: { kind: "light", mode: "directional", ...properties },
+          interaction: "none",
+        },
+      };
+    },
+  }),
+  light_point: defineEntity({
+    editor: {
+      kind: "point",
+      description: "Finite point light with optional volumetric scattering",
+      color: [255, 189, 96],
+      size: [-10, -10, -10, 10, 10, 10],
+      ...transient,
+    },
+    properties: {
+      color: colorProperty("Linear RGB light color", { default: "1 0.72 0.42" }),
+      intensity: boundedNumberProperty("Point light intensity", {
+        default: 60,
+        min: 0,
+        max: 10_000,
+      }),
+      range: mapDistanceProperty("Maximum light distance in map units", {
+        default: 512,
+        min: 1,
+      }),
+      decay: boundedNumberProperty("Distance decay exponent", { default: 2, min: 0, max: 4 }),
+      castShadow: booleanProperty("Cast a cube shadow map", { default: true }),
+      volumetric: booleanProperty("Scatter through the ambient volumetric medium", {
+        default: true,
+      }),
+    },
+    compile(context, properties) {
+      return {
+        kind: "game-entity",
+        entity: {
+          kind: "light",
+          origin: origin(context),
+          body: null,
+          presentation: { kind: "light", mode: "point", ...properties },
+          interaction: "none",
+        },
+      };
+    },
+  }),
+  light_spot: defineEntity({
+    editor: {
+      kind: "point",
+      description: "Finite cone light with optional volumetric scattering",
+      color: [255, 154, 72],
+      size: [-12, -12, -12, 12, 12, 12],
+      ...transient,
+    },
+    properties: {
+      color: colorProperty("Linear RGB light color", { default: "1 0.62 0.3" }),
+      intensity: boundedNumberProperty("Spot light intensity", {
+        default: 100,
+        min: 0,
+        max: 10_000,
+      }),
+      direction: mapDirectionProperty("Map-space direction the light travels", "0 0 -1"),
+      range: mapDistanceProperty("Maximum light distance in map units", {
+        default: 640,
+        min: 1,
+      }),
+      decay: boundedNumberProperty("Distance decay exponent", { default: 2, min: 0, max: 4 }),
+      angle: coneAngleProperty("Outer cone angle in degrees", 32),
+      penumbra: boundedNumberProperty("Soft cone fraction", {
+        default: 0.45,
+        min: 0,
+        max: 1,
+      }),
+      castShadow: booleanProperty("Cast a cone shadow map", { default: true }),
+      volumetric: booleanProperty("Scatter through the ambient volumetric medium", {
+        default: true,
+      }),
+    },
+    compile(context, properties) {
+      return {
+        kind: "game-entity",
+        entity: {
+          kind: "light",
+          origin: origin(context),
+          body: null,
+          presentation: { kind: "light", mode: "spot", ...properties },
           interaction: "none",
         },
       };

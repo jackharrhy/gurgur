@@ -47,6 +47,16 @@ slice:
   reconnect loops;
 - the play canvas remains black until a predicted local-player pose has actually
   driven a rendered camera frame, eliminating the initial default-camera flash;
+- browser startup now requires a WebGPU adapter before importing gameplay code;
+  unsupported clients receive a static accessible explanation without requesting
+  world content, assets, or a network session;
+- typed ambient, directional, point, and spot mapper entities compile to one
+  presentation light capability. Native Lambert lighting and authored shadows
+  cover brush meshes and non-glow billboards, while finite local lights can
+  contribute to a depth-aligned, unblurred volumetric pass. Native-resolution
+  reality surfaces receive the same authored lighting without duplicating
+  shadow-map work. The current enclosed map deliberately authors no volumetric
+  local light;
 - `GURGUR/SKIP` is a generated transparent TrenchBroom face tag whose compiled
   faces remain authoritative collision while being absent from static and moving
   brush presentation;
@@ -65,6 +75,17 @@ slice:
   input receipt, prediction/reconciliation, clock, and final presentation into
   one schema-versioned `.gurgur-trace.json` with embedded aligned analysis;
   production exposes no capture capability or mutation routes.
+- the development entrypoint also exposes an official Streamable HTTP MCP
+  control plane on a separate loopback-only listener. It can inspect players,
+  props, ticks, and raycasts, plus create bounded ephemeral props and
+  fixed-tick-intent players. These actors use ordinary lifecycle replication,
+  never persist, auto-stop movement, and cannot exist in production.
+- a development-only generation-bearing follow URL can bind the browser camera
+  and presentation pickup ray to an MCP actor with explicit yaw and pitch,
+  enabling repeatable live-world screenshots without changing local prediction
+  or authority. The WebGPU lighting path uses zero shadow bias after the r185
+  comparison changes, preventing spotlight shadows from detaching at the dense
+  prop-stack corners; outline meshes explicitly do not participate in shadows.
 
 The repository is consolidated around `apps/server`, `apps/web`,
 `packages/engine`, and `packages/game`. The typed catalog compiles mapper
@@ -157,7 +178,8 @@ deployment and breadth:
 
 - supply and validate production STUN/TURN configuration and the bounded UDP
   range on the target host rather than assuming loopback/direct ICE reachability;
-- run the browser suite in Firefox and WebKit on CI hardware with those engines;
+- run the browser suite across additional WebGPU-capable browser, operating
+  system, and GPU combinations in CI;
 - run the Docker image with a mounted `/data` volume through HTTP, WebSocket,
   WebRTC, reset, restart restore, and SIGTERM on the target container runtime;
 - extend long-duration soak coverage when production concurrency and map density

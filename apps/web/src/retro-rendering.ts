@@ -1,6 +1,8 @@
 import * as THREE from "three/webgpu";
 import * as TSL from "three/tsl";
+import { bayer16 } from "three/addons/tsl/math/Bayer.js";
 import { RETRO_COLOR_INTERVALS } from "./retro-color";
+import { VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 
 // The public TSL declarations recursively encode complete shader graphs. Keeping
 // graph composition behind this boundary prevents TypeScript 7 from attempting
@@ -14,45 +16,10 @@ export const INTERACTION_OUTLINE_MASK_RENDER_ORDER = 900;
 export const INTERACTION_OUTLINE_RENDER_ORDER = 1_000;
 export const PLAYER_RENDER_ORDER = 2_000;
 
-const affineUv = tsl.varying(tsl.vec2());
-const clipW = tsl.varying(tsl.float());
-
-const retroClipPosition = tsl.Fn(() => {
-  const clip = tsl.cameraProjectionMatrix.mul(tsl.cameraViewMatrix).mul(tsl.positionWorld);
-  const snapped = clip.xy
-    .div(clip.w.mul(2))
-    .mul(tsl.screenSize.xy)
-    .round()
-    .div(tsl.screenSize.xy)
-    .mul(clip.w.mul(2));
-  affineUv.assign(tsl.uv().mul(clip.w));
-  clipW.assign(clip.w);
-  return tsl.vec4(snapped, clip.zw);
-})();
-
-const pointLightPosition = tsl.uniform(new THREE.Vector3(-18, 34, 16));
-
-const vertexLighting = tsl.vertexStage(
-  tsl.Fn(() => {
-    const normal = tsl.normalWorldGeometry.normalize();
-    const toLight = pointLightPosition.sub(tsl.positionWorld);
-    const lightDistance = toLight.length().max(0.001);
-    const diffuse = normal.dot(toLight.div(lightDistance)).max(0);
-    const attenuation = tsl.float(1).div(tsl.float(1).add(lightDistance.mul(0.035)));
-    const hemisphere = tsl.mix(
-      tsl.vec3(0.24, 0.15, 0.28),
-      tsl.vec3(0.76, 0.82, 0.86),
-      normal.y.mul(0.5).add(0.5),
-    );
-    const warmLight = tsl.vec3(1.0, 0.76, 0.48).mul(diffuse).mul(attenuation).mul(1.7);
-    return hemisphere.add(warmLight).clamp(0.12, 1.25);
-  })(),
-);
-
 function animatedTexture(textureMap: THREE.Texture, name: string) {
-  const perspectiveUv = tsl.uv();
-  const affineAmount = name.includes("WATER") ? 0.3 : 0.08;
-  const retroUv = tsl.mix(perspectiveUv, affineUv.div(clipW), affineAmount);
+  // Texture motion stays comfortable at every viewing angle by retaining
+  // perspective-correct UV interpolation.
+  const retroUv = tsl.uv();
 
   if (name.includes("WATER")) {
     const waveA = tsl.vec2(
@@ -84,20 +51,26 @@ export function createWorldNodeMaterial(
   textureMap: THREE.Texture | null,
   name: string,
   sensor: boolean,
-): THREE.MeshBasicNodeMaterial {
+): THREE.MeshBasicNodeMaterial | THREE.MeshLambertNodeMaterial {
   const water = name.includes("WATER");
-  const material = new THREE.MeshBasicNodeMaterial({
-    color: sensor ? 0x56e0d2 : 0xffffff,
-    map: textureMap,
-    side: THREE.FrontSide,
-    transparent: sensor || water,
-    opacity: sensor ? 0.16 : 1,
-    depthWrite: !water,
-    wireframe: sensor,
-  });
-  material.vertexNode = retroClipPosition;
+  const material = sensor
+    ? new THREE.MeshBasicNodeMaterial({
+        color: 0x56e0d2,
+        side: THREE.FrontSide,
+        transparent: true,
+        opacity: 0.16,
+        wireframe: true,
+      })
+    : new THREE.MeshLambertNodeMaterial({
+        color: 0xffffff,
+        map: textureMap,
+        side: THREE.FrontSide,
+        transparent: water,
+        opacity: 1,
+        depthWrite: !water,
+      });
   if (textureMap) {
-    let color = animatedTexture(textureMap, name).mul(vertexLighting);
+    let color = animatedTexture(textureMap, name);
     if (water) {
       color = color.mul(tsl.sin(tsl.time.mul(0.7)).mul(0.06).add(1.02));
     }
@@ -106,8 +79,10 @@ export function createWorldNodeMaterial(
   return material;
 }
 
-export function createRealityNodeMaterial(textureMap: THREE.Texture): THREE.MeshBasicNodeMaterial {
-  return new THREE.MeshBasicNodeMaterial({
+export function createRealityNodeMaterial(
+  textureMap: THREE.Texture,
+): THREE.MeshLambertNodeMaterial {
+  return new THREE.MeshLambertNodeMaterial({
     map: textureMap,
     side: THREE.FrontSide,
     fog: false,
@@ -118,15 +93,19 @@ export function createRealityNodeMaterial(textureMap: THREE.Texture): THREE.Mesh
 export function createSpriteNodeMaterial(
   textureMap: THREE.Texture,
   glow: boolean,
-): THREE.SpriteNodeMaterial {
-  const material = new THREE.SpriteNodeMaterial({
+): THREE.MeshBasicNodeMaterial | THREE.MeshLambertNodeMaterial {
+  const parameters = {
     map: textureMap,
     transparent: true,
     alphaTest: 0.42,
     depthWrite: !glow,
     fog: true,
+    side: THREE.DoubleSide,
     blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
-  });
+  } as const;
+  const material = glow
+    ? new THREE.MeshBasicNodeMaterial(parameters)
+    : new THREE.MeshLambertNodeMaterial(parameters);
   if (glow)
     material.colorNode = tsl.materialColor.mul(tsl.sin(tsl.time.mul(2.8)).mul(0.12).add(1.0));
   return material;
@@ -175,11 +154,13 @@ export function createInteractionOutlineMaskMaterial(): THREE.MeshBasicNodeMater
 export type RetroRenderPipeline = {
   render(): void;
   resize(width: number, height: number): void;
+  configureSky(color: THREE.Color): void;
+  configureVolume(bounds: THREE.Box3, density: number, enabled: boolean): void;
   dispose(): void;
 };
 
 export function createRetroRenderPipeline(
-  renderer: THREE.WebGPURenderer,
+  renderer: THREE.Renderer,
   scene: THREE.Scene,
   realityScene: THREE.Scene,
   camera: THREE.Camera,
@@ -190,13 +171,38 @@ export function createRetroRenderPipeline(
   scenePass.renderTarget.texture.type = THREE.UnsignedByteType;
   scenePass.renderTarget.texture.magFilter = THREE.NearestFilter;
   scenePass.renderTarget.texture.minFilter = THREE.NearestFilter;
+  const volumeDepthCamera = camera.clone();
+  volumeDepthCamera.layers.set(0);
+  const volumeDepthPass = tsl.pass(scene, volumeDepthCamera);
   const occlusionPass = tsl.pass(scene, camera);
+  const volumeDensity = tsl.uniform(0);
+  const volumeMaterial = new THREE.VolumeNodeMaterial();
+  volumeMaterial.steps = 12;
+  volumeMaterial.offsetNode = bayer16(tsl.screenCoordinate);
+  volumeMaterial.scatteringNode = () => volumeDensity;
+  volumeMaterial.depthNode = volumeDepthPass.getTextureNode("depth").sample(tsl.screenUV);
+  const volumeGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const volumeMesh = new THREE.Mesh(volumeGeometry, volumeMaterial);
+  volumeMesh.name = "world-volumetric-medium";
+  volumeMesh.receiveShadow = true;
+  volumeMesh.visible = false;
+  volumeMesh.layers.disableAll();
+  volumeMesh.layers.enable(VOLUMETRIC_LIGHT_LAYER);
+  scene.add(volumeMesh);
+  const volumeLayer = new THREE.Layers();
+  volumeLayer.disableAll();
+  volumeLayer.enable(VOLUMETRIC_LIGHT_LAYER);
+  const volumePass = tsl.pass(scene, camera, { depthBuffer: false });
+  volumePass.name = "Volumetric Lighting";
+  volumePass.setLayers(volumeLayer);
   const realityPass = tsl.pass(realityScene, camera);
   realityPass.renderTarget.texture.type = THREE.UnsignedByteType;
   realityPass.renderTarget.texture.magFilter = THREE.LinearFilter;
   realityPass.renderTarget.texture.minFilter = THREE.LinearFilter;
 
-  const sceneColor = scenePass;
+  const skyColor = tsl.uniform(new THREE.Color(0x17111f));
+  const opaqueScene = tsl.mix(skyColor, scenePass.rgb, scenePass.a);
+  const sceneColor = tsl.vec4(opaqueScene.add(volumePass.rgb), 1);
   const vignette = tsl.smoothstep(0.35, 1.05, tsl.distance(tsl.screenUV, tsl.vec2(0.5))).oneMinus();
   const shaded = tsl
     .max(sceneColor.rgb, tsl.vec3(0))
@@ -223,18 +229,40 @@ export function createRetroRenderPipeline(
   const pipeline = new THREE.RenderPipeline(renderer, output);
 
   return {
-    render: () => pipeline.render(),
+    render() {
+      volumeDepthCamera.copy(camera, false);
+      volumeDepthCamera.layers.set(0);
+      pipeline.render();
+    },
     resize(width, height) {
       const scale = Math.min(1, 480 / Math.max(1, width), 270 / Math.max(1, height));
       scenePass.setResolutionScale(scale);
+      volumePass.setResolutionScale(scale);
       occlusionPass.setResolutionScale(scale);
       retroResolution.value.set(
         Math.max(1, Math.round(width * scale)),
         Math.max(1, Math.round(height * scale)),
       );
     },
+    configureSky(color) {
+      skyColor.value.copy(color);
+    },
+    configureVolume(bounds, density, enabled) {
+      const padded = bounds.clone().expandByScalar(4);
+      const center = padded.getCenter(new THREE.Vector3());
+      const size = padded.getSize(new THREE.Vector3());
+      volumeMesh.position.copy(center);
+      volumeMesh.scale.set(Math.max(1, size.x), Math.max(1, size.y), Math.max(1, size.z));
+      volumeDensity.value = density;
+      volumeMesh.visible = enabled && density > 0 && !padded.isEmpty();
+    },
     dispose() {
+      scene.remove(volumeMesh);
+      volumeGeometry.dispose();
+      volumeMaterial.dispose();
       scenePass.dispose();
+      volumeDepthPass.dispose();
+      volumePass.dispose();
       occlusionPass.dispose();
       realityPass.dispose();
       pipeline.dispose();

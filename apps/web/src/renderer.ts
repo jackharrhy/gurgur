@@ -45,6 +45,7 @@ import {
   stepCameraBoom,
   type CameraBoomState,
 } from "./camera";
+import { createPresentationLight, VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 
 type MaterialTextureInfo = {
   url: string;
@@ -60,12 +61,17 @@ export function normalizeMaterialUv(
   return [uv.x / texture.width, -uv.y / texture.height];
 }
 
-export function shouldForceWebGL(userAgent: string, vendor: string): boolean {
-  return (
-    /Apple Computer/i.test(vendor) &&
-    /Safari\//i.test(userAgent) &&
-    !/(?:Chrome|Chromium|CriOS|Edg|OPR|FxiOS)\//i.test(userAgent)
-  );
+export function createWebGPUOnlyRenderer(canvas: HTMLCanvasElement): THREE.Renderer {
+  const backend = new THREE.WebGPUBackend({
+    canvas,
+    powerPreference: "high-performance",
+  });
+  const renderer = new THREE.Renderer(backend, {
+    antialias: false,
+    getFallback: null,
+  });
+  renderer.library = new THREE.StandardNodeLibrary();
+  return renderer;
 }
 
 export function renderableBrushTriangleIndices(
@@ -181,8 +187,27 @@ function disposeOwnedResources(object: THREE.Object3D): void {
   if (texture instanceof THREE.Texture) texture.dispose();
 }
 
+function disposeLightResources(object: THREE.Object3D): void {
+  if (
+    object instanceof THREE.DirectionalLight ||
+    object instanceof THREE.PointLight ||
+    object instanceof THREE.SpotLight
+  )
+    object.shadow.dispose();
+}
+
+export function createBillboardGeometry(
+  width: number,
+  height: number,
+  center: { x: number; y: number },
+): THREE.PlaneGeometry {
+  const geometry = new THREE.PlaneGeometry(width, height);
+  geometry.translate((0.5 - center.x) * width, (0.5 - center.y) * height, 0);
+  return geometry;
+}
+
 export class WorldRenderer {
-  readonly #renderer: THREE.WebGPURenderer;
+  readonly #renderer: THREE.Renderer;
   readonly #pipeline: RetroRenderPipeline;
   readonly #scene = new THREE.Scene();
   readonly #realityScene = new THREE.Scene();
@@ -204,6 +229,8 @@ export class WorldRenderer {
   readonly #physicsDebug: PhysicsDebugView | null;
   #worldRoot = new THREE.Group();
   #realityRoot = new THREE.Group();
+  #lightRoot = new THREE.Group();
+  #realityLightRoot = new THREE.Group();
   #cameraCollisionRoot = new THREE.Group();
   readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
   #localPlayer: RuntimeId | null = null;
@@ -218,6 +245,8 @@ export class WorldRenderer {
   #traceSink: ((frame: TracePresentationFrame) => void) | null = null;
   #viewYaw = 0;
   #viewPitch = -0.18;
+  #followTarget: RuntimeId | null = null;
+  #onFollowPresentation: (body: BodySnapshot) => void = () => {};
   #cameraFollowing = false;
   #cameraBoom: CameraBoomState = createCameraBoomState();
   #cameraSafeDistance = CAMERA_BOOM_LENGTH;
@@ -238,22 +267,22 @@ export class WorldRenderer {
     this.#onBodyPresentation = onBodyPresentation;
     this.#materialTextures = materialTextures;
     this.#spriteAssetUrls = spriteAssetUrls;
-    this.#renderer = new THREE.WebGPURenderer({
-      canvas,
-      antialias: false,
-      powerPreference: "high-performance",
-      forceWebGL: shouldForceWebGL(navigator.userAgent, navigator.vendor),
-    });
+    this.#renderer = createWebGPUOnlyRenderer(canvas);
+    document.body.dataset.rendererBackend =
+      this.#renderer.backend instanceof THREE.WebGPUBackend ? "webgpu" : "unknown";
     this.#renderer.setPixelRatio(1);
     this.#renderer.setClearAlpha(0);
     this.#renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.#renderer.shadowMap.enabled = false;
-    this.#scene.background = new THREE.Color(0x17111f);
+    this.#renderer.shadowMap.enabled = true;
+    this.#renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.#scene.background = null;
     this.#scene.fog = new THREE.Fog(0x17111f, 34, 82);
     this.#camera.position.set(31, 28, 38);
     this.#camera.lookAt(0, 1.5, 0);
     this.#scene.add(this.#worldRoot);
+    this.#scene.add(this.#lightRoot);
     this.#realityScene.add(this.#realityRoot);
+    this.#realityScene.add(this.#realityLightRoot);
     this.#pickupDebug = debug ? createPickupDebugView() : null;
     if (this.#pickupDebug) this.#scene.add(this.#pickupDebug.group);
     this.#physicsDebug = debug ? createPhysicsDebugView() : null;
@@ -264,20 +293,29 @@ export class WorldRenderer {
       this.#realityScene,
       this.#camera,
     );
+    this.#pipeline.configureSky(new THREE.Color(0x17111f));
     this.#resize();
     addEventListener("resize", this.#resize);
   }
 
   setWorld(message: WorldMessage): void {
     this.#scene.remove(this.#worldRoot);
+    this.#scene.remove(this.#lightRoot);
     this.#realityScene.remove(this.#realityRoot);
+    this.#realityScene.remove(this.#realityLightRoot);
     this.#worldRoot.traverse(disposeOwnedResources);
+    this.#lightRoot.traverse(disposeLightResources);
+    this.#realityLightRoot.traverse(disposeLightResources);
     this.#cameraCollisionRoot.traverse(disposeOwnedResources);
     this.#worldRoot = new THREE.Group();
     this.#realityRoot = new THREE.Group();
+    this.#lightRoot = new THREE.Group();
+    this.#realityLightRoot = new THREE.Group();
     this.#cameraCollisionRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
     this.#realityRoot.name = `reality-${message.worldEpoch}`;
+    this.#lightRoot.name = `lights-${message.worldEpoch}`;
+    this.#realityLightRoot.name = `reality-lights-${message.worldEpoch}`;
     this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
     this.#cameraCollisionBodies.clear();
@@ -295,17 +333,35 @@ export class WorldRenderer {
     this.#buildCameraCollisionWorld(message);
     const sky = message.bundle.settings.skyColor;
     const skyColor = new THREE.Color(sky.r, sky.g, sky.b);
-    this.#scene.background = skyColor;
+    this.#scene.background = null;
     this.#scene.fog = new THREE.Fog(skyColor, 34, 82);
+    this.#pipeline.configureSky(skyColor);
     for (const batch of message.bundle.renderBatches) {
       const mesh = this.#meshForBatch(batch);
       this.#worldRoot.add(mesh);
       if (this.#isRealityMaterial(batch.material))
         this.#realityRoot.add(this.#realityClone(mesh, batch.material));
     }
+    let volumeDensity = 0;
+    let volumetricLights = false;
     for (const entity of message.bundle.entities) {
-      if (entity.kind !== "sprite") continue;
-      this.#worldRoot.add(this.#mapSprite(entity));
+      if (entity.kind === "sprite") {
+        this.#worldRoot.add(this.#mapSprite(entity));
+        continue;
+      }
+      if (entity.presentation.kind !== "light" || !entity.origin) continue;
+      const presentationLight = createPresentationLight(entity.presentation, entity.origin);
+      presentationLight.light.name = `light.${entity.presentation.mode}`;
+      this.#lightRoot.add(presentationLight.light);
+      if (presentationLight.target) this.#lightRoot.add(presentationLight.target);
+      const realityLight = createPresentationLight(entity.presentation, entity.origin);
+      realityLight.light.name = `reality-light.${entity.presentation.mode}`;
+      realityLight.light.castShadow = false;
+      realityLight.light.layers.disable(VOLUMETRIC_LIGHT_LAYER);
+      this.#realityLightRoot.add(realityLight.light);
+      if (realityLight.target) this.#realityLightRoot.add(realityLight.target);
+      volumeDensity = Math.max(volumeDensity, presentationLight.volumeDensity);
+      volumetricLights ||= presentationLight.volumetric;
     }
     for (const runtime of message.runtimeEntities) {
       if (runtime.kind !== "world-entity") continue;
@@ -338,7 +394,15 @@ export class WorldRenderer {
     for (const player of message.runtimeEntities.filter((entity) => entity.kind === "player"))
       this.#addPlayer(player);
     this.#scene.add(this.#worldRoot);
+    this.#scene.add(this.#lightRoot);
     this.#realityScene.add(this.#realityRoot);
+    this.#realityScene.add(this.#realityLightRoot);
+    const worldBounds = new THREE.Box3().setFromPoints(
+      message.bundle.staticCollision.vertices.map(
+        (vertex) => new THREE.Vector3(vertex.x, vertex.y, vertex.z),
+      ),
+    );
+    this.#pipeline.configureVolume(worldBounds, volumeDensity, volumetricLights);
   }
 
   applyLifecycle(message: LifecycleMessage): void {
@@ -402,6 +466,16 @@ export class WorldRenderer {
   setViewAngles(yaw: number, pitch: number): void {
     this.#viewYaw = yaw;
     this.#viewPitch = pitch;
+  }
+
+  setFollowCamera(
+    target: RuntimeId | null,
+    onPresentation: (body: BodySnapshot) => void = () => {},
+  ): void {
+    this.#followTarget = target ? { ...target } : null;
+    this.#onFollowPresentation = onPresentation;
+    this.#cameraFollowing = false;
+    this.#cameraFrameTime = null;
   }
 
   setTraceSink(sink: ((frame: TracePresentationFrame) => void) | null): void {
@@ -534,17 +608,45 @@ export class WorldRenderer {
         const renderedBodies = mergeBodySamples(authoritative, predictedBodies);
         this.#apply(renderedBodies);
         let localFallback: BodySnapshot | null = null;
+        let localPresentation: BodySnapshot | null = null;
         if (predictedLocal) {
           this.#apply([predictedLocal]);
-          this.#follow(predictedLocal, now);
+          localPresentation = predictedLocal;
           this.#onLocalPresentation(predictedLocal);
         } else if (this.#localPlayer) {
           const local = current.find((body) => idKey(body.id) === idKey(this.#localPlayer!));
           if (local) {
             localFallback = local;
+            localPresentation = local;
             this.#apply([local]);
-            this.#follow(local, now);
           }
+        }
+        if (localPresentation) {
+          this.#pickupPlayerPosition ??= new THREE.Vector3();
+          this.#pickupPlayerPosition.set(
+            localPresentation.position.x,
+            localPresentation.position.y,
+            localPresentation.position.z,
+          );
+        }
+        if (this.#followTarget) {
+          const targetKey = idKey(this.#followTarget);
+          const followed =
+            localPresentation && idKey(localPresentation.id) === targetKey
+              ? localPresentation
+              : renderedBodies.find((body) => idKey(body.id) === targetKey);
+          if (followed) {
+            this.#pickupPlayerPosition ??= new THREE.Vector3();
+            this.#pickupPlayerPosition.set(
+              followed.position.x,
+              followed.position.y,
+              followed.position.z,
+            );
+            this.#follow(followed, now);
+            this.#onFollowPresentation(followed);
+          }
+        } else if (localPresentation) {
+          this.#follow(localPresentation, now);
         }
         if (this.#traceSink) {
           const presented = new Map<string, TracePresentedBody>();
@@ -586,6 +688,7 @@ export class WorldRenderer {
           });
         }
       }
+      this.#orientBillboards();
       this.#pipeline.render();
     };
     this.#renderer.setAnimationLoop(render);
@@ -595,6 +698,8 @@ export class WorldRenderer {
     this.#renderer.setAnimationLoop(null);
     removeEventListener("resize", this.#resize);
     this.#worldRoot.traverse(disposeOwnedResources);
+    this.#lightRoot.traverse(disposeLightResources);
+    this.#realityLightRoot.traverse(disposeLightResources);
     this.#cameraCollisionRoot.traverse(disposeOwnedResources);
     for (const material of this.#materials.values()) material.dispose();
     for (const texture of this.#textures.values()) texture.dispose();
@@ -654,8 +759,8 @@ export class WorldRenderer {
       materialNames.map((name) => this.#material(name, false)),
     );
     mesh.name = `brush.${brush.entityIndex}.${brush.sourceBrushIndex}`;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     mesh.userData.interactionOccluder = true;
     return mesh;
   }
@@ -689,8 +794,8 @@ export class WorldRenderer {
     geometry.setIndex(batch.indices);
     const mesh = new THREE.Mesh(geometry, this.#material(batch.material, batch.sensor));
     mesh.name = `material.${batch.material}`;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
+    mesh.castShadow = !batch.sensor;
+    mesh.receiveShadow = !batch.sensor;
     mesh.userData.interactionOccluder = !batch.sensor;
     return mesh;
   }
@@ -761,20 +866,23 @@ export class WorldRenderer {
     const material = createSpriteNodeMaterial(texture, false);
     material.alphaTest = 0.45;
     if (local) material.color.set(0xfff2cc);
-    const mesh = new THREE.Sprite(material);
-    mesh.center.set(playerBillboardLayout.quad.center.x, playerBillboardLayout.quad.center.y);
-    mesh.scale.set(
+    const geometry = createBillboardGeometry(
       playerBillboardLayout.quad.widthMeters,
       playerBillboardLayout.quad.heightMeters,
-      1,
+      playerBillboardLayout.quad.center,
     );
+    const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `player.${idKey(player.id)}`;
     mesh.renderOrder = PLAYER_RENDER_ORDER;
     mesh.userData.ownedMaterial = true;
     mesh.userData.ownedTexture = texture;
+    mesh.userData.billboard = true;
+    mesh.userData.playerBillboard = true;
     mesh.userData.playerDirection = 0;
     mesh.userData.runtimeId = player.id;
     mesh.userData.interactionOccluder = false;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     this.#meshes.set(idKey(player.id), mesh);
     this.#worldRoot.add(mesh);
   }
@@ -800,6 +908,7 @@ export class WorldRenderer {
   #realityClone(mesh: THREE.Mesh, materialName: string): THREE.Mesh {
     const clone = new THREE.Mesh(mesh.geometry, this.#realityMaterial(materialName));
     clone.name = `${mesh.name}.reality`;
+    clone.receiveShadow = false;
     clone.userData.sharedGeometry = true;
     clone.raycast = () => {};
     return clone;
@@ -836,18 +945,22 @@ export class WorldRenderer {
 
   #mapSprite(
     entity: Extract<WorldMessage["bundle"]["entities"][number], { kind: "sprite" }>,
-  ): THREE.Sprite {
+  ): THREE.Mesh {
     const spriteName = entity.presentation.asset;
     const glow = entity.presentation.glow;
     const material = createSpriteNodeMaterial(this.#spriteTexture(spriteName), glow);
-    const sprite = new THREE.Sprite(material);
     const height = entity.presentation.height;
-    sprite.center.set(0.5, 0.04);
-    sprite.scale.set(height, height, 1);
+    const sprite = new THREE.Mesh(
+      createBillboardGeometry(height, height, { x: 0.5, y: 0.04 }),
+      material,
+    );
     sprite.position.set(entity.origin.x, entity.origin.y, entity.origin.z);
     sprite.name = `sprite.${spriteName}`;
     sprite.userData.ownedMaterial = true;
+    sprite.userData.billboard = true;
     sprite.userData.interactionOccluder = false;
+    sprite.castShadow = !glow;
+    sprite.receiveShadow = !glow;
     return sprite;
   }
 
@@ -882,9 +995,10 @@ export class WorldRenderer {
       }
       if (!mesh) continue;
       mesh.position.set(body.position.x, body.position.y, body.position.z);
-      mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
+      if (!mesh.userData.billboard)
+        mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
       const texture = mesh.userData.ownedTexture;
-      if (mesh instanceof THREE.Sprite && texture instanceof THREE.Texture) {
+      if (mesh.userData.playerBillboard && texture instanceof THREE.Texture) {
         const yaw = 2 * Math.atan2(body.rotation.y, body.rotation.w);
         const direction = playerBillboardView(
           yaw,
@@ -907,6 +1021,13 @@ export class WorldRenderer {
     this.#updateInteractionOutline();
   }
 
+  #orientBillboards(): void {
+    this.#worldRoot.traverse((object) => {
+      if (!object.userData.billboard) return;
+      object.quaternion.copy(this.#camera.quaternion);
+    });
+  }
+
   #addInteractionOutline(mesh: THREE.Mesh): void {
     const mask = new THREE.Mesh(mesh.geometry, this.#outlineMaskMaterial);
     mask.name = `${mesh.name}.interaction-outline-mask`;
@@ -915,6 +1036,8 @@ export class WorldRenderer {
     mask.userData.interactionOutlineMask = true;
     mask.userData.interactionOccluder = false;
     mask.userData.sharedGeometry = true;
+    mask.castShadow = false;
+    mask.receiveShadow = false;
     mask.raycast = () => {};
 
     const outline = new THREE.Mesh(mesh.geometry, this.#availableOutlineMaterial);
@@ -925,6 +1048,8 @@ export class WorldRenderer {
     outline.userData.interactionOutline = true;
     outline.userData.interactionOccluder = false;
     outline.userData.sharedGeometry = true;
+    outline.castShadow = false;
+    outline.receiveShadow = false;
     outline.raycast = () => {};
     mesh.add(mask, outline);
   }
@@ -966,8 +1091,6 @@ export class WorldRenderer {
   }
 
   #follow(player: BodySnapshot, now: number): void {
-    this.#pickupPlayerPosition ??= new THREE.Vector3();
-    this.#pickupPlayerPosition.set(player.position.x, player.position.y, player.position.z);
     const target = new THREE.Vector3(player.position.x, player.position.y + 0.4, player.position.z);
     const horizontal = Math.cos(this.#viewPitch);
     const forward = new THREE.Vector3(

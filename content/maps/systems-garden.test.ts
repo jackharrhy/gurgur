@@ -248,6 +248,29 @@ describe("Systems Garden map", () => {
     expect(spawn?.yaw).toBe(0);
   });
 
+  test("authors the production light capability without mapper classnames", () => {
+    const lights = compiledWorld.entities.filter((entity) => entity.kind === "light");
+    expect(lights.map((entity) => entity.presentation.mode)).toEqual([
+      "ambient",
+      "directional",
+      "spot",
+    ]);
+    const spotlight = lights.find((entity) => entity.presentation.mode === "spot");
+    expect(spotlight?.presentation).toMatchObject({
+      mode: "spot",
+      castShadow: true,
+      volumetric: false,
+    });
+    expect(
+      lights.some(
+        (entity) =>
+          (entity.presentation.mode === "point" || entity.presentation.mode === "spot") &&
+          entity.presentation.volumetric,
+      ),
+    ).toBeFalse();
+    expect(JSON.stringify(lights)).not.toContain("light_spot");
+  });
+
   test("keeps point entities out of brushes and solid entities inside them", () => {
     for (const entity of entities) {
       const definition = entityDefinitions[entity.properties.classname as EntityClassname];

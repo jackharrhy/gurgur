@@ -214,6 +214,26 @@ replay depth, and worst samples. Predicted-local presentation error is explicitl
 diagnostic because intentional client lead prevents it from being a determinism
 assertion.
 
+## Development MCP control plane
+
+The non-production entrypoint starts an MCP Streamable HTTP endpoint at
+`http://127.0.0.1:9237/mcp` by default. `GURGUR_DEV_MCP_PORT` changes the
+loopback port and `GURGUR_DEV_MCP=0` disables it. The endpoint is a second
+listener in the authoritative Bun process, never a route on the public game
+listener. It rejects browser-originated requests and cannot be enabled when
+`NODE_ENV=production`. The checked-in `.mcp.json` declares the default endpoint
+for project-scoped clients such as Claude Code; those clients still require
+workspace approval and a running development server.
+
+Read tools expose the current map revision, epoch, tick, player poses, compiled
+prop archetypes, authoritative prop state, and Box3D raycasts. Mutation tools
+spawn and remove bounded ephemeral props and players. A controlled player still
+enters the ordinary `GamePlayers.acceptInput` newest-wins path once per fixed
+server tick; MCP cannot step physics or submit transforms as gameplay truth.
+Movement calls have a maximum five-second duration and auto-stop. Runtime
+creation/removal uses the normal generation-safe lifecycle broadcast, while all
+MCP actors are omitted from SQLite and removed by world reset.
+
 ## Protocol and connection lifecycle
 
 Protocol version 2 has exact bounded JSON control unions and explicit

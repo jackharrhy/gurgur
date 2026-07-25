@@ -28,6 +28,34 @@ body[data-player-view-ready="true"] #world {
   opacity: 1;
 }
 
+#webgpu-unsupported {
+  width: min(34rem, calc(100% - 2rem));
+  margin: auto;
+  padding: 1.5rem;
+  color: #d7ffe9;
+  background: #17111f;
+  border: 1px solid rgb(49 255 192 / 55%);
+  font:
+    16px/1.5 system-ui,
+    sans-serif;
+  text-align: center;
+}
+
+body[data-webgpu="unsupported"] main {
+  display: grid;
+  place-items: center;
+}
+
+#webgpu-unsupported h1 {
+  margin: 0 0 0.75rem;
+  color: #bfffe8;
+  font-size: 1.5rem;
+}
+
+#webgpu-unsupported p {
+  margin: 0.4rem 0;
+}
+
 #debug-status {
   position: fixed;
   top: 0.75rem;

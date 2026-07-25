@@ -86,6 +86,19 @@ describe("per-client current-state scheduling", () => {
     expect(lastSeen.size).toBe(awake.length);
     expect(maximumGap).toBeLessThanOrEqual(SNAPSHOT_INTERVAL_TICKS * 2);
   });
+
+  test("forgets lifecycle-removed bodies instead of scheduling ghost state", () => {
+    const scheduler = new ClientSnapshotScheduler();
+    const removed = body(77, 1, 0);
+    const selected = scheduler.select(snapshot(0, [removed]), localPosition, localPlayer.id);
+    expect(propBodies(selected).some(({ id }) => key(id) === key(removed.id))).toBeTrue();
+    scheduler.sent(selected);
+
+    scheduler.remove(removed.id);
+    expect(
+      propBodies(scheduler.select(snapshot(2, []), localPosition, localPlayer.id)),
+    ).toHaveLength(0);
+  });
 });
 
 function snapshot(serverTick: number, bodies: BodySnapshot[]): Snapshot {

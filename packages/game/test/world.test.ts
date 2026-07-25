@@ -81,4 +81,53 @@ describe("compiled game entity decoder", () => {
       ]),
     ).toThrow("extensionless logical asset ID");
   });
+
+  test("accepts typed light presentation and rejects malformed light capabilities", () => {
+    expect(
+      decodeCompiledGameEntities([
+        {
+          kind: "light",
+          origin: { x: 0, y: 2, z: 0 },
+          body: null,
+          presentation: {
+            kind: "light",
+            mode: "spot",
+            color: { r: 1, g: 0.5, b: 0.25 },
+            intensity: 80,
+            direction: { x: 0, y: -1, z: 0 },
+            range: 12,
+            decay: 2,
+            angle: Math.PI / 6,
+            penumbra: 0.4,
+            castShadow: true,
+            volumetric: true,
+          },
+          interaction: "none",
+        },
+      ]),
+    ).toHaveLength(1);
+    expect(() =>
+      decodeCompiledGameEntities([
+        {
+          kind: "light",
+          origin: { x: 0, y: 2, z: 0 },
+          body: null,
+          presentation: {
+            kind: "light",
+            mode: "spot",
+            color: { r: 1, g: 0.5, b: 0.25 },
+            intensity: 80,
+            direction: { x: 0, y: 0, z: 0 },
+            range: 12,
+            decay: 2,
+            angle: Math.PI,
+            penumbra: 0.4,
+            castShadow: true,
+            volumetric: true,
+          },
+          interaction: "none",
+        },
+      ]),
+    ).toThrow();
+  });
 });

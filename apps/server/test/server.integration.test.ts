@@ -37,6 +37,9 @@ describe("authoritative server", () => {
     let client: TestClient | null = null;
     try {
       const baseUrl = `http://127.0.0.1:${server.port}`;
+      const clientCapabilities = await fetch(`${baseUrl}/debug/client-capabilities`);
+      expect(clientCapabilities.headers.get("cache-control")).toBe("no-store");
+      expect(await clientCapabilities.json()).toEqual({ followCamera: true });
       const capability = await fetch(`${baseUrl}/debug/network-trace`);
       expect(capability.ok).toBeTrue();
       expect(await capability.json()).toMatchObject({
@@ -86,11 +89,15 @@ describe("authoritative server", () => {
       hostname: "127.0.0.1",
       databasePath: join(directory, "disabled.sqlite"),
       networkTraceEnabled: false,
+      devClientEnabled: false,
     });
     try {
       expect((await fetch(`http://127.0.0.1:${disabled.port}/debug/network-trace`)).status).toBe(
         404,
       );
+      expect(
+        (await fetch(`http://127.0.0.1:${disabled.port}/debug/client-capabilities`)).status,
+      ).toBe(404);
     } finally {
       disabled.stop();
       await rm(directory, { recursive: true, force: true });

@@ -38,6 +38,7 @@ import { WorldStore } from "./store";
 import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
 import { NetworkTraceCapture, TraceConflictError, TraceNotFoundError } from "./network-trace";
 import { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
+import { createDevMcpListener } from "./dev-mcp";
 
 export { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 
@@ -62,6 +63,7 @@ let sourcePredictionWorker: Promise<Blob> | null = null;
 
 export type GurgurServer = {
   port: number;
+  devMcpUrl: string | null;
   metrics(): ServerMetrics;
   stop(): void;
 };
@@ -92,6 +94,8 @@ export async function createGurgurServer(
     rtcIceServers?: RTCIceServer[];
     worldBundle?: WorldBundle;
     networkTraceEnabled?: boolean;
+    devClientEnabled?: boolean;
+    devMcpPort?: number;
   } = {},
 ): Promise<GurgurServer> {
   if (
@@ -100,6 +104,8 @@ export async function createGurgurServer(
   ) {
     throw new Error("port must be an integer between 0 and 65535");
   }
+  if (Bun.env.NODE_ENV === "production" && options.devMcpPort !== undefined)
+    throw new Error("dev MCP cannot be enabled in production");
   const publicOrigin = options.publicOrigin ?? process.env.PUBLIC_ORIGIN ?? null;
   if (publicOrigin && !URL.canParse(publicOrigin)) throw new Error("public origin is invalid");
   const serverHostname = options.hostname ?? process.env.HOST ?? "0.0.0.0";
@@ -144,6 +150,7 @@ export async function createGurgurServer(
   const sessions = new Map<string, SessionRecord>();
   const networkTraceEnabled =
     Bun.env.NODE_ENV !== "production" && options.networkTraceEnabled !== false;
+  const devClientEnabled = Bun.env.NODE_ENV !== "production" && options.devClientEnabled !== false;
   const networkTrace = new NetworkTraceCapture();
   let shuttingDown = false;
   const metrics = (): ServerMetrics => {
@@ -239,8 +246,10 @@ export async function createGurgurServer(
     except?: Bun.ServerWebSocket<ClientData>,
   ): void => {
     const packet = encodeLifecycle(message);
-    for (const socket of clients)
+    for (const socket of clients) {
+      for (const id of message.removed) socket.data.snapshotScheduler.remove(id);
       if (socket !== except && socket.data.playerId) socket.send(packet);
+    }
   };
 
   const broadcastWorld = (world: WorldMessage): void => {
@@ -273,6 +282,15 @@ export async function createGurgurServer(
     });
   };
   const traceUnavailable = (): Response => new Response("not found", { status: 404 });
+  const devClientCapabilityResponse = (): Response =>
+    devClientEnabled
+      ? Response.json(
+          { followCamera: true },
+          {
+            headers: { "cache-control": "no-store" },
+          },
+        )
+      : traceUnavailable();
   const traceCapabilityResponse = (): Response =>
     networkTraceEnabled
       ? Response.json(gurgurTraceCapabilities(), {
@@ -470,6 +488,7 @@ export async function createGurgurServer(
       }),
       "/metrics": { GET: () => Response.json(metrics()) },
       "/debug/physics": { GET: physicsDebugResponse },
+      "/debug/client-capabilities": { GET: devClientCapabilityResponse },
       "/debug/network-trace": { GET: traceCapabilityResponse },
       "/debug/network-trace/start": { POST: traceStartResponse },
       "/debug/network-trace/stop": { POST: traceStopResponse },
@@ -775,9 +794,42 @@ export async function createGurgurServer(
     },
   });
 
+  let devMcp: ReturnType<typeof createDevMcpListener> | null = null;
+  if (options.devMcpPort !== undefined) {
+    try {
+      devMcp = createDevMcpListener({
+        game,
+        port: options.devMcpPort,
+        connectedNetworkPlayers: () =>
+          [...clients].flatMap((socket) => (socket.data.playerId ? [socket.data.playerId] : [])),
+        created: (entity) =>
+          broadcastLifecycle({
+            type: "lifecycle",
+            protocolVersion: PROTOCOL_VERSION,
+            worldEpoch: game.worldEpoch,
+            created: [entity],
+            removed: [],
+          }),
+        removed: (id) =>
+          broadcastLifecycle({
+            type: "lifecycle",
+            protocolVersion: PROTOCOL_VERSION,
+            worldEpoch: game.worldEpoch,
+            created: [],
+            removed: [id],
+          }),
+      });
+    } catch (error) {
+      game.stop();
+      store.close();
+      server.stop(true);
+      throw error;
+    }
+  }
   game.start();
   return {
     port: server.port ?? options.port ?? 3000,
+    devMcpUrl: devMcp?.url ?? null,
     metrics,
     stop() {
       if (shuttingDown) return;
@@ -790,6 +842,7 @@ export async function createGurgurServer(
       }
       game.setTraceSink(null);
       networkTrace.cancel();
+      devMcp?.stop();
       game.stop();
       store.close();
       server.stop(true);

@@ -8,12 +8,17 @@ game state and Box3D world, and persists snapshots through `bun:sqlite`. Browser
 clients use vanilla TypeScript and direct Three.js, with local-player prediction
 in a module worker.
 
+In development, that same process also owns an optional MCP control plane on a
+second listener bound strictly to `127.0.0.1`. It reads the live authoritative
+world and creates only ephemeral diagnostic actors. Production never creates
+this listener.
+
 The selected runtime stack is:
 
 - Bun 1.3.x with `Bun.serve`, native server WebSockets, HTML imports, the Bun
   bundler, and `bun:sqlite`;
 - TypeScript for application, compiler, and protocol code;
-- Three.js for browser rendering;
+- Three.js over a required WebGPU backend for browser rendering;
 - `box3d.js@0.0.2`, single-threaded separate-Wasm build, in Bun and the browser;
 - `werift@0.23.0` for server-side ICE, DTLS, SCTP, and WebRTC data channels;
 - direct application registries rather than BitECS or a general game engine.
@@ -105,6 +110,9 @@ Startup restores a snapshot only when its `mapRevision` matches the compiled
 bundle. Otherwise the server starts from authored defaults. This pre-release
 schema is clean-start only: schema changes require deleting the local database,
 not carrying migrations or compatibility branches.
+
+MCP-spawned props and players are diagnostic process state. They are excluded
+from persistence and discarded on reset or shutdown.
 
 ## Reset transaction
 

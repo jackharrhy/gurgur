@@ -1589,3 +1589,35 @@
 ( -384 16 464 ) ( -384 16 465 ) ( -384 17 464 ) GURGUR/SKIP [ 0 1 0 0 ] [ 0 0 -1 0 ] 180 0.5 0.5
 }
 }
+// entity 79
+{
+"classname" "light_ambient"
+"origin" "-456 -128 224"
+"color" "0.44 0.52 0.48"
+"intensity" "0.75"
+"volumeDensity" "0.07"
+}
+// entity 80
+{
+"classname" "light_directional"
+"origin" "-456 -128 224"
+"color" "1 0.82 0.6"
+"intensity" "1.05"
+"direction" "0.35 -0.45 -1"
+"castShadow" "1"
+"shadowDistance" "1400"
+}
+// entity 81
+{
+"classname" "light_spot"
+"origin" "128 0 400"
+"color" "0.55794615 0.91532767 0.91842526"
+"intensity" "95"
+"direction" "-0.25 0 -1"
+"range" "720"
+"decay" "1.2"
+"angle" "34"
+"penumbra" "1"
+"castShadow" "1"
+"volumetric" "0"
+}

@@ -23,9 +23,11 @@
   "dependencies": {
     "@gurgur/engine": "workspace:*",
     "@gurgur/game": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "box3d.js": "0.0.2",
     "three": "0.185.1",
-    "werift": "0.23.0"
+    "werift": "0.23.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",

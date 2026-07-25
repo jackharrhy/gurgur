@@ -24,6 +24,11 @@ const playerSpawn = process.env.PLAYER_SPAWN?.split(",").map(Number);
 if (playerSpawn && (playerSpawn.length !== 3 || !playerSpawn.every(Number.isFinite))) {
   throw new Error("PLAYER_SPAWN must contain three comma-separated finite numbers");
 }
+const devMcpEnabled = Bun.env.NODE_ENV !== "production" && process.env.GURGUR_DEV_MCP !== "0";
+const devMcpPort = Number(process.env.GURGUR_DEV_MCP_PORT ?? 9237);
+if (devMcpEnabled && (!Number.isInteger(devMcpPort) || devMcpPort < 1 || devMcpPort > 65_535)) {
+  throw new Error("GURGUR_DEV_MCP_PORT must be an integer between 1 and 65535");
+}
 const server = await createGurgurServer({
   port,
   adminToken,
@@ -32,8 +37,10 @@ const server = await createGurgurServer({
   playerSpawn: playerSpawn
     ? { x: playerSpawn[0]!, y: playerSpawn[1]!, z: playerSpawn[2]! }
     : undefined,
+  devMcpPort: devMcpEnabled ? devMcpPort : undefined,
 });
 console.log(`gurgur listening on http://localhost:${server.port}`);
+if (server.devMcpUrl) console.log(`gurgur dev MCP listening on ${server.devMcpUrl}`);
 
 let stopping = false;
 const stop = (): void => {

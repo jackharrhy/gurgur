@@ -40,6 +40,7 @@ names, and exactly one `default` spawn.
 - `button`
 - `sprite`
 - `ambient-audio`
+- `light`
 
 Every member declares body, presentation, and interaction capabilities. Special
 authored entities compile into `settings`, `playerSpawns`, or `resetMarkers`

@@ -22,7 +22,8 @@ a package boundary:
 ```text
 apps/web/
   index.html
-  main.ts
+  main.ts               WebGPU capability gate and unsupported-browser view
+  client.ts             gameplay client composition after WebGPU succeeds
   style.css
   session.ts            WebSocket control, WebRTC signaling, datagram dispatch
   prediction-worker.ts  Box3D worker entrypoint
@@ -35,12 +36,22 @@ apps/web/
   network-trace.ts      bounded development recorder and download control
 ```
 
-`main.ts` composes the modules but owns no simulation state. The prediction worker
-owns predicted physics. `session.ts` owns network state. `renderer.ts` owns
-Three.js objects and `requestAnimationFrame`. The shipped play page contains only
-the world canvas: no HUD, reticle, visible cursor, caption, or control overlay.
-`?test` enables a generic read-only diagnostic object for browser automation;
-ordinary play does not expose entity-specific instrumentation.
+`main.ts` requests a WebGPU adapter before importing the gameplay client. When
+that capability is absent, it replaces the canvas with an accessible unsupported
+message and does not request world content, assets, or a network session.
+`client.ts` composes the modules but owns no simulation state. The prediction
+worker owns predicted physics. `session.ts` owns network state. `renderer.ts`
+owns Three.js objects and `requestAnimationFrame`. The shipped play page contains
+only the world canvas: no HUD, reticle, visible cursor, caption, or control
+overlay. `?test` enables a generic read-only diagnostic object for browser
+automation; ordinary play does not expose entity-specific instrumentation.
+On non-production servers,
+`?follow=<runtime-index>:<generation>&yaw=<radians>&pitch=<radians>` binds only
+the presentation camera and pickup preview to a replicated runtime body. The
+local network player, prediction worker, and authoritative input ownership do
+not change. The browser accepts the follow request only after the server's
+development capability route confirms it, reports acquisition through generic
+body data attributes, and otherwise falls back to the ordinary local view.
 
 ## Three.js lifecycle
 
@@ -73,9 +84,10 @@ resets the boom before probing the new pose.
 
 ## Visual language
 
-Three.js `WebGPURenderer` remains the scene and presentation backend, using its
-WebGL 2 fallback when WebGPU is unavailable. `RenderPipeline` and TSL own the
-shader graph; handwritten GLSL and the legacy post-processing stack are excluded.
+WebGPU is a required presentation capability. The application constructs
+Three.js `Renderer` directly over `WebGPUBackend` without a WebGL fallback.
+`RenderPipeline` and TSL own the shader graph; handwritten GLSL and the legacy
+post-processing stack are excluded.
 The world renders into a nearest-neighbour target capped at 480 x 270, then a TSL
 resolve applies display-space RGB565 color quantization, a restrained
 low-resolution-anchored 4 x 4 Bayer dither, and a pre-quantization vignette. This
@@ -86,40 +98,61 @@ patterns.
 The CSS canvas fills the viewport independently, preserving low-resolution pixels
 without tying gameplay layout to a fixed window size.
 
-World materials use authored, pixel-magnified PNG textures and shadow-map-free
-Gouraud lighting explicitly evaluated in TSL's vertex stage. The hashed asset
-manifest carries each material's real PNG width and height so Valve 220
-pixel-space UVs normalize identically for default 64 x 64 tiles and larger
-TrenchBroom-fitted artwork.
+World materials use authored, pixel-magnified PNG textures and native
+`MeshLambertNodeMaterial` lighting. Typed ambient, directional, point, and spot
+light capabilities drive Three.js lights; authored directional, point, and spot
+lights may cast shadows. WebGPU shadow comparisons use Three.js's zero-bias
+defaults; legacy normal offsets are not applied because they detach and truncate
+contact shadows at brush corners. Interaction outline mask and hull meshes
+explicitly neither cast nor receive shadows. The hashed asset manifest carries each material's real
+PNG width and height so Valve 220 pixel-space UVs normalize identically for
+default 64 x 64 tiles and larger TrenchBroom-fitted artwork.
 Static and moving brush meshes preserve the compiler's outward triangle winding
 and flat normals. Retro and reality brush materials render `FrontSide`, so the
 GPU culls reverse-facing triangles; sprites and interaction outlines keep their
 own presentation-specific sidedness.
-Clip-space vertex snapping and partially affine UV interpolation provide
-controlled software-renderer instability without sacrificing texture mip levels.
+World geometry uses ordinary unsnapped perspective projection, avoiding
+silhouette gaps and unstable jagged edges. The low-resolution target, pixel
+textures, palette resolve, and dither retain the retro character. Texture
+coordinates remain perspective-correct to avoid camera-motion warping and
+preserve player comfort without sacrificing texture mip levels.
 Large concrete and stone surfaces use deterministic irregular aggregate instead
 of periodic line grids, preventing grazing-angle moire without smoothing away the
 pixel texture language.
-Authored sky color sets both scene background and fog. Water, caution, danger,
-and platform materials animate UVs in TSL; water combines
+Authored sky color sets both the composited background and fog. Water, caution,
+danger, and platform materials animate UVs in TSL; water combines
 two independently moving translucent samples and a slow palette pulse. Decorative
-`env_sprite` point entities and player sprites are camera-facing pixel billboards.
+`env_sprite` point entities and player sprites are camera-facing, alpha-tested
+mesh billboards. Non-glow billboards receive Lambert lighting and participate in
+shadows; authored glow sprites remain additive and unlit.
 Static world faces whose asset manifest mode is `reality` are mirrored into a
 second scene and rendered at the canvas's native resolution with linear mip
-sampling, no fog, no vertex snapping, no retro lighting, and no palette resolve.
+sampling, authored Lambert lighting, no fog, no vertex snapping, and no palette
+resolve. Non-shadowing light copies prevent a second complete shadow-map render
+while ensuring those surfaces are no longer fullbright.
 The result is intentionally uncanny: photographic detail remains conspicuously
 real inside the otherwise software-rendered world. A separate low-resolution
 occlusion pass supplies depth for the composite, so ordinary world geometry and
 player billboards still cover reality surfaces correctly without requiring a
 second full-resolution world render.
-Safari selects Three's WebGL2 backend because its WebGPU path currently renders
-the custom retro material graph with incorrect texture color and vertex lighting.
-Other browsers retain the preferred WebGPU backend and its automatic WebGL2
-fallback.
+Finite point and spot lights may illuminate an authored world-sized volumetric
+medium. The TSL pipeline renders Three.js `VolumeNodeMaterial` directly at the
+same capped retro resolution with twelve ray-march steps and a Bayer offset, then
+composes it before vignette and RGB565 quantization. It deliberately performs no
+screen-space blur, so light cannot bleed across depth silhouettes. A cloned
+layer-zero camera supplies a dedicated sampleable depth pass, keeping the medium
+from sampling the main combined depth-stencil target or recursively rendering
+itself.
+The authored sky is composed beneath the transparent surface pass instead of
+using `Scene.background`, so the volume pass clears to transparent black rather
+than additively introducing a full-screen sky-color haze.
+Ambient lights set the medium density; directional and ambient lights affect
+surfaces but do not contribute volumetric scattering. Glow sprites remain a
+deliberate unlit presentation exception.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
 low-resolution scene pass: mint means locally available, while amber is driven by
 the server-authoritative local-grab flag. This avoids a separate full-scene
-outline compositor and keeps WebGPU and WebGL fallback presentation identical.
+outline compositor.
 Exact, colorless silhouettes first accumulate stencil coverage without testing
 or changing world depth. The expanded hull then ignores world depth but draws
 only where coverage remains zero, and player billboards render afterward against
@@ -181,6 +214,7 @@ The server exposes a deliberately small surface:
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |
 | `/debug/physics`                            | bounded current Box3D debug frame      |
+| `/debug/client-capabilities`                | development client presentation gates  |
 | `/debug/network-trace`, `/start`, `/stop`   | development-only bounded trace capture |
 | `/world.bin`                                | immutable compiled map bundle          |
 | `/box3d.wasm` and `/prediction-worker.js`   | prediction runtime assets              |
@@ -191,6 +225,12 @@ The server exposes a deliberately small surface:
 Browser assets and gameplay share an origin, so no application CORS layer is
 required. Administrative authorization remains server-side and never trusts UI
 visibility.
+
+The development MCP endpoint is deliberately absent from this route table: it
+uses a separate loopback-only listener inside the same Bun process. Development
+defaults to port `9237`; `GURGUR_DEV_MCP_PORT` changes it and
+`GURGUR_DEV_MCP=0` disables it. Production ignores those development defaults
+and cannot enable the listener.
 
 ## Container
 

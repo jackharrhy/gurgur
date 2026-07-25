@@ -103,6 +103,49 @@
   glow(choices) : "Render without scene lighting" : 0 = [ 0 : "No" 1 : "Yes" ]
 ]
 
+@PointClass color(164 190 176) size(-12 -12 -12, 12 12 12) = light_ambient : "Scene-wide ambient light and volumetric medium"
+[
+  classname(string) : "Entity class" : "light_ambient"
+  color(vector) : "Linear RGB light color" : "0.45 0.5 0.48"
+  intensity(float) : "Ambient light intensity" : "0.65"
+  volumeDensity(float) : "World volumetric medium density" : "0.06"
+]
+
+@PointClass color(255 224 154) size(-16 -16 -16, 16 16 16) = light_directional : "Infinite directional scene light centered for shadow coverage"
+[
+  classname(string) : "Entity class" : "light_directional"
+  color(vector) : "Linear RGB light color" : "1 0.88 0.65"
+  intensity(float) : "Directional light intensity" : "1"
+  direction(vector) : "Map-space direction the light travels" : "0.35 -0.45 -1"
+  castShadow(choices) : "Cast a shadow map" : 1 = [ 0 : "No" 1 : "Yes" ]
+  shadowDistance(float) : "Shadow coverage radius in map units" : "1024"
+]
+
+@PointClass color(255 189 96) size(-10 -10 -10, 10 10 10) = light_point : "Finite point light with optional volumetric scattering"
+[
+  classname(string) : "Entity class" : "light_point"
+  color(vector) : "Linear RGB light color" : "1 0.72 0.42"
+  intensity(float) : "Point light intensity" : "60"
+  range(float) : "Maximum light distance in map units" : "512"
+  decay(float) : "Distance decay exponent" : "2"
+  castShadow(choices) : "Cast a cube shadow map" : 1 = [ 0 : "No" 1 : "Yes" ]
+  volumetric(choices) : "Scatter through the ambient volumetric medium" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(255 154 72) size(-12 -12 -12, 12 12 12) = light_spot : "Finite cone light with optional volumetric scattering"
+[
+  classname(string) : "Entity class" : "light_spot"
+  color(vector) : "Linear RGB light color" : "1 0.62 0.3"
+  intensity(float) : "Spot light intensity" : "100"
+  direction(vector) : "Map-space direction the light travels" : "0 0 -1"
+  range(float) : "Maximum light distance in map units" : "640"
+  decay(float) : "Distance decay exponent" : "2"
+  angle(float) : "Outer cone angle in degrees" : "32"
+  penumbra(float) : "Soft cone fraction" : "0.45"
+  castShadow(choices) : "Cast a cone shadow map" : 1 = [ 0 : "No" 1 : "Yes" ]
+  volumetric(choices) : "Scatter through the ambient volumetric medium" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
 @PointClass color(104 205 245) size(-16 -16 -16, 16 16 16) = ambient_audio : "Per-listener audio controlled by typed trigger outputs"
 [
   classname(string) : "Entity class" : "ambient_audio"

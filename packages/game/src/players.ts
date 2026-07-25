@@ -79,8 +79,8 @@ export type GamePlayers = {
   position(id: RuntimeId): Vec3 | null;
   grabbedTarget(id: RuntimeId): RuntimeId | null;
   canResume(persistentId: string): boolean;
-  connect(persistentId?: string): RuntimeId;
-  disconnect(id: RuntimeId): boolean;
+  connect(persistentId?: string, initial?: { position: Vec3; yaw: number }): RuntimeId;
+  disconnect(id: RuntimeId, options?: { persist?: boolean }): boolean;
   beginInputStream(id: RuntimeId): boolean;
   acceptInput(id: RuntimeId, command: InputCommand, worldEpoch: number): boolean;
   step(): void;
@@ -157,18 +157,21 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     id: RuntimeId,
     persistentId: string,
     restored?: PersistedPlayerState,
+    initial?: { position: Vec3; yaw: number },
   ): Player => {
-    const state: PlayerControllerState = restored
-      ? {
-          position: { ...restored.position },
-          verticalVelocity: restored.verticalVelocity,
-          yaw: restored.yaw,
-          grounded: restored.grounded,
-          lastJumpCounter: restored.lastJumpCounter,
-          stepCooldown: restored.stepCooldown,
-          crouched: restored.crouched,
-        }
-      : defaultState(spawnPosition, spawn.yaw);
+    const state: PlayerControllerState = initial
+      ? defaultState(initial.position, initial.yaw)
+      : restored
+        ? {
+            position: { ...restored.position },
+            verticalVelocity: restored.verticalVelocity,
+            yaw: restored.yaw,
+            grounded: restored.grounded,
+            lastJumpCounter: restored.lastJumpCounter,
+            stepCooldown: restored.stepCooldown,
+            crouched: restored.crouched,
+          }
+        : defaultState(spawnPosition, spawn.yaw);
     const player: Player = {
       id,
       persistentId,
@@ -335,7 +338,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       return target ? { ...target } : null;
     },
     canResume: (persistentId) => dormant.has(persistentId),
-    connect(persistentId = crypto.randomUUID()) {
+    connect(persistentId = crypto.randomUUID(), initial) {
       if (players().some((player) => player.persistentId === persistentId))
         throw new Error("persistent player identity is already connected");
       const slotIndex = freeSlots.pop() ?? slots.length;
@@ -343,13 +346,15 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       const id = { index: PLAYER_INDEX_BASE + slotIndex, generation };
       const restored = dormant.get(persistentId);
       dormant.delete(persistentId);
-      slots[slotIndex] = { generation, player: newPlayer(id, persistentId, restored) };
+      slots[slotIndex] = { generation, player: newPlayer(id, persistentId, restored, initial) };
       return id;
     },
-    disconnect(id) {
+    disconnect(id, disconnectOptions = {}) {
       const resolved = resolve(id);
       if (!resolved) return false;
-      dormant.set(resolved.player.persistentId, persistedPlayer(resolved.player));
+      if (disconnectOptions.persist !== false)
+        dormant.set(resolved.player.persistentId, persistedPlayer(resolved.player));
+      else dormant.delete(resolved.player.persistentId);
       engine.destroyBody(resolved.player.proxy);
       resolved.slot.player = null;
       resolved.slot.generation += 1;

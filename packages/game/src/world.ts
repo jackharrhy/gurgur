@@ -4,6 +4,7 @@ import {
   encodeWorldBundle as encodeEngineWorldBundle,
   type DynamicBrushBody,
   type KinematicBrushBody,
+  type LightPresentation,
   type SensorBrushBody,
   type SpriteAssetId,
   type Vec3,
@@ -105,6 +106,14 @@ export type AmbientAudioEntity = EntityBase & {
   interaction: "none";
 };
 
+export type LightEntity = EntityBase & {
+  kind: "light";
+  origin: Vec3;
+  body: null;
+  presentation: LightPresentation;
+  interaction: "none";
+};
+
 export type CompiledGameEntity =
   | PhysicsPropEntity
   | LinearMoverEntity
@@ -112,7 +121,8 @@ export type CompiledGameEntity =
   | RelayEntity
   | ButtonEntity
   | SpriteEntity
-  | AmbientAudioEntity;
+  | AmbientAudioEntity
+  | LightEntity;
 
 export type WorldBundle = EngineWorldBundle<CompiledGameEntity>;
 export type WorldMessage = EngineWorldMessage<CompiledGameEntity>;
@@ -200,6 +210,13 @@ export function decodeCompiledGameEntities(value: unknown): CompiledGameEntity[]
           throw new Error("world bundle ambient audio priority must be an integer");
         if (typeof record.loop !== "boolean")
           throw new Error("world bundle ambient audio loop must be boolean");
+        break;
+      case "light":
+        if (record.body !== null) throw new Error("world bundle light cannot have a body");
+        requireInteraction(record, "none");
+        assertVec3(record.origin, "world bundle light origin");
+        if (!isRecord(record.presentation) || record.presentation.kind !== "light")
+          throw new Error("world bundle light presentation must be light");
         break;
       default:
         throw new Error(`world bundle entity kind ${entity.kind} is invalid`);

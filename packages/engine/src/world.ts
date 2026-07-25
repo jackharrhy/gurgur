@@ -52,9 +52,59 @@ export type BodySpec = DynamicBrushBody | KinematicBrushBody | StaticBrushBody |
 
 export type InteractionSpec = "none" | "use" | "grab";
 
+export type AmbientLightPresentation = {
+  kind: "light";
+  mode: "ambient";
+  color: Rgb;
+  intensity: number;
+  volumeDensity: number;
+};
+
+export type DirectionalLightPresentation = {
+  kind: "light";
+  mode: "directional";
+  color: Rgb;
+  intensity: number;
+  direction: Vec3;
+  castShadow: boolean;
+  shadowDistance: number;
+};
+
+export type PointLightPresentation = {
+  kind: "light";
+  mode: "point";
+  color: Rgb;
+  intensity: number;
+  range: number;
+  decay: number;
+  castShadow: boolean;
+  volumetric: boolean;
+};
+
+export type SpotLightPresentation = {
+  kind: "light";
+  mode: "spot";
+  color: Rgb;
+  intensity: number;
+  direction: Vec3;
+  range: number;
+  decay: number;
+  angle: number;
+  penumbra: number;
+  castShadow: boolean;
+  volumetric: boolean;
+};
+
+export type LightPresentation =
+  | AmbientLightPresentation
+  | DirectionalLightPresentation
+  | PointLightPresentation
+  | SpotLightPresentation;
+
 export type PresentationSpec =
   | { kind: "brush"; transform: "world" | "body" }
   | { kind: "sprite"; asset: SpriteAssetId; height: number; glow: boolean }
+  | LightPresentation
   | { kind: "none" };
 
 export type CompiledEntityCapabilities = {
