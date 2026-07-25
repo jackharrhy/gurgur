@@ -13,8 +13,13 @@ import { PlayerPredictor } from "./prediction";
 type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }
   | { type: "world"; message: WorldMessage }
-  | { type: "input"; command: InputCommand }
-  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean }
+  | { type: "input"; command: InputCommand; targetServerTick: number }
+  | {
+      type: "snapshot";
+      snapshot: Snapshot;
+      reconcilePlayer: boolean;
+      receivedAtUnixMs: number;
+    }
   | { type: "trace-enabled"; enabled: boolean; requestId: number };
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -27,6 +32,8 @@ predictor = new PlayerPredictor(
       body,
       bodies,
       correctionMagnitude: predictor?.correctionMagnitude ?? 0,
+      predictionTick: predictor?.predictionTick ?? null,
+      pendingTickCount: predictor?.pendingInputCount ?? 0,
     });
   },
   {
@@ -43,9 +50,15 @@ scope.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
       scope.postMessage({ type: "world-ready", worldEpoch: message.message.worldEpoch });
     });
   } else if (message.type === "input")
-    void worldBarrier.then(() => predictor.pushInput(message.command));
+    void worldBarrier.then(() => predictor.pushInput(message.command, message.targetServerTick));
   else if (message.type === "snapshot")
-    void worldBarrier.then(() => predictor.reconcile(message.snapshot, message.reconcilePlayer));
+    void worldBarrier.then(() =>
+      predictor.reconcile(
+        message.snapshot,
+        message.reconcilePlayer,
+        message.receivedAtUnixMs - performance.timeOrigin,
+      ),
+    );
   else {
     predictor.setTraceEnabled(message.enabled);
     scope.postMessage({ type: "trace-state", requestId: message.requestId });

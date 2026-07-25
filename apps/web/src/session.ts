@@ -2,6 +2,7 @@ import {
   INPUT_REDUNDANCY,
   PROTOCOL_VERSION,
   SNAPSHOT_HISTORY_PACKETS,
+  acknowledgeState,
   decodeSnapshot,
   decodeLifecycle,
   decodeServerControl,
@@ -12,6 +13,7 @@ import {
   type LifecycleMessage,
   type RtcOfferMessage,
   type Snapshot,
+  type StateAcknowledgement,
   type WelcomeMessage,
   type WorldManifestMessage,
 } from "@gurgur/engine";
@@ -52,6 +54,7 @@ export class GameSession {
   #loadedWorldEpoch: number | null = null;
   #snapshotQueue: Snapshot[] = [];
   readonly #snapshotReceivedAt = new Map<string, number>();
+  #stateAcknowledgement: StateAcknowledgement | null = null;
   #pendingLifecycles: LifecycleMessage[] = [];
   #snapshotFrame: number | null = null;
   #peerConnection: RTCPeerConnection | null = null;
@@ -139,6 +142,7 @@ export class GameSession {
           return;
         this.#worldEpoch = message.worldEpoch;
         this.#inputHistory = [];
+        this.#stateAcknowledgement = null;
         this.#loadedWorldEpoch = null;
         if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
         this.#snapshotFrame = null;
@@ -171,6 +175,10 @@ export class GameSession {
       else if (message.worldEpoch === this.#worldEpoch) this.#pendingLifecycles.push(message);
     } else {
       const snapshot = decodeSnapshot(data);
+      this.#stateAcknowledgement = acknowledgeState(
+        this.#stateAcknowledgement,
+        snapshot.serverTick,
+      );
       const receivedAtMs = performance.now();
       this.#snapshotReceivedAt.set(snapshotKey(snapshot), receivedAtMs);
       this.#callbacks.snapshotReceived?.(snapshot, receivedAtMs);
@@ -196,7 +204,7 @@ export class GameSession {
     const socket = this.#socket;
     this.#inputHistory.push(command);
     if (this.#inputHistory.length > INPUT_REDUNDANCY) this.#inputHistory.shift();
-    const packet = encodeInputBundle(this.#inputHistory);
+    const packet = encodeInputBundle(this.#inputHistory, this.#stateAcknowledgement);
     this.#defer(() => {
       if (this.#socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
       const channel = this.#inputChannel;
@@ -215,7 +223,7 @@ export class GameSession {
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: message.iceServers });
     let receivedState = false;
-    const input = peer.createDataChannel("gurgur-input-v1", {
+    const input = peer.createDataChannel("gurgur-input-v2", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -223,7 +231,7 @@ export class GameSession {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v1" ||
+        state.label !== "gurgur-state-v2" ||
         this.#stateChannel
       ) {
         state.close();

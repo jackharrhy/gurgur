@@ -24,9 +24,14 @@ recorded and discarded rather than creating a latency spiral.
 
 ## Input
 
-The browser samples at 60 Hz. Each datagram contains the newest command plus up
-to two predecessors. Redundancy recovers ordinary loss without retransmitting a
-stale intent:
+The browser samples intent on an absolute-deadline 60 Hz schedule. Early timer
+wakes are re-armed rather than counted as samples, and delayed wakes skip obsolete
+network sends instead of emitting a catch-up burst. Each datagram contains the
+newest command plus up to two predecessors. Protocol v2's input-bundle header
+also carries the latest received state tick and a selective 32-tick receipt mask.
+This acknowledgement lets replication retire delivered terminal state; it never
+makes state reliable or ordered. Redundancy recovers ordinary input loss without
+retransmitting a stale intent:
 
 ```ts
 type InputCommand = {
@@ -67,9 +72,9 @@ locally simulated rigid-body result as truth.
 The prediction worker predicts and replays only the local geometric player
 controller. Authored moving geometry is present as a kinematic collision proxy.
 An arriving authoritative prop sample replaces that proxy's pose and velocity;
-during unacknowledged player replay the proxy advances by that authoritative
-velocity. This permits moving-platform and prop-support queries without creating
-a second client-owned rigid-body history. The four nearest prop meshes may use
+during predicted-tick replay the proxy advances by that authoritative velocity.
+This permits moving-platform and prop-support queries without creating a second
+client-owned rigid-body history. The four nearest prop meshes may use
 those current kinematic proxy poses so player and contact prop share one
 presentation time. The proxy cannot receive local impulses or become gameplay
 truth. Authoritative-velocity extrapolation advances for at most 100 ms from the
@@ -79,12 +84,23 @@ current-time contact presentation only after 100 ms of real client time without
 another sample. A terminal-sleep sample instead remains as a stationary
 collision proxy. Other prop meshes render from buffered authoritative tracks.
 
-On an authoritative player sample the predictor:
+Input sequence and simulation time are deliberately separate. Each local
+controller step records its predicted server tick, effective intent, and
+resulting controller state. The predictor advances exactly once per predicted
+server tick while holding the newest sampled intent. The client clock estimates
+the current authoritative tick from timestamped state and ping observations.
+Repeated intent callbacks targeting the same estimated tick only replace intent;
+a callback can never mint another simulation step. Input sequence acknowledgement
+remains transport and diagnostic metadata; packet arrival count and sequence
+deltas never create or remove simulation steps.
 
-1. restores the acknowledged controller state;
-2. updates included moving-body collision proxies;
-3. drops acknowledged commands;
-4. replays remaining commands at the fixed timestep;
+On an authoritative player sample for tick `S` the predictor:
+
+1. updates included moving-body collision proxies;
+2. restores the authoritative controller state at `S`;
+3. discards predicted history at or before `S`;
+4. replays each recorded tick after `S` exactly once with its saved effective
+   intent;
 5. records the correction as presentation-only state.
 
 Corrections at or above 0.25 m and explicit discontinuities snap. Smaller offsets
@@ -109,24 +125,32 @@ existing body record and do not enlarge snapshots. A detected teleport marker
 repeats for one second so losing the first disposable state packet cannot turn a
 respawn into an enormous predicted correction.
 
-The per-client state packet targets at most 1,200 application bytes:
+The per-client state packet targets at most 1,200 application bytes. Selection
+is stateful per client rather than a stateless nearest-body sort:
 
 - the local player and twelve nearest remotes have permanent slots, while three
   farther-player slots rotate when more than 16 players are connected;
-- up to four nearest props receive permanent high-priority slots;
-- the remaining near slots rotate across bodies within 12 m;
-- two slots are reserved for rotating farther state when capacity is saturated;
-- create, repeated teleport, wake, and repeated terminal-sleep samples take
-  priority.
+- eight prop slots form an interaction lane for locally held, globally grabbed,
+  and recently released bodies; release priority lasts 500 ms;
+- nearby awake bodies accrue a delivery deadline of two snapshot intervals, and
+  the four closest awake bodies retain contact priority;
+- four slots cap terminal-sleep and discontinuity commits so transition churn
+  cannot consume the packet;
+- all other bodies accumulate unsent importance from age, distance, awake state,
+  and linear/angular energy; debt clears only after the channel send succeeds;
+- two slots remain available to accumulated farther state when mandatory near
+  traffic leaves capacity.
 
 Limiting remote-player records prevents players from consuming the whole packet
 at 32 peers without starving distant-player presentation; a 16-player packet
 still has room for roughly fourteen prop records. With fewer included players,
 unused player bytes automatically become prop capacity. An awake or dirty body
-outside every player's near region is globally staggered at 5 Hz. A sleeping
-body repeats its terminal state for one second, then becomes silent until it
-changes. The reliable connection snapshot seeds every body, so sparse later
-samples never imply creation or deletion.
+outside every player's near region is globally staggered at 5 Hz. Per-client
+state is coalesced to the newest body revision; there is no ordered delta
+backlog. A terminal sleeping revision repeats in the bounded transition lane
+until a selective state acknowledgement proves that revision arrived, then
+becomes silent until it changes. The reliable connection snapshot seeds every
+body, so sparse later samples never imply creation or deletion.
 
 This is presentation interest, not simulation culling. Every body continues in
 the one 60 Hz server world.
@@ -192,7 +216,7 @@ assertion.
 
 ## Protocol and connection lifecycle
 
-Protocol version 1 has exact bounded JSON control unions and explicit
+Protocol version 2 has exact bounded JSON control unions and explicit
 little-endian binary codecs. `mapRevision`, `worldEpoch`, runtime identity, and
 protocol version remain separate:
 
@@ -232,8 +256,8 @@ local network. When an answer contains mDNS candidates, its end-of-candidates
 marker is withheld so slow or unavailable mDNS resolution cannot make Werift
 prematurely fail an empty checklist; incoming checks can still establish the
 peer-reflexive path, while server-reflexive and relay candidates remain intact.
-The client creates `gurgur-input-v1` as unordered with no retransmissions. The
-server creates `gurgur-state-v1` as unordered with at most one retransmission.
+The client creates `gurgur-input-v2` as unordered with no retransmissions. The
+server creates `gurgur-state-v2` as unordered with at most one retransmission.
 Creating a channel at its sender is mandatory: partial reliability is a sender
 policy.
 

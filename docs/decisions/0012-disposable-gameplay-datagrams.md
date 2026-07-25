@@ -1,6 +1,7 @@
 # 0012: Separate reliable control from disposable gameplay state
 
-Status: accepted on 2026-07-23. Supersedes 0002 and 0010.
+Status: accepted on 2026-07-23. Supersedes 0002 and 0010. Selective terminal
+state receipt acknowledgement is refined by 0015.
 
 Keep native Bun WebSocket for authenticated connection control, world/lifecycle
 messages, WebRTC signaling, ping/pong, and the initial complete snapshot. Carry

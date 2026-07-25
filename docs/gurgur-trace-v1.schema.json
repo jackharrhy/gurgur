@@ -358,7 +358,13 @@
         "sequence": { "$ref": "#/$defs/nonNegativeInteger" },
         "clientTick": { "$ref": "#/$defs/nonNegativeInteger" },
         "outcome": {
-          "enum": ["predicted", "queued-without-world", "rejected-epoch", "implausible-reset"]
+          "enum": [
+            "predicted",
+            "intent-only",
+            "queued-without-world",
+            "rejected-epoch",
+            "implausible-reset"
+          ]
         },
         "before": { "$ref": "#/$defs/nullableControllerState" },
         "after": { "$ref": "#/$defs/nullableControllerState" },

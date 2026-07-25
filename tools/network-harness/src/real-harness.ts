@@ -8,6 +8,7 @@ import {
   PHYSICS_DT,
   PROTOCOL_VERSION,
   STATE_EXTRAPOLATION_MAX_TICKS,
+  acknowledgeState,
   decodeLifecycle,
   decodeServerControl,
   decodeSnapshot,
@@ -15,6 +16,7 @@ import {
   type BodySnapshot,
   type InputCommand,
   type Snapshot,
+  type StateAcknowledgement,
   type WelcomeMessage,
   type WorldManifestMessage,
 } from "@gurgur/engine";
@@ -100,7 +102,9 @@ type Client = {
   snapshotAgeTimed: Array<{ atMs: number; value: number }>;
   nextRenderAtMs: number;
   inputHistory: InputCommand[];
+  stateAcknowledgement: StateAcknowledgement | null;
   bodyLastReceived: Map<string, { serverTick: number; receivedAtMs: number }>;
+  predictionClock: { nowMs: number };
 };
 
 export async function runRealNetworkHarness(
@@ -164,6 +168,7 @@ export async function runRealNetworkHarness(
       );
       client.sequence = 0;
       client.inputHistory = [];
+      client.stateAcknowledgement = null;
       client.inputTimes.clear();
       client.bodyLastReceived.clear();
       client.nextRenderAtMs = 0;
@@ -370,15 +375,19 @@ async function createClient(
   const peer = new RTCPeerConnection({
     iceAdditionalHostAddresses: ["127.0.0.1"],
   });
-  const inputChannel = peer.createDataChannel("gurgur-input-v1", {
+  const inputChannel = peer.createDataChannel("gurgur-input-v2", {
     ordered: false,
     maxRetransmits: 0,
   });
+  const predictionClock = { nowMs: 0 };
   const predictor =
     clientId < 4
-      ? new PlayerPredictor((body) => {
-          client.predictedPosition = body?.position ?? null;
-        })
+      ? new PlayerPredictor(
+          (body) => {
+            client.predictedPosition = body?.position ?? null;
+          },
+          { now: () => predictionClock.nowMs },
+        )
       : null;
   const client: Client = {
     socket,
@@ -418,7 +427,9 @@ async function createClient(
     snapshotAgeTimed: [],
     nextRenderAtMs: 0,
     inputHistory: [],
+    stateAcknowledgement: null,
     bodyLastReceived: new Map(),
+    predictionClock,
   };
   const stateChannelReady = new Promise<RTCDataChannel>((resolve, reject) => {
     const timeout = setTimeout(
@@ -426,7 +437,7 @@ async function createClient(
       5_000,
     );
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v1" || client.stateChannel) {
+      if (channel.label !== "gurgur-state-v2" || client.stateChannel) {
         channel.close();
         return;
       }
@@ -518,6 +529,7 @@ async function createClient(
 }
 
 function advanceClient(client: Client, nowMs: number, generateInput = true): void {
+  client.predictionClock.nowMs = nowMs;
   for (const packet of client.outbound.advance(nowMs)) {
     handleOutbound(client, packet.payload, packet.deliveryAtMs);
   }
@@ -527,8 +539,11 @@ function advanceClient(client: Client, nowMs: number, generateInput = true): voi
       client.metrics.inputCommands += 1;
       client.inputHistory.push(command);
       if (client.inputHistory.length > INPUT_REDUNDANCY) client.inputHistory.shift();
-      const encoded = encodeInputBundle(client.inputHistory);
-      client.predictor?.pushInput(command);
+      const encoded = encodeInputBundle(client.inputHistory, client.stateAcknowledgement);
+      client.predictor?.pushInput(
+        command,
+        Math.floor(client.history.serverTickAt(client.nextInputAtMs)),
+      );
       client.inputTimes.set(command.sequence, client.nextInputAtMs);
       client.inbound.send(client.nextInputAtMs, encoded.byteLength, encoded);
       client.nextInputAtMs += 1_000 * PHYSICS_DT;
@@ -573,6 +588,7 @@ function handleOutbound(client: Client, payload: string | ArrayBuffer, nowMs: nu
         client.welcome = { ...client.welcome, worldEpoch: message.worldEpoch };
         client.sequence = 0;
         client.inputHistory = [];
+        client.stateAcknowledgement = null;
         client.inputTimes.clear();
         client.bodyLastReceived.clear();
         client.nextInputAtMs = Number.POSITIVE_INFINITY;
@@ -586,6 +602,7 @@ function handleOutbound(client: Client, payload: string | ArrayBuffer, nowMs: nu
     return;
   }
   const snapshot = decodeSnapshot(payload);
+  client.stateAcknowledgement = acknowledgeState(client.stateAcknowledgement, snapshot.serverTick);
   for (const body of snapshot.bodies) {
     const key = idKey(body.id);
     const previousTick = client.bodyLastReceived.get(key)?.serverTick ?? -1;
@@ -598,9 +615,15 @@ function handleOutbound(client: Client, payload: string | ArrayBuffer, nowMs: nu
   }
   client.metrics.snapshots += 1;
   client.history.push(snapshot, nowMs, client.outbound.profile.roundTripLatencyMs / 2);
-  if (client.latestSnapshot && snapshot.serverTick <= client.latestSnapshot.serverTick) return;
+  if (
+    client.latestSnapshot &&
+    (snapshot.worldEpoch < client.latestSnapshot.worldEpoch ||
+      (snapshot.worldEpoch === client.latestSnapshot.worldEpoch &&
+        snapshot.serverTick <= client.latestSnapshot.serverTick))
+  )
+    return;
   client.latestSnapshot = snapshot;
-  client.predictor?.reconcile(snapshot);
+  client.predictor?.reconcile(snapshot, true, nowMs);
   if (!client.welcome) return;
   const authority = snapshot.players.find((player) => sameId(player.id, client.welcome!.playerId));
   if (!authority) {

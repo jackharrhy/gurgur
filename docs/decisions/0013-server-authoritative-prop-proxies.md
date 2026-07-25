@@ -1,6 +1,7 @@
 # 0013: Predict the player, interpolate authoritative props
 
-Status: accepted on 2026-07-23. Supersedes 0009.
+Status: accepted on 2026-07-23. Supersedes 0009. Tick indexing and state
+scheduling are refined by 0015.
 
 The server is the only simulator for loose props and constrained rigid-body
 interactions. The browser predicts and replays the local geometric player
@@ -39,18 +40,19 @@ adopt s&box client ownership or Source client-only debris because map props can
 participate in persistent puzzles. Their transferable lesson is that remote
 proxies consume replicated state; they are not a second gameplay authority.
 
-The transport gives the four closest props permanent 30 Hz slots. The local
-player, twelve nearest remotes, and three rotating farther remotes cap player
-state at 16 records so a 32-player session cannot crowd props out of the
-1,200-byte packet or starve distant-player presentation. Authoritative-velocity
-proxies provide current contact presentation; other nearby and far state rotates,
-with priority for create, teleport, wake, and repeated terminal sleep. Per-body
-history adapts between 100 and 250 ms and caps extrapolation at 100 ms. A state
-blackout longer than 500 ms discards pending player replay; awake dynamic
-proxies leave prediction collision after 100 ms of client time without state,
-while terminal-sleep proxies remain. The shared server/client controller rejects
-an implausible greater-than-one-metre single tick instead of allowing overlapping
-collision geometry to launch the player.
+The local player, twelve nearest remotes, and three rotating farther remotes cap
+player state at 16 records so a 32-player session cannot crowd props out of the
+1,200-byte packet or starve distant-player presentation. As refined by 0015,
+prop state now uses interaction, freshness, transition, and accumulated-priority
+lanes rather than permanent nearest slots. Authoritative-velocity proxies provide
+fresh current-contact presentation; other nearby and far state remains buffered.
+Per-body history adapts between 100 and 250 ms and caps extrapolation at 100 ms.
+A state blackout longer than 500 ms discards pending player replay; awake
+dynamic proxies leave both prediction collision and current-contact presentation
+after 100 ms of client time without state, while terminal-sleep proxies remain.
+The shared server/client controller rejects an implausible
+greater-than-one-metre single tick instead of allowing overlapping collision
+geometry to launch the player.
 
 Evidence lives in the original push, stack, domino, and corridor maps, the
 authority/predictor simulation tests, the real 128-body matrix, and browser

@@ -3,26 +3,12 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { RTCPeerConnection, type RTCDataChannel, type RTCIceServer } from "werift";
 import {
-  FULL_RATE_BODY_RADIUS_METRES,
   PHYSICS_HZ,
   PROTOCOL_VERSION,
-  SNAPSHOT_BODY_BYTES,
-  SNAPSHOT_FLAG_CREATED,
   SNAPSHOT_HZ,
-  SNAPSHOT_HEADER_BYTES,
-  SNAPSHOT_INTERVAL_TICKS,
-  SNAPSHOT_FLAG_LOCAL_GRAB,
-  SNAPSHOT_FLAG_SLEEP,
-  SNAPSHOT_FLAG_TELEPORT,
-  SNAPSHOT_FLAG_WAKE,
-  SNAPSHOT_PLAYER_BYTES,
-  STATE_ALWAYS_NEAR_BODY_SLOTS,
   STATE_DATAGRAM_TARGET_BYTES,
-  STATE_FAR_BODY_RESERVE,
-  STATE_FAR_PLAYER_RESERVE,
-  STATE_MAX_PLAYER_RECORDS,
   STATE_MAX_RETRANSMITS,
-  decodeInputBundle,
+  decodeInputPacket,
   decodeClientControl,
   decodeSnapshot,
   encodeLifecycle,
@@ -51,6 +37,9 @@ import {
 import { WorldStore } from "./store";
 import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
 import { NetworkTraceCapture, TraceConflictError, TraceNotFoundError } from "./network-trace";
+import { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
+
+export { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -61,6 +50,7 @@ type ClientData = {
   stateChannel: RTCDataChannel | null;
   droppedStatePackets: number;
   rtcNegotiating: boolean;
+  snapshotScheduler: ClientSnapshotScheduler;
 };
 type SessionRecord = {
   playerId: RuntimeId;
@@ -88,13 +78,6 @@ export type ServerMetrics = ReturnType<AuthoritativeGame["metrics"]> & {
 };
 
 const MAX_STATE_BUFFERED_BYTES = STATE_DATAGRAM_TARGET_BYTES * 2;
-const PRIORITY_BODY_FLAGS =
-  SNAPSHOT_FLAG_CREATED |
-  SNAPSHOT_FLAG_TELEPORT |
-  SNAPSHOT_FLAG_WAKE |
-  SNAPSHOT_FLAG_SLEEP |
-  SNAPSHOT_FLAG_LOCAL_GRAB;
-
 export async function createGurgurServer(
   options: {
     port?: number;
@@ -221,10 +204,12 @@ export async function createGurgurServer(
         game.playerPosition(playerId),
         playerId,
         game.grabbedTarget(playerId),
+        socket.data.snapshotScheduler,
       );
       const packet = encodeSnapshot(selected);
       try {
         channel.send(Buffer.from(packet));
+        socket.data.snapshotScheduler.sent(selected);
         if (tracingPlayer)
           networkTrace.recordOutbound(playerId, {
             serverTick: snapshot.serverTick,
@@ -346,7 +331,10 @@ export async function createGurgurServer(
   ): boolean => {
     let commands: InputCommand[];
     try {
-      commands = decodeInputBundle(packet);
+      const decoded = decodeInputPacket(packet);
+      commands = decoded.commands;
+      if (decoded.acknowledgement)
+        socket.data.snapshotScheduler.acknowledge(decoded.acknowledgement);
     } catch {
       return false;
     }
@@ -392,7 +380,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v1", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v2", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -401,18 +389,15 @@ export async function createGurgurServer(
       if (state !== "open" || socket.data.stateChannel !== stateChannel) return;
       const playerId = socket.data.playerId;
       if (!playerId) return;
-      stateChannel.send(
-        Buffer.from(
-          encodeSnapshot(
-            snapshotForPlayer(
-              game.snapshot({ full: true }),
-              game.playerPosition(playerId),
-              playerId,
-              game.grabbedTarget(playerId),
-            ),
-          ),
-        ),
+      const selected = snapshotForPlayer(
+        game.snapshot({ full: true }),
+        game.playerPosition(playerId),
+        playerId,
+        game.grabbedTarget(playerId),
+        socket.data.snapshotScheduler,
       );
+      stateChannel.send(Buffer.from(encodeSnapshot(selected)));
+      socket.data.snapshotScheduler.sent(selected);
     });
     peer.connectionStateChange.subscribe((state) => {
       if (socket.data.peerConnection === peer && state === "failed")
@@ -423,7 +408,7 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-input-v1" && !socket.data.inputChannel) {
+      if (channel.label === "gurgur-input-v2" && !socket.data.inputChannel) {
         socket.data.inputChannel = channel;
         channel.onMessage.subscribe((packet) => {
           if (typeof packet === "string" || !acceptInputPacket(socket, packet, "webrtc"))
@@ -616,6 +601,7 @@ export async function createGurgurServer(
               stateChannel: null,
               droppedStatePackets: 0,
               rtcNegotiating: false,
+              snapshotScheduler: new ClientSnapshotScheduler(),
             },
           })
         )
@@ -889,147 +875,6 @@ function sameId(left: RuntimeId | null, right: RuntimeId | null): boolean {
     left.index === right.index &&
     left.generation === right.generation
   );
-}
-
-export function snapshotForPlayer(
-  snapshot: Snapshot,
-  localPosition: Vec3 | null,
-  localPlayerId: RuntimeId,
-  localGrabbedTarget: RuntimeId | null = null,
-): Snapshot {
-  if (!localPosition) return snapshot;
-  const playerSnapshot = localGrabbedTarget
-    ? {
-        ...snapshot,
-        bodies: snapshot.bodies.map((body) =>
-          body.id.index === localGrabbedTarget.index &&
-          body.id.generation === localGrabbedTarget.generation
-            ? { ...body, flags: (body.flags ?? 0) | SNAPSHOT_FLAG_LOCAL_GRAB }
-            : body,
-        ),
-      }
-    : snapshot;
-  const rotation = Math.floor(playerSnapshot.serverTick / SNAPSHOT_INTERVAL_TICKS);
-  const playerIds = new Set(playerSnapshot.players.map(({ id }) => `${id.index}:${id.generation}`));
-  // Distant players are interest-managed too; at 32 peers, including every
-  // player would consume the entire state-datagram budget before any prop.
-  const orderedPlayers = playerSnapshot.players.toSorted((left, right) => {
-    const leftIsLocal =
-      left.id.index === localPlayerId.index && left.id.generation === localPlayerId.generation;
-    const rightIsLocal =
-      right.id.index === localPlayerId.index && right.id.generation === localPlayerId.generation;
-    if (leftIsLocal !== rightIsLocal) return leftIsLocal ? -1 : 1;
-    return (
-      Math.hypot(
-        left.position.x - localPosition.x,
-        left.position.y - localPosition.y,
-        left.position.z - localPosition.z,
-      ) -
-      Math.hypot(
-        right.position.x - localPosition.x,
-        right.position.y - localPosition.y,
-        right.position.z - localPosition.z,
-      )
-    );
-  });
-  const selectedPlayers =
-    orderedPlayers.length <= STATE_MAX_PLAYER_RECORDS
-      ? orderedPlayers
-      : [
-          ...orderedPlayers.slice(0, STATE_MAX_PLAYER_RECORDS - STATE_FAR_PLAYER_RESERVE),
-          ...takeRotating(
-            orderedPlayers.slice(STATE_MAX_PLAYER_RECORDS - STATE_FAR_PLAYER_RESERVE),
-            STATE_FAR_PLAYER_RESERVE,
-            rotation,
-          ),
-        ];
-  const selectedPlayerIds = new Set(
-    selectedPlayers.map(({ id }) => `${id.index}:${id.generation}`),
-  );
-  const selectedPlayerBodies = playerSnapshot.bodies.filter((body) =>
-    selectedPlayerIds.has(`${body.id.index}:${body.id.generation}`),
-  );
-  const bodyCapacity = Math.max(
-    0,
-    Math.floor(
-      (STATE_DATAGRAM_TARGET_BYTES -
-        SNAPSHOT_HEADER_BYTES -
-        selectedPlayers.length * SNAPSHOT_PLAYER_BYTES) /
-        SNAPSHOT_BODY_BYTES,
-    ),
-  );
-  const candidates = playerSnapshot.bodies
-    .filter((body) => !playerIds.has(`${body.id.index}:${body.id.generation}`))
-    .map((body) => ({
-      body,
-      distance: Math.hypot(
-        body.position.x - localPosition.x,
-        body.position.y - localPosition.y,
-        body.position.z - localPosition.z,
-      ),
-    }));
-  if (candidates.length <= bodyCapacity)
-    return {
-      ...playerSnapshot,
-      players: selectedPlayers,
-      bodies: [...selectedPlayerBodies, ...candidates.map(({ body }) => body)],
-    };
-
-  const urgent = candidates.filter(({ body }) => ((body.flags ?? 0) & PRIORITY_BODY_FLAGS) !== 0);
-  const ordinary = candidates.filter(({ body }) => ((body.flags ?? 0) & PRIORITY_BODY_FLAGS) === 0);
-  const near = ordinary
-    .filter(({ distance }) => distance <= FULL_RATE_BODY_RADIUS_METRES)
-    .toSorted((left, right) => left.distance - right.distance);
-  const far = ordinary
-    .filter(({ distance }) => distance > FULL_RATE_BODY_RADIUS_METRES)
-    .toSorted((left, right) => left.distance - right.distance);
-  const selected = takeRotating(urgent, bodyCapacity, rotation);
-  let remaining = bodyCapacity - selected.length;
-  const farReserve = Math.min(STATE_FAR_BODY_RESERVE, far.length, remaining);
-  const alwaysNearCount = Math.min(
-    STATE_ALWAYS_NEAR_BODY_SLOTS,
-    near.length,
-    remaining - farReserve,
-  );
-  selected.push(...near.slice(0, alwaysNearCount));
-  remaining -= alwaysNearCount;
-  const rotatingNear = near.slice(alwaysNearCount);
-  const selectedNear = takeRotating(
-    rotatingNear,
-    Math.min(rotatingNear.length, remaining - farReserve),
-    rotation,
-  );
-  selected.push(...selectedNear);
-  remaining -= selectedNear.length;
-  const selectedFar = takeRotating(far, remaining, rotation);
-  selected.push(...selectedFar);
-  remaining -= selectedFar.length;
-  if (remaining > 0) {
-    const selectedKeys = new Set(
-      selected.map(({ body }) => `${body.id.index}:${body.id.generation}`),
-    );
-    selected.push(
-      ...takeRotating(
-        rotatingNear.filter(
-          ({ body }) => !selectedKeys.has(`${body.id.index}:${body.id.generation}`),
-        ),
-        remaining,
-        rotation + 1,
-      ),
-    );
-  }
-  return {
-    ...playerSnapshot,
-    players: selectedPlayers,
-    bodies: [...selectedPlayerBodies, ...selected.map(({ body }) => body)],
-  };
-}
-
-function takeRotating<T>(items: T[], count: number, rotation: number): T[] {
-  if (count <= 0 || items.length === 0) return [];
-  if (count >= items.length) return [...items];
-  const start = (rotation * count) % items.length;
-  return Array.from({ length: count }, (_, index) => items[(start + index) % items.length]!);
 }
 
 function persistentIdForToken(token: string): string {

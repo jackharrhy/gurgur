@@ -5,7 +5,8 @@ subsystem has deterministic controls, metrics, and a headless path so transport,
 simulation, prediction, and presentation failures remain distinguishable.
 
 `bun run check` runs formatting, lint, TypeScript, unit/contract/simulation tests,
-the real server integration suite, and shutdown/configuration integration.
+the real server integration suite, shutdown/configuration integration, and the
+required Chromium prediction-drift scenario against a real Bun backend.
 Generated bundles, reports, runtime data, and TrenchBroom autosaves are ignored;
 authored fixtures and tests are not.
 
@@ -44,14 +45,28 @@ Prediction tests restore and replay only the player against
 authoritative kinematic prop proxies; current contact presentation may use those
 proxies, but player contact cannot apply local rigid-body motion to them.
 
+The phase regression runs client sampling, server ticks, input delivery, snapshot
+delivery, and codec round trips on independent schedules. Client phases of 0, 3,
+8, and 13 ms plus deterministic reordering force zero- and multi-sequence
+acknowledgement advances. It requires tick-indexed replay to remain below 5 mm
+p95, 1 cm p99, and 2 cm maximum in the focused no-contact path. Its interaction
+case uses the authored 0.8128 m cube plus 32 stress bodies to reproduce
+grab-carry-turn-release motion under packet saturation. Scheduler tests separately
+prove the four-record sleep-commit cap, selective terminal acknowledgement,
+500 ms release lane, and two-snapshot nearby-awake deadline.
+
 Browser scenarios run the actual Bun server, WebSocket signaling, WebRTC data
 channels, codecs, prediction worker, Box3D Wasm, Three.js renderer, and input
 path. `test:browser -- dynamic` covers moving support, `-- push` covers visible
-prop response under shaped latency, `-- latency` covers held input, and the other
-scenarios cover grab, touch, gamepad, reconnect, and ordinary movement. Browser
-automation appends `?test`; the grab scenario also enables the general `?debug`
-view and requires a non-empty authoritative Box3D debug frame, covering the server
-callback, JSON route, browser polling, and Three.js overlay together.
+prop response under shaped latency, `-- latency` covers held input, and `-- drift`
+holds a real page open for 6.5 seconds before moving so browser timer quantization
+cannot accumulate an unbounded predicted-tick lead. The other scenarios cover
+grab, touch, gamepad, reconnect, and ordinary movement. Browser automation
+appends `?test`; the grab scenario also enables the general `?debug` view and
+requires a non-empty authoritative Box3D debug frame, covering the server
+callback, JSON route, browser polling, and Three.js overlay together. It acquires,
+carries, releases, and then requires continued finite authoritative prop motion
+after the release.
 Camera tests cover same-frame inward clamping, rate-independent held recovery,
 double-sided thin-wall probes, and offset-ray corner clearance. Every browser
 scenario also requires the live boom distance to remain finite and no greater
@@ -161,6 +176,7 @@ never a weakened assertion hidden in a test.
 bun run check
 bun run test:network -- single
 bun run test:network -- matrix --quick
+bun run test:browser -- drift
 bun run test:browser -- all
 bun run soak -- physics
 bun run soak -- connections

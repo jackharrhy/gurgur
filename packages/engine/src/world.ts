@@ -95,7 +95,7 @@ export type RuntimeEntityRef =
 export type WorldMessage<TEntity extends CompiledEntityCapabilities = CompiledEntityCapabilities> =
   {
     type: "world";
-    protocolVersion: 1;
+    protocolVersion: 2;
     worldEpoch: number;
     bundle: WorldBundle<TEntity>;
     runtimeEntities: RuntimeEntityRef[];
@@ -103,7 +103,7 @@ export type WorldMessage<TEntity extends CompiledEntityCapabilities = CompiledEn
 
 export type WorldManifestMessage = {
   type: "world";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   mapRevision: string;
   bundleUrl: string;
@@ -112,7 +112,7 @@ export type WorldManifestMessage = {
 
 export type LifecycleMessage = {
   type: "lifecycle";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   created: RuntimeEntityRef[];
   removed: RuntimeId[];

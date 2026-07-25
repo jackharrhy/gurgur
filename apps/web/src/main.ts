@@ -139,7 +139,7 @@ const renderer = new WorldRenderer(
   debugEnabled,
 );
 const predictor = createPredictionClient(
-  (body, bodies, correctionMagnitude) => {
+  (body, bodies, correctionMagnitude, diagnostics) => {
     renderer.setPredictedPlayer(body);
     if (!body) document.body.dataset.playerViewReady = "false";
     if (body) worldAudio.update(body.position);
@@ -154,6 +154,8 @@ const predictor = createPredictionClient(
           };
       }
     document.body.dataset.predictedBodyCount = String(bodies.length);
+    document.body.dataset.predictionTick = String(diagnostics.predictionTick ?? "");
+    document.body.dataset.pendingPredictionTicks = String(diagnostics.pendingTickCount);
     document.body.dataset.predictionReady = body ? "true" : "false";
     if (body) {
       document.body.dataset.predictedX = String(body.position.x);
@@ -187,8 +189,9 @@ const input = createPlayerInput(
     document.body.dataset.inputMoveZ = String(command.moveZ);
     document.body.dataset.inputJumpCounter = String(command.jumpCounter);
     document.body.dataset.inputButtons = String(command.buttons);
+    document.body.dataset.inputSequence = String(command.sequence);
     session.sendInput(command);
-    predictor.pushInput(command);
+    predictor.pushInput(command, Math.floor(history.serverTickAt(performance.now())));
   },
   (yaw, pitch) => renderer.setViewAngles(yaw, pitch),
   () => {
@@ -287,7 +290,7 @@ session = new GameSession(
       renderer.applyAuthoritativeInteractionState(message.bodies);
       history.push(message, receivedAtMs, latestOneWayDelayMs);
       traceRecorder?.recordSnapshotProcessed(message, latestInFrame, performance.now());
-      predictor.reconcile(message, latestInFrame);
+      predictor.reconcile(message, latestInFrame, receivedAtMs);
       if (!latestInFrame) return;
       if (stateTransportReady) {
         snapshotEpochAfterTransport = message.worldEpoch;

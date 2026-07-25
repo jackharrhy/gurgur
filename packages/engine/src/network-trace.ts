@@ -101,7 +101,12 @@ export type TracePredictionInputEvent = {
   workerTimeOriginUnixMs: number;
   sequence: number;
   clientTick: number;
-  outcome: "predicted" | "queued-without-world" | "rejected-epoch" | "implausible-reset";
+  outcome:
+    | "predicted"
+    | "intent-only"
+    | "queued-without-world"
+    | "rejected-epoch"
+    | "implausible-reset";
   before: TraceControllerState | null;
   after: TraceControllerState | null;
   pendingInputCount: number;

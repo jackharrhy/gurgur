@@ -51,6 +51,11 @@ export type Snapshot = {
   players: PlayerStateSnapshot[];
 };
 
+export type StateAcknowledgement = {
+  latestServerTick: number;
+  receivedMask: number;
+};
+
 export type PhysicsDebugPrimitive =
   | { kind: "bounds"; lower: Vec3; upper: Vec3; color: number }
   | { kind: "segment"; from: Vec3; to: Vec3; color: number }
@@ -77,7 +82,7 @@ export type PlayerStateSnapshot = {
 
 export type WelcomeMessage = {
   type: "welcome";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   playerId: RuntimeId;
   mapRevision: string;
@@ -89,7 +94,7 @@ export type WelcomeMessage = {
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion: 1;
+  protocolVersion: 2;
   mapRevision: string | null;
   worldEpoch: number | null;
   sessionToken: string | null;
@@ -98,7 +103,7 @@ export type HelloMessage = {
 
 export type PingMessage = {
   type: "ping";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -106,7 +111,7 @@ export type PingMessage = {
 
 export type PongMessage = {
   type: "pong";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -115,7 +120,7 @@ export type PongMessage = {
 
 export type RtcOfferMessage = {
   type: "rtc-offer";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
   iceServers: Array<{ urls: string; username?: string; credential?: string }>;
@@ -123,7 +128,7 @@ export type RtcOfferMessage = {
 
 export type RtcAnswerMessage = {
   type: "rtc-answer";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   description: { type: "answer"; sdp: string };
 };
@@ -133,7 +138,7 @@ export type ServerControlMessage = WelcomeMessage | PongMessage | RtcOfferMessag
 
 export type InputCommand = {
   type: "input";
-  protocolVersion: 1;
+  protocolVersion: 2;
   worldEpoch: number;
   sequence: number;
   clientTick: number;

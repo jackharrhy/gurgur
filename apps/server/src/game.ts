@@ -247,7 +247,7 @@ export class AuthoritativeGame {
             (discontinuity
               ? SNAPSHOT_FLAG_TELEPORT
               : this.#snapshotFlags(handle, state.position, awake)) |
-            (!awake && (full || repeatTerminalState) ? SNAPSHOT_FLAG_SLEEP : 0) |
+            (!awake ? SNAPSHOT_FLAG_SLEEP : 0) |
             (grabbed ? SNAPSHOT_FLAG_GRABBED : 0),
         },
       ];

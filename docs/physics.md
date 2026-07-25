@@ -62,12 +62,14 @@ contract. The server remains authoritative and clients always reconcile.
 
 The prediction worker keeps authored moving-body geometry available as kinematic
 collision proxies. It never promotes a prop to a client-owned dynamic body. An
-authoritative sample sets a proxy's transform and velocity; pending
-player-command replay advances the proxy from that state for at most 100 ms,
-then freezes its motion. Replay is instantaneous and does not spend the separate
-freshness lifetime: an awake proxy leaves collision only after 100 ms of actual
-client time without a received sample. A terminal-sleep sample stays as a
-stationary proxy. The four nearest fresh prop proxies may also drive current-time
+authoritative sample sets a proxy's transform and velocity; pending predicted
+server ticks advance the proxy from that state for at most 100 ms, then freeze
+its motion. Replay is indexed by server tick rather than input acknowledgement:
+each saved effective intent runs exactly once for its predicted tick. Replay is
+instantaneous and does not spend the separate freshness lifetime. An awake proxy
+leaves both collision and current-time contact presentation after 100 ms of
+actual client time without a received sample. A terminal-sleep sample stays as a
+stationary proxy. The four nearest fresh prop proxies may drive current-time
 contact presentation so the predicted player does not visibly overlap a prop
 buffered in the past. They cannot receive local impulses. Only the local
 geometric player controller is restored and replayed. This keeps moving support

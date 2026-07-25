@@ -15,9 +15,10 @@ import { compileWorld } from "../packages/game/src/index";
 const directory = process.env.GURGUR_URL ? null : await mkdtemp(join(tmpdir(), "gurgur-browser-"));
 const scenario = process.env.SMOKE_SCENARIO ?? "movement";
 const interactionScenario = ["dynamic-landing", "dynamic-push", "grab"].includes(scenario);
+const fixtureScenario = interactionScenario || scenario === "prediction-drift";
 const interactionFixture =
   scenario === "dynamic-push" || scenario === "grab" ? "network-push-corridor" : "network-boxes";
-const bundle = interactionScenario
+const bundle = fixtureScenario
   ? compileWorld(
       await Bun.file(
         new URL(`../content/maps/fixtures/${interactionFixture}.map`, import.meta.url),
@@ -66,7 +67,7 @@ const server: GurgurServer | null = directory
       hostname: "127.0.0.1",
       databasePath: join(directory, "world.sqlite"),
       playerSpawn: interactionScenario ? playerSpawn : undefined,
-      worldBundle: interactionScenario ? bundle : undefined,
+      worldBundle: fixtureScenario ? bundle : undefined,
     })
   : null;
 const url = new URL(process.env.GURGUR_URL ?? `http://127.0.0.1:${server!.port}/`);
@@ -282,7 +283,75 @@ try {
     );
   }
   await page.waitForFunction(() => Number(document.body.dataset.serverTick) >= 6);
-  if (scenario === "dynamic-push") {
+  if (scenario === "prediction-drift") {
+    const driftDurationMs = Number(process.env.SMOKE_DRIFT_DURATION_MS ?? 6_500);
+    const started = await page.evaluate(() => ({
+      serverTick: Number(document.body.dataset.serverTick),
+      inputSequence: Number(document.body.dataset.inputSequence),
+    }));
+    await page.waitForTimeout(driftDurationMs);
+    const before = await page.evaluate(() => ({
+      authority: {
+        x: Number(document.body.dataset.playerX),
+        z: Number(document.body.dataset.playerZ),
+      },
+      predicted: {
+        x: Number(document.body.dataset.predictedX),
+        z: Number(document.body.dataset.predictedZ),
+      },
+      serverTick: Number(document.body.dataset.serverTick),
+      predictionTick: Number(document.body.dataset.predictionTick),
+      pendingPredictionTicks: Number(document.body.dataset.pendingPredictionTicks),
+      inputSequence: Number(document.body.dataset.inputSequence),
+    }));
+    const inputRateHz = ((before.inputSequence - started.inputSequence) * 1_000) / driftDurationMs;
+    const predictionLeadTicks = before.predictionTick - before.serverTick;
+    if (
+      !Object.values(before.authority).every(Number.isFinite) ||
+      !Object.values(before.predicted).every(Number.isFinite) ||
+      before.serverTick - started.serverTick < (driftDurationMs / 1_000) * 55 ||
+      !Number.isFinite(inputRateHz) ||
+      inputRateHz < 57 ||
+      inputRateHz > 61 ||
+      !Number.isFinite(predictionLeadTicks) ||
+      predictionLeadTicks < -2 ||
+      predictionLeadTicks > 4 ||
+      before.pendingPredictionTicks < 0 ||
+      before.pendingPredictionTicks > 4
+    ) {
+      throw new Error(
+        `prediction drift warmup did not stay clocked: ` +
+          JSON.stringify({ ...before, inputRateHz, predictionLeadTicks }),
+      );
+    }
+    await page.keyboard.down("w");
+    await page.waitForTimeout(350);
+    const moving = await page.evaluate(() => ({
+      authority: {
+        x: Number(document.body.dataset.playerX),
+        z: Number(document.body.dataset.playerZ),
+      },
+      predicted: {
+        x: Number(document.body.dataset.predictedX),
+        z: Number(document.body.dataset.predictedZ),
+      },
+    }));
+    await page.keyboard.up("w");
+    const predictionLead = Math.hypot(
+      moving.predicted.x - moving.authority.x,
+      moving.predicted.z - moving.authority.z,
+    );
+    if (!Number.isFinite(predictionLead) || predictionLead > 0.25) {
+      throw new Error(
+        `real browser prediction accumulated ${predictionLead.toFixed(4)}m of clock drift: ` +
+          JSON.stringify(moving),
+      );
+    }
+    console.log(
+      `real browser clock: ${inputRateHz.toFixed(2)} Hz input, ` +
+        `${predictionLeadTicks} pending tick lead, ${predictionLead.toFixed(4)}m moving lead`,
+    );
+  } else if (scenario === "dynamic-push") {
     const cubeHalfX = Math.max(...heavyBrush!.localVertices.map((vertex) => Math.abs(vertex.x)));
     await page.waitForFunction(
       (entityIndex) => {
@@ -621,6 +690,23 @@ try {
     await page.evaluate(() => {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 0;
     });
+    const releaseZ = await page.evaluate(
+      (entityIndex) =>
+        (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                authoritative?: { position: { z: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.authoritative?.position.z ??
+        Number.NaN,
+      heavyEntityIndex,
+    );
     await page.evaluate(() => {
       (
         window as unknown as {
@@ -636,6 +722,28 @@ try {
         }
       ).__gurgurSmokePad.buttons[7]!.pressed = false;
     });
+    await page.waitForFunction(() => document.body.dataset.interactionOutline !== "held", null, {
+      timeout: 5_000,
+    });
+    await page.waitForFunction(
+      ({ z, entityIndex }) => {
+        const current = (
+          window as unknown as {
+            __gurgurDiagnostics: {
+              bodies(): Array<{
+                entityIndex: number;
+                authoritative?: { position: { z: number } };
+              }>;
+            };
+          }
+        ).__gurgurDiagnostics
+          .bodies()
+          .find((body) => body.entityIndex === entityIndex)?.authoritative?.position.z;
+        return current !== undefined && Number.isFinite(current) && Math.abs(current - z) > 0.005;
+      },
+      { z: releaseZ, entityIndex: heavyEntityIndex },
+      { timeout: 2_000 },
+    );
   } else if (scenario === "touch") {
     const before = await page.evaluate(() => ({
       x: Number(document.body.dataset.predictedX),

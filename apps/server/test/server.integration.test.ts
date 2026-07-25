@@ -16,6 +16,7 @@ import {
   type PhysicsDebugFrame,
   type GurgurClientTrace,
   type GurgurNetworkTrace,
+  type GurgurTraceStartResponse,
   type RuntimeEntityRef,
   type Snapshot,
   type WelcomeMessage,
@@ -54,10 +55,10 @@ describe("authoritative server", () => {
         }),
       });
       expect(startResponse.ok).toBeTrue();
-      const started = (await startResponse.json()) as { captureId: string };
+      const started = (await startResponse.json()) as GurgurTraceStartResponse;
       await waitForSnapshot(
         client.stateChannel,
-        (snapshot) => snapshot.serverTick > client!.snapshot.serverTick + 2,
+        (snapshot) => snapshot.serverTick > started.serverTick + 2,
       );
       const stopResponse = await fetch(`${baseUrl}/debug/network-trace/stop`, {
         method: "POST",
@@ -477,7 +478,7 @@ function connectClient(
     const peer = new RTCPeerConnection({
       iceAdditionalHostAddresses: ["127.0.0.1"],
     });
-    const inputChannel = peer.createDataChannel("gurgur-input-v1", {
+    const inputChannel = peer.createDataChannel("gurgur-input-v2", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -502,7 +503,7 @@ function connectClient(
     };
     const timeout = setTimeout(() => reject(new Error("timed out connecting test client")), 5_000);
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v1" || stateChannel) {
+      if (channel.label !== "gurgur-state-v2" || stateChannel) {
         channel.close();
         return;
       }

@@ -10,8 +10,13 @@ import type { WorldMessage } from "@gurgur/game";
 type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }
   | { type: "world"; message: WorldMessage }
-  | { type: "input"; command: InputCommand }
-  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean }
+  | { type: "input"; command: InputCommand; targetServerTick: number }
+  | {
+      type: "snapshot";
+      snapshot: Snapshot;
+      reconcilePlayer: boolean;
+      receivedAtUnixMs: number;
+    }
   | { type: "trace-enabled"; enabled: boolean; requestId: number };
 
 type WorkerResponse =
@@ -20,6 +25,8 @@ type WorkerResponse =
       body: BodySnapshot | null;
       bodies: BodySnapshot[];
       correctionMagnitude: number;
+      predictionTick: number | null;
+      pendingTickCount: number;
     }
   | { type: "trace"; event: TracePredictionEvent }
   | { type: "trace-state"; requestId: number }
@@ -28,8 +35,8 @@ type WorkerResponse =
 export type PredictionClient = {
   setLocalPlayer(id: RuntimeId): void;
   setWorld(message: WorldMessage): Promise<void>;
-  pushInput(command: InputCommand): void;
-  reconcile(snapshot: Snapshot, reconcilePlayer?: boolean): void;
+  pushInput(command: InputCommand, targetServerTick: number): void;
+  reconcile(snapshot: Snapshot, reconcilePlayer: boolean, receivedAtMs: number): void;
   setTraceEnabled(enabled: boolean): Promise<void>;
   dispose(): void;
 };
@@ -39,6 +46,7 @@ export function createPredictionClient(
     body: BodySnapshot | null,
     bodies: BodySnapshot[],
     correctionMagnitude: number,
+    diagnostics: { predictionTick: number | null; pendingTickCount: number },
   ) => void,
   onTrace: (event: TracePredictionEvent) => void = () => {},
 ): PredictionClient {
@@ -49,7 +57,10 @@ export function createPredictionClient(
 
   worker.addEventListener("message", (event: MessageEvent<WorkerResponse>) => {
     if (event.data.type === "presentation") {
-      onPresentation(event.data.body, event.data.bodies, event.data.correctionMagnitude);
+      onPresentation(event.data.body, event.data.bodies, event.data.correctionMagnitude, {
+        predictionTick: event.data.predictionTick,
+        pendingTickCount: event.data.pendingTickCount,
+      });
     } else if (event.data.type === "trace") {
       onTrace(event.data.event);
     } else if (event.data.type === "trace-state") {
@@ -85,9 +96,14 @@ export function createPredictionClient(
   return {
     setLocalPlayer: (id) => post({ type: "local-player", id }),
     setWorld,
-    pushInput: (command) => post({ type: "input", command }),
-    reconcile: (snapshot, reconcilePlayer = true) =>
-      post({ type: "snapshot", snapshot, reconcilePlayer }),
+    pushInput: (command, targetServerTick) => post({ type: "input", command, targetServerTick }),
+    reconcile: (snapshot, reconcilePlayer, receivedAtMs) =>
+      post({
+        type: "snapshot",
+        snapshot,
+        reconcilePlayer,
+        receivedAtUnixMs: performance.timeOrigin + receivedAtMs,
+      }),
     setTraceEnabled: (enabled) => {
       const requestId = nextTraceRequestId++;
       const ready = new Promise<void>((resolve) => traceWaiters.set(requestId, resolve));

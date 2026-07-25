@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   GURGUR_TRACE_FORMAT,
   GURGUR_TRACE_FORMAT_VERSION,
+  PROTOCOL_VERSION,
   validateGurgurNetworkTrace,
   type GurgurClientTrace,
   type InputCommand,
@@ -113,7 +114,7 @@ function emptyClientTrace(captureId: string): GurgurClientTrace {
 function command(sequence: number): InputCommand {
   return {
     type: "input",
-    protocolVersion: 1,
+    protocolVersion: PROTOCOL_VERSION,
     worldEpoch: 4,
     sequence,
     clientTick: sequence,

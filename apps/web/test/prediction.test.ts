@@ -11,7 +11,7 @@ import {
   type TracePredictionEvent,
   type Vec3,
 } from "@gurgur/engine";
-import { compileWorld, type WorldBundle, type WorldMessage } from "@gurgur/game";
+import { PLAYER_SPEED, compileWorld, type WorldBundle, type WorldMessage } from "@gurgur/game";
 import { PlayerPredictor } from "../src/prediction";
 
 const playerId = { index: 0x8000_0000, generation: 1 };
@@ -72,6 +72,45 @@ describe("player-only prediction", () => {
       expect(predictor.predictedPosition!.x).toBeCloseTo(before.x, 4);
       expect(predictor.predictedPosition!.z).toBeCloseTo(before.z, 4);
       expect(predictor.correctionMagnitude).toBeLessThan(0.01);
+    } finally {
+      predictor.dispose();
+    }
+  });
+
+  test("does not turn repeated intent samples into extra predicted server ticks", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const events: TracePredictionEvent[] = [];
+    const predictor = new PlayerPredictor(() => {}, { onTrace: (event) => events.push(event) });
+    try {
+      predictor.setLocalPlayer(playerId);
+      await predictor.setWorld(world(bundle));
+      const start = spawn(bundle);
+      predictor.reconcile(snapshot(-1, start, 100));
+      predictor.setTraceEnabled(true);
+
+      predictor.pushInput(command(0), 101);
+      const afterOneTick = predictor.predictedPosition!;
+      predictor.pushInput(command(1), 101);
+
+      expect(predictor.predictionTick).toBe(101);
+      expect(predictor.pendingInputCount).toBe(1);
+      expect(predictor.predictedPosition).toEqual(afterOneTick);
+
+      predictor.pushInput(command(2), 102);
+      expect(predictor.predictionTick).toBe(102);
+      expect(predictor.pendingInputCount).toBe(2);
+      expect(predictor.predictedPosition!.x - start.x).toBeCloseTo(
+        2 * PLAYER_SPEED * PHYSICS_DT,
+        4,
+      );
+      expect(
+        events
+          .filter(
+            (event): event is Extract<TracePredictionEvent, { kind: "input" }> =>
+              event.kind === "input",
+          )
+          .map(({ outcome }) => outcome),
+      ).toEqual(["predicted", "intent-only", "predicted"]);
     } finally {
       predictor.dispose();
     }
@@ -176,7 +215,8 @@ describe("player-only prediction", () => {
           },
         ]),
       );
-      expect(predictor.pendingInputCount).toBe(2);
+      expect(predictor.pendingInputCount).toBe(0);
+      expect(predictor.predictionTick).toBe(14);
       const afterRepeatedMarker = predictor.predictedPosition;
       predictor.reconcile(snapshot(-1, { ...destination, z: destination.z - 100 }, 13));
       expect(predictor.predictedPosition).toEqual(afterRepeatedMarker);
@@ -190,7 +230,8 @@ describe("player-only prediction", () => {
     const runtime = runtimes(bundle);
     const light = runtimeFor(bundle, runtime, "corridor.light");
     const brush = runtimeBrush(bundle, light);
-    const predictor = new PlayerPredictor(() => {});
+    let nowMs = 0;
+    const predictor = new PlayerPredictor(() => {}, { now: () => nowMs });
     try {
       predictor.setLocalPlayer(playerId);
       await predictor.setWorld(world(bundle, runtime));
@@ -205,21 +246,36 @@ describe("player-only prediction", () => {
           },
         ]),
       );
-      for (let sequence = 0; sequence < 6; sequence += 1)
+      for (let sequence = 0; sequence < 5; sequence += 1) {
+        nowMs += PHYSICS_DT * 1_000;
         predictor.pushInput(command(sequence, { moveX: 0 }));
+      }
+      expect(predictor.predictedBody(light.id)!.position.x).toBeCloseTo(
+        brush.center.x + 5 * PHYSICS_DT,
+        2,
+      );
+      expect(predictor.predictedBodies).toContainEqual(predictor.predictedBody(light.id)!);
+
+      nowMs += PHYSICS_DT * 1_000;
+      predictor.pushInput(command(5, { moveX: 0 }));
       expect(predictor.predictedBody(light.id)!.position.x).toBeCloseTo(
         brush.center.x + 6 * PHYSICS_DT,
         2,
       );
       expect(predictor.predictedBodies).toContainEqual(predictor.predictedBody(light.id)!);
+      nowMs += 0.001;
+      expect(predictor.predictedBodies).not.toContainEqual(predictor.predictedBody(light.id)!);
 
-      for (let sequence = 6; sequence < 18; sequence += 1)
+      for (let sequence = 6; sequence < 18; sequence += 1) {
+        nowMs += PHYSICS_DT * 1_000;
         predictor.pushInput(command(sequence, { moveX: 0 }));
+      }
       expect(predictor.predictedBody(light.id)!.position.x).toBeCloseTo(
         brush.center.x + 6 * PHYSICS_DT,
         2,
       );
       expect(predictor.predictedBody(light.id)!.linearVelocity?.x).toBe(0);
+      expect(predictor.predictedBodies).not.toContainEqual(predictor.predictedBody(light.id)!);
 
       const authority = predictor.predictedBody(light.id)!;
       predictor.reconcile(

@@ -18,6 +18,7 @@ specification tentative.
 - [`0012-disposable-gameplay-datagrams.md`](0012-disposable-gameplay-datagrams.md)
 - [`0013-server-authoritative-prop-proxies.md`](0013-server-authoritative-prop-proxies.md)
 - [`0014-typed-entity-capability-boundary.md`](0014-typed-entity-capability-boundary.md)
+- [`0015-tick-prediction-and-delivery-aware-state.md`](0015-tick-prediction-and-delivery-aware-state.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   GURGUR_TRACE_FORMAT,
   GURGUR_TRACE_FORMAT_VERSION,
+  PROTOCOL_VERSION,
   analyzeGurgurTrace,
   validateGurgurClientTrace,
   validateGurgurTraceStartRequest,
@@ -58,7 +59,7 @@ describe("gurgur network trace format", () => {
       clientAtMs: 100,
       command: {
         type: "input",
-        protocolVersion: 1,
+        protocolVersion: PROTOCOL_VERSION,
         worldEpoch: 1,
         sequence: 10,
         clientTick: 20,

@@ -1,5 +1,5 @@
 import { PROTOCOL_VERSION } from "./config";
-import type { Snapshot } from "./types";
+import type { Snapshot, StateAcknowledgement } from "./types";
 import type { LifecycleMessage, RuntimeEntityRef } from "./world";
 import type { InputCommand } from "./types";
 
@@ -12,7 +12,7 @@ export const SNAPSHOT_PLAYER_BYTES = 36;
 const HEADER_BYTES = SNAPSHOT_HEADER_BYTES;
 const BODY_BYTES = SNAPSHOT_BODY_BYTES;
 const PLAYER_BYTES = SNAPSHOT_PLAYER_BYTES;
-const INPUT_HEADER_BYTES = 8;
+const INPUT_HEADER_BYTES = 16;
 const INPUT_RECORD_BYTES = 46;
 const MAX_INPUT_COMMANDS = 4;
 const LIFECYCLE_HEADER_BYTES = 11;
@@ -20,6 +20,35 @@ const LIFECYCLE_ENTITY_BYTES = 13;
 const PLAYER_ENTITY_INDEX = 0xffff_ffff;
 const UNIT_INT16_SCALE = 32_767;
 const VELOCITY_INT16_SCALE = 256;
+
+export function acknowledgeState(
+  previous: StateAcknowledgement | null,
+  serverTick: number,
+): StateAcknowledgement {
+  if (!previous) return { latestServerTick: serverTick, receivedMask: 1 };
+  if (serverTick > previous.latestServerTick) {
+    const shift = serverTick - previous.latestServerTick;
+    return {
+      latestServerTick: serverTick,
+      receivedMask: shift >= 32 ? 1 : ((previous.receivedMask << shift) | 1) >>> 0,
+    };
+  }
+  const age = previous.latestServerTick - serverTick;
+  return age >= 32
+    ? previous
+    : {
+        latestServerTick: previous.latestServerTick,
+        receivedMask: (previous.receivedMask | (1 << age)) >>> 0,
+      };
+}
+
+export function stateWasAcknowledged(
+  acknowledgement: StateAcknowledgement,
+  serverTick: number,
+): boolean {
+  const age = acknowledgement.latestServerTick - serverTick;
+  return age >= 0 && age < 32 && (acknowledgement.receivedMask & (1 << age)) !== 0;
+}
 
 export function encodeLifecycle(message: LifecycleMessage): ArrayBuffer {
   if (message.created.length > 0xffff || message.removed.length > 0xffff)
@@ -108,11 +137,17 @@ export function decodeLifecycle(bytes: ArrayBuffer | ArrayBufferView): Lifecycle
   };
 }
 
-export function encodeInput(command: InputCommand): ArrayBuffer {
-  return encodeInputBundle([command]);
+export function encodeInput(
+  command: InputCommand,
+  acknowledgement: StateAcknowledgement | null = null,
+): ArrayBuffer {
+  return encodeInputBundle([command], acknowledgement);
 }
 
-export function encodeInputBundle(commands: readonly InputCommand[]): ArrayBuffer {
+export function encodeInputBundle(
+  commands: readonly InputCommand[],
+  acknowledgement: StateAcknowledgement | null = null,
+): ArrayBuffer {
   if (commands.length === 0 || commands.length > MAX_INPUT_COMMANDS)
     throw new Error("input bundle count is invalid");
   const first = commands[0]!;
@@ -130,6 +165,8 @@ export function encodeInputBundle(commands: readonly InputCommand[]): ArrayBuffe
   view.setUint16(1, first.protocolVersion, true);
   view.setUint32(3, first.worldEpoch, true);
   view.setUint8(7, commands.length);
+  view.setUint32(8, acknowledgement?.latestServerTick ?? 0xffff_ffff, true);
+  view.setUint32(12, acknowledgement?.receivedMask ?? 0, true);
   let offset = INPUT_HEADER_BYTES;
   for (const command of commands) {
     view.setUint32(offset, command.sequence, true);
@@ -150,12 +187,19 @@ export function encodeInputBundle(commands: readonly InputCommand[]): ArrayBuffe
 }
 
 export function decodeInput(bytes: ArrayBuffer | ArrayBufferView): InputCommand {
-  const commands = decodeInputBundle(bytes);
+  const commands = decodeInputPacket(bytes).commands;
   if (commands.length !== 1) throw new Error("input packet contains more than one command");
   return commands[0]!;
 }
 
 export function decodeInputBundle(bytes: ArrayBuffer | ArrayBufferView): InputCommand[] {
+  return decodeInputPacket(bytes).commands;
+}
+
+export function decodeInputPacket(bytes: ArrayBuffer | ArrayBufferView): {
+  commands: InputCommand[];
+  acknowledgement: StateAcknowledgement | null;
+} {
   const view =
     bytes instanceof ArrayBuffer
       ? new DataView(bytes)
@@ -198,7 +242,14 @@ export function decodeInputBundle(bytes: ArrayBuffer | ArrayBufferView): InputCo
     });
     offset += INPUT_RECORD_BYTES;
   }
-  return commands;
+  const latestServerTick = view.getUint32(8, true);
+  return {
+    commands,
+    acknowledgement:
+      latestServerTick === 0xffff_ffff
+        ? null
+        : { latestServerTick, receivedMask: view.getUint32(12, true) },
+  };
 }
 
 export function encodeSnapshot(snapshot: Snapshot): ArrayBuffer {

@@ -1,9 +1,7 @@
 import * as THREE from "three/webgpu";
 import {
-  FULL_RATE_BODY_RADIUS_METRES,
   SNAPSHOT_FLAG_GRABBED,
   SNAPSHOT_FLAG_LOCAL_GRAB,
-  STATE_ALWAYS_NEAR_BODY_SLOTS,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
@@ -80,8 +78,6 @@ export function renderableBrushTriangleIndices(
 }
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
-const distance = (left: BodySnapshot["position"], right: BodySnapshot["position"]): number =>
-  Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
 
 type PickupDebugView = {
   group: THREE.Group;
@@ -195,7 +191,6 @@ export class WorldRenderer {
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
-  readonly #physicsPropIds = new Set<string>();
   readonly #materialTextures: Readonly<Record<string, MaterialTextureInfo>>;
   readonly #spriteAssetUrls: Readonly<Record<string, string>>;
   readonly #outlineMaskMaterial = createInteractionOutlineMaskMaterial();
@@ -286,7 +281,6 @@ export class WorldRenderer {
     this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
     this.#cameraCollisionBodies.clear();
-    this.#physicsPropIds.clear();
     this.#predictedBodies.clear();
     this.#interactionCandidate = null;
     this.#heldTarget = null;
@@ -339,7 +333,6 @@ export class WorldRenderer {
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
-      if (entity.kind === "physics-prop") this.#physicsPropIds.add(idKey(runtime.id));
       this.#worldRoot.add(group);
     }
     for (const player of message.runtimeEntities.filter((entity) => entity.kind === "player"))
@@ -534,28 +527,11 @@ export class WorldRenderer {
         const authoritative = authoritativeSample.bodies;
         const current = currentSample.bodies;
         const predictedLocal = this.#predictedLocal.sample(now);
-        const contactProps = predictedLocal
-          ? current
-              .filter(
-                (body) =>
-                  this.#physicsPropIds.has(idKey(body.id)) &&
-                  distance(body.position, predictedLocal.position) <= FULL_RATE_BODY_RADIUS_METRES,
-              )
-              .toSorted(
-                (left, right) =>
-                  distance(left.position, predictedLocal.position) -
-                  distance(right.position, predictedLocal.position),
-              )
-              .slice(0, STATE_ALWAYS_NEAR_BODY_SLOTS)
-          : [];
         const predictedBodies = [...this.#predictedBodies.values()].flatMap((timeline) => {
           const body = timeline.sample(now);
           return body ? [body] : [];
         });
-        const renderedBodies = mergeBodySamples(
-          mergeBodySamples(authoritative, contactProps),
-          predictedBodies,
-        );
+        const renderedBodies = mergeBodySamples(authoritative, predictedBodies);
         this.#apply(renderedBodies);
         let localFallback: BodySnapshot | null = null;
         if (predictedLocal) {
@@ -577,12 +553,6 @@ export class WorldRenderer {
               body: structuredClone(body),
               source: "interpolated",
               comparisonServerTick: presentationTargetTick,
-            });
-          for (const body of contactProps)
-            presented.set(idKey(body.id), {
-              body: structuredClone(body),
-              source: "current-contact",
-              comparisonServerTick: estimatedServerTick,
             });
           for (const body of predictedBodies)
             presented.set(idKey(body.id), {

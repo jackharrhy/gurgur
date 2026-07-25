@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   PROTOCOL_VERSION,
+  acknowledgeState,
   decodeInput,
   decodeInputBundle,
+  decodeInputPacket,
   decodeLifecycle,
   decodeSnapshot,
   encodeInput,
   encodeInputBundle,
   encodeLifecycle,
   encodeSnapshot,
+  stateWasAcknowledged,
   type InputCommand,
   type LifecycleMessage,
 } from "../src";
@@ -149,6 +152,38 @@ describe("input codec", () => {
     );
     expect(decodeInputBundle(encodeInputBundle(commands))).toEqual(commands);
     expect(() => decodeInput(encodeInputBundle(commands))).toThrow("more than one");
+  });
+
+  test("piggybacks a selective current-state acknowledgement", () => {
+    const commands = [0, 1].map(
+      (sequence): InputCommand => ({
+        type: "input",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 7,
+        sequence,
+        clientTick: sequence,
+        moveX: 0,
+        moveZ: 0,
+        lookYaw: 0,
+        lookPitch: 0,
+        buttons: 0,
+        jumpCounter: 0,
+        interactCounter: 0,
+        interactTarget: null,
+        primaryCounter: 0,
+      }),
+    );
+    let acknowledgement = acknowledgeState(null, 20);
+    acknowledgement = acknowledgeState(acknowledgement, 16);
+    acknowledgement = acknowledgeState(acknowledgement, 24);
+    const decoded = decodeInputPacket(encodeInputBundle(commands, acknowledgement));
+
+    expect(decoded.commands).toEqual(commands);
+    expect(decoded.acknowledgement).toEqual(acknowledgement);
+    expect(stateWasAcknowledged(decoded.acknowledgement!, 24)).toBe(true);
+    expect(stateWasAcknowledged(decoded.acknowledgement!, 20)).toBe(true);
+    expect(stateWasAcknowledged(decoded.acknowledgement!, 16)).toBe(true);
+    expect(stateWasAcknowledged(decoded.acknowledgement!, 18)).toBe(false);
   });
 
   test("round-trips an absent interaction target", () => {

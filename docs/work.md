@@ -11,18 +11,24 @@ slice:
 
 - one Bun process owns the persistent 60 Hz Box3D world, serves HTTP and reliable
   WebSocket control, and terminates per-client WebRTC gameplay channels;
-- protocol v1 sends redundant 60 Hz newest-wins intent and 30 Hz self-contained
-  quantized state datagrams; current state is dropped under backpressure rather
-  than queued behind obsolete state;
+- protocol v2 sends redundant 60 Hz newest-wins intent with selective state
+  receipt acknowledgement and 30 Hz self-contained quantized state datagrams;
+  current state is dropped under backpressure rather than queued behind obsolete
+  state;
 - players send intent only. Loose props, stacks, dominoes, constraints, grabs,
   sleep, persistence, and interaction outcomes exist only in the server world;
 - the browser restores and replays only its geometric player controller.
-  Authoritative moving bodies are kinematic collision proxies, never locally
-  simulated rigid-body truth. Prop motion extrapolates for at most 100 ms, while
-  collision expires only after 100 ms of real client time without an update;
-- per-client 1,200-byte interest selection reserves four closest-prop slots,
-  rotates other near/far state, repeats terminal sleep, and includes the local
-  player, twelve nearest remotes, and three rotating far remotes;
+  Prediction history is indexed by a server-disciplined tick estimate, so neither
+  input acknowledgement cadence nor quantized browser timer callbacks can
+  manufacture or remove fixed simulation steps. Authoritative moving bodies are
+  kinematic collision proxies, never locally simulated rigid-body truth. Prop
+  motion extrapolates for at most 100 ms, while collision and current-contact
+  presentation share the same real-time freshness expiry;
+- per-client 1,200-byte interest selection keeps delivery history: interaction
+  and recent-release state uses a fast lane, nearby awake state has a bounded
+  deadline, accumulated importance prevents starvation, and terminal sleep uses
+  a capped lane until selectively acknowledged. Player selection still includes
+  the local player, twelve nearest remotes, and three rotating far remotes;
 - independently sorted per-body tracks accept reordered sparse samples, adapt
   presentation delay from 100 to 250 ms, and cap velocity extrapolation at
   100 ms;
@@ -51,7 +57,9 @@ slice:
   retracts immediately, and recovers outward with held frame-rate-independent
   damping;
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
-  prediction worker, Box3D Wasm, and Three.js presentation.
+  production input scheduler, prediction worker, Box3D Wasm, and Three.js
+  presentation. The required `bun run check` gate includes a long-lived Chromium
+  clock-drift reproduction;
 - the non-production `?debug` view can deliberately record at most 15 seconds of
   side-effect-free 60 Hz authority, exact selected/quantized outbound state,
   input receipt, prediction/reconciliation, clock, and final presentation into
@@ -75,10 +83,11 @@ accepted without a shim or unrelated replacement, as recorded in decision 0012.
 ## Executable evidence
 
 `bun run check` owns formatting, lint, types, unit/contract/simulation tests,
-real-server integration, and shutdown/configuration. The real network matrix
-owns 2, 8, 16, and 32 WebRTC peers, 128 dynamic bodies, Local/Typical/Adverse
-quality paths, a deliberately saturated Constrained path, a five-second outage,
-a receiver stall, and a connected epoch reset.
+real-server integration, shutdown/configuration, and one real Chromium-to-Bun
+prediction clock gate. The real network matrix owns 2, 8, 16, and 32 WebRTC
+peers, 128 dynamic bodies, Local/Typical/Adverse quality paths, a deliberately
+saturated Constrained path, a five-second outage, a receiver stall, and a
+connected epoch reset.
 
 The final 2026-07-23 seeded matrix passed every gate with zero correctness errors,
 zero state drops, zero queued state bytes, and zero contact-proxy extrapolation
@@ -97,6 +106,24 @@ recovered to 0.0001 m prediction correction p95 and 1.0 ms state age p95 in the
 final second. Receiver-stall recovery was 0.535 m and 74.4 ms. Connected reset
 ended on the new epoch at 0.256 m and 68.0 ms, with no stale input, tracks, or
 handles.
+
+The 2026-07-25 protocol-v2 prediction/scheduling replacement passed
+`bun run check`, the real browser grab smoke, the 16-client mixed profile, and
+the 2/8/16/32-peer quick matrix including outage, receiver stall, and connected
+reset. The 16-client mixed run had zero correctness errors, state drops, queued
+bytes, or contact-proxy overruns; its Local/Typical/Adverse prediction p95 was
+0.108/0.084/0.452 m respectively. The focused independently phased no-contact
+regression remains stricter at 0.005/0.01/0.02 m p95/p99/max and the saturated
+grab-carry-turn-release test round-trips production codecs with 32 competing
+bodies.
+
+A later real Chromium trace exposed that its nominal 60 Hz interval produced
+intent at 62.27 Hz while the server held 59.99 Hz. Callback-clocked prediction
+therefore accumulated 63 replay ticks and reached 4.75 m of local presentation
+error. The replacement real-browser gate failed the old path at 1.0833 m after
+6.5 seconds, then passed the server-disciplined path at 60.00 Hz, zero accumulated
+tick lead, and 0.0833 m ordinary moving lead. That Chromium-to-Bun scenario is
+now part of `bun run check`, not an optional smoke invoked only after unit tests.
 
 The map/prediction regressions additionally prove that only the authority moves
 props, latest intent replaces stale queued intent, action counters survive loss,

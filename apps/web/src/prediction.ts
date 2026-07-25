@@ -37,9 +37,11 @@ const PREDICTION_STALL_RESET_TICKS = 30;
 const PREDICTION_DIVERGENCE_BUFFER_METRES = 2;
 const SNAP_CORRECTION_METRES = 0.25;
 const CORRECTION_SECONDS = 0.1;
+const PROXY_FRESHNESS_MS = STATE_EXTRAPOLATION_MAX_TICKS * PHYSICS_DT * 1_000;
 
 const idKey = (id: RuntimeId): string => `${id.index}:${id.generation}`;
 type PredictedFrame = {
+  tick: number;
   command: InputCommand;
   state: PlayerControllerState | null;
 };
@@ -52,7 +54,7 @@ type CollisionProxy = {
   linearVelocity: Vec3;
   angularVelocity: Vec3;
   extrapolationTicksRemaining: number;
-  freshnessTicksRemaining: number;
+  freshUntilMs: number;
   authorityTick: number;
   collisionEnabled: boolean;
   holdWhenStale: boolean;
@@ -62,10 +64,13 @@ export class PlayerPredictor {
   readonly #onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void;
   readonly #onTrace: (event: TracePredictionEvent) => void;
   readonly #wasmUrl: string | null;
+  readonly #now: () => number;
   #physics: PhysicsWorld | null = null;
   #localPlayer: RuntimeId | null = null;
   #state: PlayerControllerState | null = null;
   #history: PredictedFrame[] = [];
+  #predictionTick: number | null = null;
+  #latestIntent: InputCommand | null = null;
   #correction: Vec3 = { x: 0, y: 0, z: 0 };
   #correctionSecondsRemaining = 0;
   #lastReconciliationError = 0;
@@ -86,11 +91,13 @@ export class PlayerPredictor {
     options: {
       wasmUrl?: string;
       onTrace?: (event: TracePredictionEvent) => void;
+      now?: () => number;
     } = {},
   ) {
     this.#onPresentation = onPresentation;
     this.#onTrace = options.onTrace ?? (() => {});
     this.#wasmUrl = options.wasmUrl ?? null;
+    this.#now = options.now ?? (() => performance.now());
   }
 
   setTraceEnabled(enabled: boolean): void {
@@ -102,6 +109,8 @@ export class PlayerPredictor {
     this.#localPlayer = id;
     this.#state = null;
     this.#history = [];
+    this.#predictionTick = null;
+    this.#latestIntent = null;
     this.#latestAuthorityTick = null;
     this.#lastAuthorityPosition = null;
     this.#correction = zero();
@@ -127,6 +136,8 @@ export class PlayerPredictor {
     this.#gravity = Math.max(0, -message.bundle.settings.gravity.y);
     this.#state = null;
     this.#history = [];
+    this.#predictionTick = null;
+    this.#latestIntent = null;
     this.#latestAuthorityTick = null;
     this.#lastAuthorityPosition = null;
     this.#correction = zero();
@@ -200,7 +211,7 @@ export class PlayerPredictor {
         linearVelocity: zero(),
         angularVelocity: zero(),
         extrapolationTicksRemaining: 0,
-        freshnessTicksRemaining: 0,
+        freshUntilMs: 0,
         authorityTick: -1,
         collisionEnabled: true,
         holdWhenStale: false,
@@ -219,60 +230,46 @@ export class PlayerPredictor {
     if (authority) this.reconcile(authority);
   }
 
-  pushInput(command: InputCommand): void {
+  pushInput(command: InputCommand, targetServerTick?: number): void {
     const before = traceControllerState(this.#state);
     if (command.worldEpoch !== this.#worldEpoch) {
       this.#traceInput(command, "rejected-epoch", before);
       return;
     }
-    const frame: PredictedFrame = { command, state: null };
-    this.#history.push(frame);
-    if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
-    if (!this.#physics || !this.#state) {
+    this.#expireCollisionProxies(this.#now());
+    const heldIntent = this.#latestIntent ?? command;
+    this.#latestIntent = command;
+    if (!this.#physics || !this.#state || this.#predictionTick === null) {
       this.#traceInput(command, "queued-without-world", before);
       return;
     }
-    const previous = this.#state;
-    const predicted = stepPlayerController(
-      this.#physics,
-      previous,
-      command,
-      PHYSICS_DT,
-      this.#gravity,
-    );
-    if (
-      !plausiblePredictionStep(previous, predicted) ||
-      !plausibleFromAuthority(
-        this.#lastAuthorityPosition,
-        predicted,
-        this.#history.length,
-        this.#gravity,
-      )
-    ) {
-      this.#history = [];
-      this.#state = {
-        ...previous,
-        yaw: command.lookYaw,
-        lastJumpCounter: command.jumpCounter,
-      };
-      this.#correction = zero();
-      this.#correctionSecondsRemaining = 0;
-      this.#freezeCollisionProxies();
+    const targetTick =
+      targetServerTick === undefined
+        ? this.#predictionTick + 1
+        : Math.max(0, Math.floor(targetServerTick));
+    if (!Number.isSafeInteger(targetTick))
+      throw new Error("prediction target server tick is invalid");
+    if (targetTick <= this.#predictionTick) {
+      this.#state = { ...this.#state, yaw: command.lookYaw };
       this.#updatePlayerProxy();
-      this.#traceInput(command, "implausible-reset", before);
+      this.#traceInput(command, "intent-only", before);
       this.#emit();
       return;
     }
-    this.#state = predicted;
-    this.#updatePlayerProxy();
-    this.#stepPhysics();
-    frame.state = cloneState(this.#state);
-    this.#decayCorrection();
-    this.#traceInput(command, "predicted", before);
+
+    let outcome: TracePredictionInputEvent["outcome"] = "predicted";
+    for (let tick = this.#predictionTick + 1; tick <= targetTick; tick += 1) {
+      const effectiveIntent = tick === targetTick ? command : heldIntent;
+      if (!this.#predictTick(tick, effectiveIntent)) {
+        outcome = "implausible-reset";
+        break;
+      }
+    }
+    this.#traceInput(command, outcome, before);
     this.#emit();
   }
 
-  reconcile(snapshot: Snapshot, reconcilePlayer = true): void {
+  reconcile(snapshot: Snapshot, reconcilePlayer = true, receivedAtMs = this.#now()): void {
     const before = traceControllerState(this.#state);
     const pendingInputCountBefore = this.#history.length;
     if (!this.#physics || !this.#localPlayer) {
@@ -301,7 +298,7 @@ export class PlayerPredictor {
       return;
     }
     if (!reconcilePlayer) {
-      this.#synchronizeCollisionProxies(snapshot);
+      this.#synchronizeCollisionProxies(snapshot, receivedAtMs);
       this.#traceReconciliation(
         snapshot,
         reconcilePlayer,
@@ -314,7 +311,7 @@ export class PlayerPredictor {
       return;
     }
     if (this.#latestAuthorityTick !== null && snapshot.serverTick <= this.#latestAuthorityTick) {
-      this.#synchronizeCollisionProxies(snapshot);
+      this.#synchronizeCollisionProxies(snapshot, receivedAtMs);
       this.#traceReconciliation(
         snapshot,
         reconcilePlayer,
@@ -360,16 +357,16 @@ export class PlayerPredictor {
     );
     this.#lastAuthorityPosition = { ...authority.position };
     if (stalled || teleported) this.#freezeCollisionProxies();
-    this.#synchronizeCollisionProxies(snapshot);
-    this.#history = this.#history.filter(
-      (frame) => frame.command.sequence > authority.lastProcessedInputSequence,
-    );
+    this.#synchronizeCollisionProxies(snapshot, receivedAtMs);
+    if (this.#predictionTick === null) this.#predictionTick = snapshot.serverTick;
+    this.#history = this.#history.filter((frame) => frame.tick > snapshot.serverTick);
     const replayedInputSequences = this.#history.map((frame) => frame.command.sequence);
     this.#state = controllerState(authority);
     this.#updatePlayerProxy();
     let replayReset = false;
     if (stalled || teleported) {
       this.#history = [];
+      this.#predictionTick = snapshot.serverTick;
     } else {
       for (const frame of this.#history) {
         const predicted = stepPlayerController(
@@ -384,12 +381,13 @@ export class PlayerPredictor {
           !plausibleFromAuthority(
             authority.position,
             predicted,
-            this.#history.length,
+            Math.max(1, frame.tick - snapshot.serverTick),
             this.#gravity,
           )
         ) {
           this.#history = [];
           this.#state = controllerState(authority);
+          this.#predictionTick = snapshot.serverTick;
           this.#freezeCollisionProxies();
           this.#updatePlayerProxy();
           replayReset = true;
@@ -397,9 +395,13 @@ export class PlayerPredictor {
         }
         this.#state = predicted;
         this.#updatePlayerProxy();
-        this.#stepPhysics(false);
+        this.#stepPhysics();
         frame.state = cloneState(this.#state);
       }
+      this.#predictionTick = Math.max(
+        snapshot.serverTick,
+        this.#history.at(-1)?.tick ?? snapshot.serverTick,
+      );
     }
 
     if (beforePosition && !teleported) {
@@ -439,6 +441,9 @@ export class PlayerPredictor {
   get pendingInputCount(): number {
     return this.#history.length;
   }
+  get predictionTick(): number | null {
+    return this.#predictionTick;
+  }
   get correctionMagnitude(): number {
     return length(this.#correction);
   }
@@ -462,6 +467,7 @@ export class PlayerPredictor {
   }
   get predictedBodies(): BodySnapshot[] {
     if (!this.#state) return [];
+    this.#expireCollisionProxies(this.#now());
     return [...this.#collisionProxies.values()]
       .filter(
         (proxy) =>
@@ -590,14 +596,17 @@ export class PlayerPredictor {
       linearVelocity: { ...proxy.linearVelocity },
       angularVelocity: { ...proxy.angularVelocity },
       extrapolationTicksRemaining: proxy.extrapolationTicksRemaining,
-      freshnessTicksRemaining: proxy.freshnessTicksRemaining,
+      freshnessTicksRemaining: Math.max(
+        0,
+        Math.ceil((proxy.freshUntilMs - this.#now()) / (PHYSICS_DT * 1_000)),
+      ),
       collisionEnabled: proxy.collisionEnabled,
       holdWhenStale: proxy.holdWhenStale,
       contactPresentation: proxy.contactPresentation,
     }));
   }
 
-  #synchronizeCollisionProxies(snapshot: Snapshot): void {
+  #synchronizeCollisionProxies(snapshot: Snapshot, receivedAtMs: number): void {
     if (!this.#physics) return;
     for (const body of snapshot.bodies) {
       const proxy = this.#collisionProxies.get(idKey(body.id));
@@ -608,7 +617,7 @@ export class PlayerPredictor {
       proxy.linearVelocity = { ...(body.linearVelocity ?? zero()) };
       proxy.angularVelocity = { ...(body.angularVelocity ?? zero()) };
       proxy.extrapolationTicksRemaining = STATE_EXTRAPOLATION_MAX_TICKS;
-      proxy.freshnessTicksRemaining = STATE_EXTRAPOLATION_MAX_TICKS;
+      proxy.freshUntilMs = receivedAtMs + PROXY_FRESHNESS_MS;
       proxy.holdWhenStale = ((body.flags ?? 0) & SNAPSHOT_FLAG_SLEEP) !== 0;
       this.#physics.setBodyTransform(proxy.handle, proxy.position, proxy.rotation);
       this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
@@ -619,28 +628,15 @@ export class PlayerPredictor {
     }
   }
 
-  #stepPhysics(consumeFreshness = true): void {
+  #stepPhysics(): void {
     if (!this.#physics) return;
     for (const proxy of this.#collisionProxies.values()) {
-      const freshnessExpired = consumeFreshness && proxy.freshnessTicksRemaining <= 0;
-      if (consumeFreshness && proxy.freshnessTicksRemaining > 0) {
-        proxy.freshnessTicksRemaining -= 1;
-      }
       if (proxy.extrapolationTicksRemaining > 0) {
         proxy.extrapolationTicksRemaining -= 1;
       } else {
         proxy.linearVelocity = zero();
         proxy.angularVelocity = zero();
         this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);
-      }
-      if (
-        freshnessExpired &&
-        proxy.contactPresentation &&
-        !proxy.holdWhenStale &&
-        proxy.collisionEnabled
-      ) {
-        this.#physics.setBodyEnabled(proxy.handle, false);
-        proxy.collisionEnabled = false;
       }
     }
     this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
@@ -653,11 +649,69 @@ export class PlayerPredictor {
     }
   }
 
+  #expireCollisionProxies(nowMs: number): void {
+    if (!this.#physics) return;
+    for (const proxy of this.#collisionProxies.values()) {
+      if (
+        nowMs <= proxy.freshUntilMs + 0.000001 ||
+        !proxy.contactPresentation ||
+        proxy.holdWhenStale ||
+        !proxy.collisionEnabled
+      )
+        continue;
+      this.#physics.setBodyEnabled(proxy.handle, false);
+      proxy.collisionEnabled = false;
+    }
+  }
+
+  #predictTick(tick: number, command: InputCommand): boolean {
+    if (!this.#physics || !this.#state) return false;
+    const frame: PredictedFrame = { tick, command, state: null };
+    this.#history.push(frame);
+    if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
+    this.#predictionTick = tick;
+    const previous = this.#state;
+    const predicted = stepPlayerController(
+      this.#physics,
+      previous,
+      command,
+      PHYSICS_DT,
+      this.#gravity,
+    );
+    if (
+      !plausiblePredictionStep(previous, predicted) ||
+      !plausibleFromAuthority(
+        this.#lastAuthorityPosition,
+        predicted,
+        Math.max(1, tick - (this.#latestAuthorityTick ?? tick)),
+        this.#gravity,
+      )
+    ) {
+      this.#history = [];
+      this.#state = {
+        ...previous,
+        yaw: command.lookYaw,
+        lastJumpCounter: command.jumpCounter,
+      };
+      this.#correction = zero();
+      this.#correctionSecondsRemaining = 0;
+      this.#freezeCollisionProxies();
+      this.#updatePlayerProxy();
+      return false;
+    }
+    this.#state = predicted;
+    this.#updatePlayerProxy();
+    this.#stepPhysics();
+    frame.state = cloneState(this.#state);
+    this.#decayCorrection();
+    return true;
+  }
+
   #freezeCollisionProxies(): void {
     if (!this.#physics) return;
     for (const proxy of this.#collisionProxies.values()) {
       proxy.extrapolationTicksRemaining = 0;
-      proxy.freshnessTicksRemaining = 0;
+      proxy.freshUntilMs = 0;
       proxy.linearVelocity = zero();
       proxy.angularVelocity = zero();
       this.#physics.setBodyVelocity(proxy.handle, proxy.linearVelocity, proxy.angularVelocity);

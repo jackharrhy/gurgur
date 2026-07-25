@@ -14,7 +14,7 @@
     "lint": "oxlint . --deny-warnings --report-unused-disable-directives",
     "test": "bun test apps packages tools content",
     "typecheck": "tsc --noEmit",
-    "check": "oxfmt --check . && bun run lint && bun run typecheck && bun run test",
+    "check": "oxfmt --check . && bun run lint && bun run typecheck && bun run test && bun run test:browser -- drift",
     "content": "bun scripts/cli.ts content",
     "test:browser": "bun scripts/cli.ts test-browser",
     "test:network": "bun scripts/cli.ts test-network",
