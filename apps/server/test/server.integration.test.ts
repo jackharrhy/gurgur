@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RTCPeerConnection, type RTCDataChannel } from "werift";
 import {
+  GURGUR_TRACE_FORMAT,
+  GURGUR_TRACE_FORMAT_VERSION,
   PROTOCOL_VERSION,
   SNAPSHOT_TAG,
   STATE_DATAGRAM_TARGET_BYTES,
@@ -12,6 +14,8 @@ import {
   encodeInput,
   encodeSnapshot,
   type PhysicsDebugFrame,
+  type GurgurClientTrace,
+  type GurgurNetworkTrace,
   type RuntimeEntityRef,
   type Snapshot,
   type WelcomeMessage,
@@ -22,6 +26,76 @@ import { createGurgurServer } from "../src/server";
 import { guardIceUdpSockets } from "../src/rtc";
 
 describe("authoritative server", () => {
+  test("records and returns a joined dev trace while the disabled route stays absent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "gurgur-server-trace-"));
+    const server = await createGurgurServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      databasePath: join(directory, "world.sqlite"),
+    });
+    let client: TestClient | null = null;
+    try {
+      const baseUrl = `http://127.0.0.1:${server.port}`;
+      const capability = await fetch(`${baseUrl}/debug/network-trace`);
+      expect(capability.ok).toBeTrue();
+      expect(await capability.json()).toMatchObject({
+        enabled: true,
+        format: GURGUR_TRACE_FORMAT,
+        formatVersion: GURGUR_TRACE_FORMAT_VERSION,
+      });
+      client = await connectClient(`ws://127.0.0.1:${server.port}/game`);
+      const startResponse = await fetch(`${baseUrl}/debug/network-trace/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          playerId: client.welcome.playerId,
+          worldEpoch: client.welcome.worldEpoch,
+          mapRevision: client.welcome.mapRevision,
+        }),
+      });
+      expect(startResponse.ok).toBeTrue();
+      const started = (await startResponse.json()) as { captureId: string };
+      await waitForSnapshot(
+        client.stateChannel,
+        (snapshot) => snapshot.serverTick > client!.snapshot.serverTick + 2,
+      );
+      const stopResponse = await fetch(`${baseUrl}/debug/network-trace/stop`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          captureId: started.captureId,
+          client: emptyClientTrace(started.captureId),
+        }),
+      });
+      expect(stopResponse.ok).toBeTrue();
+      expect(stopResponse.headers.get("content-disposition")).toContain(".gurgur-trace.json");
+      const trace = (await stopResponse.json()) as GurgurNetworkTrace;
+      expect(trace.format).toBe(GURGUR_TRACE_FORMAT);
+      expect(trace.session.playerId).toEqual(client.welcome.playerId);
+      expect(trace.server.frames.length).toBeGreaterThan(0);
+      expect(trace.server.outboundSnapshots.some((record) => record.status === "sent")).toBeTrue();
+      expect(trace.analysis.analysisVersion).toBe(1);
+    } finally {
+      if (client) await closeClient(client);
+      server.stop();
+    }
+
+    const disabled = await createGurgurServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      databasePath: join(directory, "disabled.sqlite"),
+      networkTraceEnabled: false,
+    });
+    try {
+      expect((await fetch(`http://127.0.0.1:${disabled.port}/debug/network-trace`)).status).toBe(
+        404,
+      );
+    } finally {
+      disabled.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("serves health and streams advancing binary snapshots", async () => {
     const directory = await mkdtemp(join(tmpdir(), "gurgur-server-"));
     const server = await createGurgurServer({
@@ -363,6 +437,27 @@ type TestClient = {
   world: WorldManifestMessage;
   snapshot: Snapshot;
 };
+
+function emptyClientTrace(captureId: string): GurgurClientTrace {
+  return {
+    format: GURGUR_TRACE_FORMAT,
+    formatVersion: GURGUR_TRACE_FORMAT_VERSION,
+    captureId,
+    clientStartedAt: "2026-01-01T00:00:00.000Z",
+    clientEndedAt: "2026-01-01T00:00:01.000Z",
+    clientTimeOriginUnixMs: 1_000,
+    pageUrl: "http://localhost/?debug",
+    userAgent: "test",
+    inputs: [],
+    snapshots: [],
+    prediction: [],
+    presentation: [],
+    clocks: [],
+    network: [],
+    markers: [],
+    truncatedStreams: [],
+  };
+}
 
 async function closeClient(client: TestClient): Promise<void> {
   await client.peer.close();

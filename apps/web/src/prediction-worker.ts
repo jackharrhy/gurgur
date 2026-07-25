@@ -1,6 +1,12 @@
 /// <reference lib="webworker" />
 
-import type { BodySnapshot, InputCommand, RuntimeId, Snapshot } from "@gurgur/engine";
+import type {
+  BodySnapshot,
+  InputCommand,
+  RuntimeId,
+  Snapshot,
+  TracePredictionEvent,
+} from "@gurgur/engine";
 import type { WorldMessage } from "@gurgur/game";
 import { PlayerPredictor } from "./prediction";
 
@@ -8,7 +14,8 @@ type WorkerRequest =
   | { type: "local-player"; id: RuntimeId }
   | { type: "world"; message: WorldMessage }
   | { type: "input"; command: InputCommand }
-  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean };
+  | { type: "snapshot"; snapshot: Snapshot; reconcilePlayer: boolean }
+  | { type: "trace-enabled"; enabled: boolean; requestId: number };
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let predictor: PlayerPredictor;
@@ -22,7 +29,10 @@ predictor = new PlayerPredictor(
       correctionMagnitude: predictor?.correctionMagnitude ?? 0,
     });
   },
-  { wasmUrl: "/box3d.wasm" },
+  {
+    wasmUrl: "/box3d.wasm",
+    onTrace: (event: TracePredictionEvent) => scope.postMessage({ type: "trace", event }),
+  },
 );
 
 scope.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
@@ -34,5 +44,10 @@ scope.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
     });
   } else if (message.type === "input")
     void worldBarrier.then(() => predictor.pushInput(message.command));
-  else void worldBarrier.then(() => predictor.reconcile(message.snapshot, message.reconcilePlayer));
+  else if (message.type === "snapshot")
+    void worldBarrier.then(() => predictor.reconcile(message.snapshot, message.reconcilePlayer));
+  else {
+    predictor.setTraceEnabled(message.enabled);
+    scope.postMessage({ type: "trace-state", requestId: message.requestId });
+  }
 });

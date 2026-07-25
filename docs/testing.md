@@ -90,6 +90,19 @@ identity, input acknowledgement, state age, prediction correction, shaped drops,
 queue high-water marks, server state drops, fixed-tick cost, and contact-proxy
 extrapolation-cap overruns.
 
+For an interactive reproduction, open a development client with `?debug`, press
+**Record trace**, reproduce the problem for no more than 15 seconds, and press
+**Stop and download**. This produces one versioned `.gurgur-trace.json`; it does
+not write server files or run continuously. The schema is
+[`gurgur-trace-v1.schema.json`](gurgur-trace-v1.schema.json).
+
+Focused tests validate the schema envelope, stream limits, world-change
+termination, input deduplication metadata, tick interpolation, prediction trace
+events, embedded analysis, joined HTTP response, download filename, and disabled
+route. Browser smoke requires the idle Record control in the existing debug
+scenario but never starts a trace. Real traces are deliberate user artifacts,
+not routine test output.
+
 ## Profiles
 
 | Profile     |    RTT | Jitter | Loss |  Bandwidth |

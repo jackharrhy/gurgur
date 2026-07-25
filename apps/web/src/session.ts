@@ -25,7 +25,8 @@ export type SessionCallbacks = {
   welcome(message: WelcomeMessage): void;
   world(message: WorldMessage): void;
   lifecycle(message: LifecycleMessage): void;
-  snapshot(snapshot: Snapshot, latestInFrame: boolean): void;
+  snapshotReceived?(snapshot: Snapshot, receivedAtMs: number): void;
+  snapshot(snapshot: Snapshot, latestInFrame: boolean, receivedAtMs: number): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
   transport?(state: "negotiating" | "webrtc" | "disconnected"): void;
@@ -50,6 +51,7 @@ export class GameSession {
   #worldLoadGeneration = 0;
   #loadedWorldEpoch: number | null = null;
   #snapshotQueue: Snapshot[] = [];
+  readonly #snapshotReceivedAt = new Map<string, number>();
   #pendingLifecycles: LifecycleMessage[] = [];
   #snapshotFrame: number | null = null;
   #peerConnection: RTCPeerConnection | null = null;
@@ -141,6 +143,7 @@ export class GameSession {
         if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
         this.#snapshotFrame = null;
         this.#snapshotQueue = [];
+        this.#snapshotReceivedAt.clear();
         this.#pendingLifecycles = [];
         void this.#loadWorld(message, socket);
       } else if (message.type === "pong") {
@@ -168,6 +171,9 @@ export class GameSession {
       else if (message.worldEpoch === this.#worldEpoch) this.#pendingLifecycles.push(message);
     } else {
       const snapshot = decodeSnapshot(data);
+      const receivedAtMs = performance.now();
+      this.#snapshotReceivedAt.set(snapshotKey(snapshot), receivedAtMs);
+      this.#callbacks.snapshotReceived?.(snapshot, receivedAtMs);
       if (snapshot.worldEpoch === this.#loadedWorldEpoch) this.#queueSnapshot(snapshot);
       else if (snapshot.worldEpoch === this.#worldEpoch)
         retainSnapshot(this.#snapshotQueue, snapshot);
@@ -181,6 +187,7 @@ export class GameSession {
     for (const timer of this.#timers) clearTimeout(timer);
     this.#timers.clear();
     if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
+    this.#snapshotReceivedAt.clear();
     this.#closeRtc();
     this.#socket?.close(1000, "page closed");
   }
@@ -354,11 +361,19 @@ export class GameSession {
       this.#snapshotQueue = [];
       for (const [index, state] of queued.entries()) {
         if (state.worldEpoch === this.#loadedWorldEpoch) {
-          this.#callbacks.snapshot(state, index === queued.length - 1);
+          const identity = snapshotKey(state);
+          const receivedAtMs = this.#snapshotReceivedAt.get(identity) ?? performance.now();
+          this.#snapshotReceivedAt.delete(identity);
+          this.#callbacks.snapshot(state, index === queued.length - 1, receivedAtMs);
         }
       }
+      this.#snapshotReceivedAt.clear();
     });
   }
+}
+
+function snapshotKey(snapshot: Pick<Snapshot, "worldEpoch" | "serverTick">): string {
+  return `${snapshot.worldEpoch}:${snapshot.serverTick}`;
 }
 
 export function retainSnapshot(queue: Snapshot[], snapshot: Snapshot): void {

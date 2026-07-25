@@ -2,7 +2,7 @@
 
 This is the only status document. Canonical behavior lives in the sibling docs.
 
-Updated: 2026-07-24.
+Updated: 2026-07-25.
 
 ## Current state
 
@@ -52,6 +52,11 @@ slice:
   damping;
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
   prediction worker, Box3D Wasm, and Three.js presentation.
+- the non-production `?debug` view can deliberately record at most 15 seconds of
+  side-effect-free 60 Hz authority, exact selected/quantized outbound state,
+  input receipt, prediction/reconciliation, clock, and final presentation into
+  one schema-versioned `.gurgur-trace.json` with embedded aligned analysis;
+  production exposes no capture capability or mutation routes.
 
 The repository is consolidated around `apps/server`, `apps/web`,
 `packages/engine`, and `packages/game`. The typed catalog compiles mapper

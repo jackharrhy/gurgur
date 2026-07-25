@@ -165,6 +165,12 @@ try {
   await page.locator('body[data-player-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-prediction-ready="true"]').waitFor({ timeout: 5_000 });
   await page.locator('body[data-input-ready="true"]').waitFor({ timeout: 5_000 });
+  if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1") {
+    const traceButton = page.locator("#network-trace-controls button");
+    await traceButton.waitFor({ timeout: 5_000 });
+    if ((await traceButton.textContent()) !== "Record trace" || !(await traceButton.isEnabled()))
+      throw new Error("development network trace control is not ready");
+  }
   const viewGate = await page.evaluate(() => {
     const state = (
       window as unknown as {
@@ -244,10 +250,11 @@ try {
       reticle: main ? getComputedStyle(main, "::after").content : null,
     };
   });
+  const expectedControls = scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1" ? 1 : 0;
   if (
     shell.mainChildren !== 1 ||
     shell.canvasChildren !== 1 ||
-    shell.controls !== 0 ||
+    shell.controls !== expectedControls ||
     !shell.canvasFocused ||
     shell.canvasBorderWidth !== "0px" ||
     shell.canvasOutlineStyle !== "none" ||

@@ -12,6 +12,8 @@ import {
   type PhysicsDebugPrimitive,
   type RuntimeEntityRef,
   type RuntimeId,
+  type TracePresentationFrame,
+  type TracePresentedBody,
   type Vec3,
 } from "@gurgur/engine";
 import { PLAYER_GRAB_REACH, type WorldMessage } from "@gurgur/game";
@@ -218,6 +220,7 @@ export class WorldRenderer {
   readonly #predictedBodies = new Map<string, PredictedPoseTimeline>();
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
   readonly #onBodyPresentation: (body: BodySnapshot) => void;
+  #traceSink: ((frame: TracePresentationFrame) => void) | null = null;
   #viewYaw = 0;
   #viewPitch = -0.18;
   #cameraFollowing = false;
@@ -408,6 +411,10 @@ export class WorldRenderer {
     this.#viewPitch = pitch;
   }
 
+  setTraceSink(sink: ((frame: TracePresentationFrame) => void) | null): void {
+    this.#traceSink = sink;
+  }
+
   interactionTarget(): RuntimeId | null {
     const playerPosition = this.#pickupPlayerPosition;
     if (!playerPosition) return null;
@@ -521,10 +528,11 @@ export class WorldRenderer {
       if (latest !== null) {
         const now = performance.now();
         const estimatedServerTick = this.#history.serverTickAt(now);
-        const authoritative = this.#history.sample(
-          estimatedServerTick - this.#history.interpolationDelayTicks,
-        );
-        const current = this.#history.sample(estimatedServerTick);
+        const presentationTargetTick = estimatedServerTick - this.#history.interpolationDelayTicks;
+        const authoritativeSample = this.#history.sampleWithMetadata(presentationTargetTick);
+        const currentSample = this.#history.sampleWithMetadata(estimatedServerTick);
+        const authoritative = authoritativeSample.bodies;
+        const current = currentSample.bodies;
         const predictedLocal = this.#predictedLocal.sample(now);
         const contactProps = predictedLocal
           ? current
@@ -544,9 +552,12 @@ export class WorldRenderer {
           const body = timeline.sample(now);
           return body ? [body] : [];
         });
-        this.#apply(
-          mergeBodySamples(mergeBodySamples(authoritative, contactProps), predictedBodies),
+        const renderedBodies = mergeBodySamples(
+          mergeBodySamples(authoritative, contactProps),
+          predictedBodies,
         );
+        this.#apply(renderedBodies);
+        let localFallback: BodySnapshot | null = null;
         if (predictedLocal) {
           this.#apply([predictedLocal]);
           this.#follow(predictedLocal, now);
@@ -554,9 +565,55 @@ export class WorldRenderer {
         } else if (this.#localPlayer) {
           const local = current.find((body) => idKey(body.id) === idKey(this.#localPlayer!));
           if (local) {
+            localFallback = local;
             this.#apply([local]);
             this.#follow(local, now);
           }
+        }
+        if (this.#traceSink) {
+          const presented = new Map<string, TracePresentedBody>();
+          for (const body of authoritative)
+            presented.set(idKey(body.id), {
+              body: structuredClone(body),
+              source: "interpolated",
+              comparisonServerTick: presentationTargetTick,
+            });
+          for (const body of contactProps)
+            presented.set(idKey(body.id), {
+              body: structuredClone(body),
+              source: "current-contact",
+              comparisonServerTick: estimatedServerTick,
+            });
+          for (const body of predictedBodies)
+            presented.set(idKey(body.id), {
+              body: structuredClone(body),
+              source: "predicted-proxy",
+              comparisonServerTick: estimatedServerTick,
+            });
+          if (predictedLocal)
+            presented.set(idKey(predictedLocal.id), {
+              body: structuredClone(predictedLocal),
+              source: "predicted-local",
+              comparisonServerTick: estimatedServerTick,
+            });
+          else if (localFallback)
+            presented.set(idKey(localFallback.id), {
+              body: structuredClone(localFallback),
+              source: "current-local-fallback",
+              comparisonServerTick: estimatedServerTick,
+            });
+          this.#traceSink({
+            clientAtMs: now,
+            latestSnapshotTick: latest,
+            estimatedServerTick,
+            interpolationDelayTicks: this.#history.interpolationDelayTicks,
+            presentationTargetTick,
+            extrapolatedBodyIds: [
+              ...authoritativeSample.extrapolatedBodyIds,
+              ...currentSample.extrapolatedBodyIds,
+            ],
+            bodies: [...presented.values()],
+          });
         }
       }
       this.#pipeline.render();

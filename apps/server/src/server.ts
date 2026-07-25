@@ -24,8 +24,13 @@ import {
   STATE_MAX_RETRANSMITS,
   decodeInputBundle,
   decodeClientControl,
+  decodeSnapshot,
   encodeLifecycle,
   encodeSnapshot,
+  GURGUR_TRACE_MAX_UPLOAD_BYTES,
+  gurgurTraceCapabilities,
+  validateGurgurTraceStartRequest,
+  validateGurgurTraceStopRequest,
   type InputCommand,
   type RuntimeId,
   type LifecycleMessage,
@@ -45,6 +50,7 @@ import {
 } from "./material-textures";
 import { WorldStore } from "./store";
 import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
+import { NetworkTraceCapture, TraceConflictError, TraceNotFoundError } from "./network-trace";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -102,6 +108,7 @@ export async function createGurgurServer(
     rtcPortRange?: [number, number];
     rtcIceServers?: RTCIceServer[];
     worldBundle?: WorldBundle;
+    networkTraceEnabled?: boolean;
   } = {},
 ): Promise<GurgurServer> {
   if (
@@ -152,6 +159,9 @@ export async function createGurgurServer(
   );
   const clients = new Set<Bun.ServerWebSocket<ClientData>>();
   const sessions = new Map<string, SessionRecord>();
+  const networkTraceEnabled =
+    Bun.env.NODE_ENV !== "production" && options.networkTraceEnabled !== false;
+  const networkTrace = new NetworkTraceCapture();
   let shuttingDown = false;
   const metrics = (): ServerMetrics => {
     const active = [...clients].filter((socket) => socket.data.playerId);
@@ -180,25 +190,60 @@ export async function createGurgurServer(
       const playerId = socket.data.playerId;
       if (!playerId) continue;
       const channel = socket.data.stateChannel;
-      if (channel?.readyState !== "open") continue;
-      if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
-        socket.data.droppedStatePackets += 1;
+      const tracingPlayer = sameId(networkTrace.activePlayerId, playerId);
+      if (channel?.readyState !== "open") {
+        if (tracingPlayer)
+          networkTrace.recordOutbound(playerId, {
+            serverTick: snapshot.serverTick,
+            status: "transport-unavailable",
+            bufferedAmount: channel?.bufferedAmount ?? 0,
+            packetBytes: null,
+            selected: null,
+            wire: null,
+          });
         continue;
       }
+      if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
+        socket.data.droppedStatePackets += 1;
+        if (tracingPlayer)
+          networkTrace.recordOutbound(playerId, {
+            serverTick: snapshot.serverTick,
+            status: "dropped-backpressure",
+            bufferedAmount: channel.bufferedAmount,
+            packetBytes: null,
+            selected: null,
+            wire: null,
+          });
+        continue;
+      }
+      const selected = snapshotForPlayer(
+        snapshot,
+        game.playerPosition(playerId),
+        playerId,
+        game.grabbedTarget(playerId),
+      );
+      const packet = encodeSnapshot(selected);
       try {
-        channel.send(
-          Buffer.from(
-            encodeSnapshot(
-              snapshotForPlayer(
-                snapshot,
-                game.playerPosition(playerId),
-                playerId,
-                game.grabbedTarget(playerId),
-              ),
-            ),
-          ),
-        );
+        channel.send(Buffer.from(packet));
+        if (tracingPlayer)
+          networkTrace.recordOutbound(playerId, {
+            serverTick: snapshot.serverTick,
+            status: "sent",
+            bufferedAmount: channel.bufferedAmount,
+            packetBytes: packet.byteLength,
+            selected,
+            wire: decodeSnapshot(packet),
+          });
       } catch {
+        if (tracingPlayer)
+          networkTrace.recordOutbound(playerId, {
+            serverTick: snapshot.serverTick,
+            status: "send-failed",
+            bufferedAmount: channel.bufferedAmount,
+            packetBytes: packet.byteLength,
+            selected,
+            wire: null,
+          });
         socket.close(1013, "state transport failed");
       }
     }
@@ -242,9 +287,62 @@ export async function createGurgurServer(
       },
     });
   };
+  const traceUnavailable = (): Response => new Response("not found", { status: 404 });
+  const traceCapabilityResponse = (): Response =>
+    networkTraceEnabled
+      ? Response.json(gurgurTraceCapabilities(), {
+          headers: { "cache-control": "no-store" },
+        })
+      : traceUnavailable();
+  const traceStartResponse = async (request: Request): Promise<Response> => {
+    if (!networkTraceEnabled) return traceUnavailable();
+    if (!sameOrigin(request)) return new Response("origin forbidden", { status: 403 });
+    try {
+      const start = validateGurgurTraceStartRequest(await boundedRequestJson(request));
+      if (start.worldEpoch !== game.worldEpoch || start.mapRevision !== game.mapRevision)
+        return new Response("trace world does not match server", { status: 409 });
+      const connected = [...clients].some(
+        (socket) => socket.data.playerId && sameId(socket.data.playerId, start.playerId),
+      );
+      if (!connected) return new Response("trace player is not connected", { status: 409 });
+      const response = networkTrace.start(
+        start,
+        game.serverTick,
+        process.env.BUILD_REVISION ?? "working-tree",
+      );
+      game.setTraceSink((frame) => {
+        if (!networkTrace.recordFrame(frame)) game.setTraceSink(null);
+      });
+      return Response.json(response, { headers: { "cache-control": "no-store" } });
+    } catch (error) {
+      if (error instanceof TraceConflictError) return new Response(error.message, { status: 409 });
+      return traceRequestError(error);
+    }
+  };
+  const traceStopResponse = async (request: Request): Promise<Response> => {
+    if (!networkTraceEnabled) return traceUnavailable();
+    if (!sameOrigin(request)) return new Response("origin forbidden", { status: 403 });
+    try {
+      const stop = validateGurgurTraceStopRequest(await boundedRequestJson(request));
+      const trace = networkTrace.stop(stop.captureId, stop.client);
+      game.setTraceSink(null);
+      return new Response(JSON.stringify(trace), {
+        headers: {
+          "cache-control": "no-store",
+          "content-disposition": `attachment; filename="${trace.capture.id}.gurgur-trace.json"`,
+          "content-type": "application/json",
+        },
+      });
+    } catch (error) {
+      if (error instanceof TraceNotFoundError)
+        return new Response("network trace not found", { status: 404 });
+      return traceRequestError(error);
+    }
+  };
   const acceptInputPacket = (
     socket: Bun.ServerWebSocket<ClientData>,
     packet: ArrayBuffer | ArrayBufferView,
+    transport: "websocket" | "webrtc",
   ): boolean => {
     let commands: InputCommand[];
     try {
@@ -254,8 +352,17 @@ export async function createGurgurServer(
     }
     if (!socket.data.playerId) return false;
     for (const command of commands) {
-      if (!validInputCommand(command) || !game.acceptInput(socket.data.playerId, command))
-        return false;
+      const valid = validInputCommand(command);
+      const accepted = valid && game.acceptInput(socket.data.playerId, command);
+      if (valid)
+        networkTrace.recordInput(
+          socket.data.playerId,
+          game.serverTick,
+          transport,
+          command,
+          accepted,
+        );
+      if (!accepted) return false;
     }
     return true;
   };
@@ -319,7 +426,7 @@ export async function createGurgurServer(
       if (channel.label === "gurgur-input-v1" && !socket.data.inputChannel) {
         socket.data.inputChannel = channel;
         channel.onMessage.subscribe((packet) => {
-          if (typeof packet === "string" || !acceptInputPacket(socket, packet))
+          if (typeof packet === "string" || !acceptInputPacket(socket, packet, "webrtc"))
             socket.close(1007, "invalid input datagram");
         });
         return;
@@ -378,6 +485,9 @@ export async function createGurgurServer(
       }),
       "/metrics": { GET: () => Response.json(metrics()) },
       "/debug/physics": { GET: physicsDebugResponse },
+      "/debug/network-trace": { GET: traceCapabilityResponse },
+      "/debug/network-trace/start": { POST: traceStartResponse },
+      "/debug/network-trace/stop": { POST: traceStopResponse },
       "/box3d.wasm": new Response(box3dWasm, {
         headers: { "content-type": "application/wasm" },
       }),
@@ -652,7 +762,7 @@ export async function createGurgurServer(
           socket.close(1007, "invalid control packet");
           return;
         }
-        if (!acceptInputPacket(socket, message)) {
+        if (!acceptInputPacket(socket, message, "websocket")) {
           socket.close(1007, "invalid input packet");
         }
       },
@@ -692,6 +802,8 @@ export async function createGurgurServer(
         closeRtc(socket);
         socket.close(1001, "server stopping");
       }
+      game.setTraceSink(null);
+      networkTrace.cancel();
       game.stop();
       store.close();
       server.stop(true);
@@ -744,6 +856,39 @@ function validInputCommand(input: InputCommand): boolean {
   )
     return false;
   return true;
+}
+
+class TraceRequestTooLargeError extends Error {}
+
+async function boundedRequestJson(request: Request): Promise<unknown> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > GURGUR_TRACE_MAX_UPLOAD_BYTES)
+    throw new TraceRequestTooLargeError();
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > GURGUR_TRACE_MAX_UPLOAD_BYTES) throw new TraceRequestTooLargeError();
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function traceRequestError(error: unknown): Response {
+  if (error instanceof TraceRequestTooLargeError)
+    return new Response("network trace upload is too large", { status: 413 });
+  return new Response(error instanceof Error ? error.message : "invalid network trace request", {
+    status: 400,
+  });
+}
+
+function sameOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  return origin === null || origin === new URL(request.url).origin;
+}
+
+function sameId(left: RuntimeId | null, right: RuntimeId | null): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.index === right.index &&
+    left.generation === right.generation
+  );
 }
 
 export function snapshotForPlayer(

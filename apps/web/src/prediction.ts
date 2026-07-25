@@ -12,6 +12,11 @@ import {
   type Quat,
   type RuntimeId,
   type Snapshot,
+  type TraceControllerState,
+  type TracePredictionEvent,
+  type TracePredictionInputEvent,
+  type TracePredictionProxy,
+  type TraceReconciliationOutcome,
   type Vec3,
 } from "@gurgur/engine";
 import {
@@ -55,6 +60,7 @@ type CollisionProxy = {
 
 export class PlayerPredictor {
   readonly #onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void;
+  readonly #onTrace: (event: TracePredictionEvent) => void;
   readonly #wasmUrl: string | null;
   #physics: PhysicsWorld | null = null;
   #localPlayer: RuntimeId | null = null;
@@ -73,13 +79,22 @@ export class PlayerPredictor {
   #playerProxy: RuntimeId | null = null;
   #playerProxyCrouched = false;
   #gravity = PLAYER_GRAVITY;
+  #traceEnabled = false;
 
   constructor(
     onPresentation: (body: BodySnapshot | null, bodies: BodySnapshot[]) => void,
-    options: { wasmUrl?: string } = {},
+    options: {
+      wasmUrl?: string;
+      onTrace?: (event: TracePredictionEvent) => void;
+    } = {},
   ) {
     this.#onPresentation = onPresentation;
+    this.#onTrace = options.onTrace ?? (() => {});
     this.#wasmUrl = options.wasmUrl ?? null;
+  }
+
+  setTraceEnabled(enabled: boolean): void {
+    this.#traceEnabled = enabled;
   }
 
   setLocalPlayer(id: RuntimeId): void {
@@ -205,11 +220,18 @@ export class PlayerPredictor {
   }
 
   pushInput(command: InputCommand): void {
-    if (command.worldEpoch !== this.#worldEpoch) return;
+    const before = traceControllerState(this.#state);
+    if (command.worldEpoch !== this.#worldEpoch) {
+      this.#traceInput(command, "rejected-epoch", before);
+      return;
+    }
     const frame: PredictedFrame = { command, state: null };
     this.#history.push(frame);
     if (this.#history.length > MAX_INPUT_HISTORY) this.#history.shift();
-    if (!this.#physics || !this.#state) return;
+    if (!this.#physics || !this.#state) {
+      this.#traceInput(command, "queued-without-world", before);
+      return;
+    }
     const previous = this.#state;
     const predicted = stepPlayerController(
       this.#physics,
@@ -237,6 +259,7 @@ export class PlayerPredictor {
       this.#correctionSecondsRemaining = 0;
       this.#freezeCollisionProxies();
       this.#updatePlayerProxy();
+      this.#traceInput(command, "implausible-reset", before);
       this.#emit();
       return;
     }
@@ -245,27 +268,79 @@ export class PlayerPredictor {
     this.#stepPhysics();
     frame.state = cloneState(this.#state);
     this.#decayCorrection();
+    this.#traceInput(command, "predicted", before);
     this.#emit();
   }
 
   reconcile(snapshot: Snapshot, reconcilePlayer = true): void {
+    const before = traceControllerState(this.#state);
+    const pendingInputCountBefore = this.#history.length;
     if (!this.#physics || !this.#localPlayer) {
       this.#pendingAuthority = snapshot;
+      this.#traceReconciliation(
+        snapshot,
+        reconcilePlayer,
+        "pending-world",
+        null,
+        before,
+        pendingInputCountBefore,
+        [],
+      );
       return;
     }
-    if (snapshot.worldEpoch !== this.#worldEpoch) return;
+    if (snapshot.worldEpoch !== this.#worldEpoch) {
+      this.#traceReconciliation(
+        snapshot,
+        reconcilePlayer,
+        "wrong-epoch",
+        null,
+        before,
+        pendingInputCountBefore,
+        [],
+      );
+      return;
+    }
     if (!reconcilePlayer) {
       this.#synchronizeCollisionProxies(snapshot);
+      this.#traceReconciliation(
+        snapshot,
+        reconcilePlayer,
+        "proxy-only",
+        null,
+        before,
+        pendingInputCountBefore,
+        [],
+      );
       return;
     }
     if (this.#latestAuthorityTick !== null && snapshot.serverTick <= this.#latestAuthorityTick) {
       this.#synchronizeCollisionProxies(snapshot);
+      this.#traceReconciliation(
+        snapshot,
+        reconcilePlayer,
+        "stale-snapshot",
+        null,
+        before,
+        pendingInputCountBefore,
+        [],
+      );
       return;
     }
     const authority = snapshot.players.find(
       (player) => idKey(player.id) === idKey(this.#localPlayer!),
     );
-    if (!authority) return;
+    if (!authority) {
+      this.#traceReconciliation(
+        snapshot,
+        reconcilePlayer,
+        "missing-player",
+        null,
+        before,
+        pendingInputCountBefore,
+        [],
+      );
+      return;
+    }
     const teleportMarked =
       ((snapshot.bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!))?.flags ?? 0) &
         SNAPSHOT_FLAG_TELEPORT) !==
@@ -275,7 +350,7 @@ export class PlayerPredictor {
       (!this.#lastAuthorityPosition ||
         length(subtract(authority.position, this.#lastAuthorityPosition)) >= 2);
 
-    const before = this.#state ? { ...this.#state.position } : null;
+    const beforePosition = this.#state ? { ...this.#state.position } : null;
     const stalled =
       this.#latestAuthorityTick !== null &&
       snapshot.serverTick - this.#latestAuthorityTick > PREDICTION_STALL_RESET_TICKS;
@@ -289,8 +364,10 @@ export class PlayerPredictor {
     this.#history = this.#history.filter(
       (frame) => frame.command.sequence > authority.lastProcessedInputSequence,
     );
+    const replayedInputSequences = this.#history.map((frame) => frame.command.sequence);
     this.#state = controllerState(authority);
     this.#updatePlayerProxy();
+    let replayReset = false;
     if (stalled || teleported) {
       this.#history = [];
     } else {
@@ -315,6 +392,7 @@ export class PlayerPredictor {
           this.#state = controllerState(authority);
           this.#freezeCollisionProxies();
           this.#updatePlayerProxy();
+          replayReset = true;
           break;
         }
         this.#state = predicted;
@@ -324,8 +402,8 @@ export class PlayerPredictor {
       }
     }
 
-    if (before && !teleported) {
-      const delta = subtract(before, this.#state.position);
+    if (beforePosition && !teleported) {
+      const delta = subtract(beforePosition, this.#state.position);
       this.#lastReconciliationError = length(delta);
       const combined = add(this.#correction, delta);
       if (length(delta) < SNAP_CORRECTION_METRES && length(combined) < SNAP_CORRECTION_METRES) {
@@ -340,6 +418,21 @@ export class PlayerPredictor {
       this.#correction = zero();
       this.#correctionSecondsRemaining = 0;
     }
+    this.#traceReconciliation(
+      snapshot,
+      reconcilePlayer,
+      stalled
+        ? "stalled-reset"
+        : teleported
+          ? "teleport-reset"
+          : replayReset
+            ? "implausible-reset"
+            : "replayed",
+      authority,
+      before,
+      pendingInputCountBefore,
+      replayedInputSequences,
+    );
     this.#emit();
   }
 
@@ -433,6 +526,75 @@ export class PlayerPredictor {
       },
       this.predictedBodies,
     );
+  }
+
+  #traceInput(
+    command: InputCommand,
+    outcome: TracePredictionInputEvent["outcome"],
+    before: TraceControllerState | null,
+  ): void {
+    if (!this.#traceEnabled) return;
+    this.#onTrace({
+      kind: "input",
+      workerAtMs: performance.now(),
+      workerTimeOriginUnixMs: performance.timeOrigin,
+      sequence: command.sequence,
+      clientTick: command.clientTick,
+      outcome,
+      before,
+      after: traceControllerState(this.#state),
+      pendingInputCount: this.#history.length,
+      visibleCorrectionMetres: this.correctionMagnitude,
+    });
+  }
+
+  #traceReconciliation(
+    snapshot: Snapshot,
+    reconcilePlayer: boolean,
+    outcome: TraceReconciliationOutcome,
+    authority: PlayerStateSnapshot | null,
+    before: TraceControllerState | null,
+    pendingInputCountBefore: number,
+    replayedInputSequences: number[],
+  ): void {
+    if (!this.#traceEnabled) return;
+    this.#onTrace({
+      kind: "reconciliation",
+      workerAtMs: performance.now(),
+      workerTimeOriginUnixMs: performance.timeOrigin,
+      serverTick: snapshot.serverTick,
+      reconcilePlayer,
+      outcome,
+      authority: authority ? structuredClone(authority) : null,
+      before,
+      after: traceControllerState(this.#state),
+      acknowledgedInputSequence: authority?.lastProcessedInputSequence ?? null,
+      pendingInputCountBefore,
+      pendingInputCountAfter: this.#history.length,
+      replayedInputSequences: [...replayedInputSequences],
+      rawErrorMetres:
+        outcome === "replayed" || outcome === "stalled-reset" || outcome === "implausible-reset"
+          ? this.#lastReconciliationError
+          : null,
+      visibleCorrectionMetres: this.correctionMagnitude,
+      proxies: this.#traceProxies(),
+    });
+  }
+
+  #traceProxies(): TracePredictionProxy[] {
+    return [...this.#collisionProxies.values()].map((proxy) => ({
+      id: { ...proxy.networkId },
+      authorityTick: proxy.authorityTick,
+      position: { ...proxy.position },
+      rotation: { ...proxy.rotation },
+      linearVelocity: { ...proxy.linearVelocity },
+      angularVelocity: { ...proxy.angularVelocity },
+      extrapolationTicksRemaining: proxy.extrapolationTicksRemaining,
+      freshnessTicksRemaining: proxy.freshnessTicksRemaining,
+      collisionEnabled: proxy.collisionEnabled,
+      holdWhenStale: proxy.holdWhenStale,
+      contactPresentation: proxy.contactPresentation,
+    }));
   }
 
   #synchronizeCollisionProxies(snapshot: Snapshot): void {
@@ -539,6 +701,20 @@ function controllerState(authority: PlayerStateSnapshot): PlayerControllerState 
 
 function cloneState(state: PlayerControllerState): PlayerControllerState {
   return { ...state, position: { ...state.position } };
+}
+
+function traceControllerState(state: PlayerControllerState | null): TraceControllerState | null {
+  return state
+    ? {
+        position: { ...state.position },
+        yaw: state.yaw,
+        verticalVelocity: state.verticalVelocity,
+        grounded: state.grounded,
+        lastJumpCounter: state.lastJumpCounter,
+        stepCooldown: state.stepCooldown,
+        crouched: state.crouched,
+      }
+    : null;
 }
 
 function playerCapsule(crouched: boolean) {

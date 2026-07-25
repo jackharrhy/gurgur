@@ -148,6 +148,48 @@ The locally predicted player and four nearest authoritative-velocity contact
 proxies render near predicted current time. Other props and remote players render
 from buffered authoritative history.
 
+## Development traces
+
+Appending `?debug` on a non-production server exposes a bounded Record/Stop
+control for joined client/server network traces. The server capability and
+capture routes return 404 whenever `NODE_ENV=production`; UI visibility is not
+the security boundary.
+
+A capture lasts at most 15 seconds and downloads one
+`.gurgur-trace.json` document conforming to
+[`gurgur-trace-v1.schema.json`](gurgur-trace-v1.schema.json). Format and embedded
+analysis versions are independent integers. The document identifies build, map,
+epoch, player, coordinate system, rates, limits, truncation, and stop reason.
+
+The recorder preserves distinct semantic timelines instead of comparing two
+unrelated wall-clock instants:
+
+- side-effect-free post-step server authority is sampled at all 60 Hz simulation
+  ticks without calling or mutating the replication snapshot builder;
+- target-client outbound records retain send/drop status, selected
+  pre-quantization state, decoded wire state, packet size, and backpressure;
+- client snapshot records distinguish datagram receipt time from animation-frame
+  processing time and retain whether a sample was the reconciliation frame's
+  newest state;
+- input records retain client sequence/tick, server receipt tick, redundant
+  first-receipt status, transport, and validation result;
+- prediction records retain fixed-step state before/after each input and the
+  authority tick, acknowledgement, replay range, proxy freshness, raw error, and
+  visible correction for each reconciliation;
+- presentation records sample at no more than 60 Hz and retain estimated server
+  tick, adaptive interpolation delay, presentation target tick, extrapolated
+  identities, final body pose, and whether that pose came from buffered
+  authority, current contact authority, prediction, or fallback.
+
+Ticks and acknowledged input sequences are the primary joins. Client, prediction
+worker, and server monotonic timestamps retain explicit time origins as
+diagnostic metadata; wall-clock equality is never assumed. Embedded analysis
+separates wire quantization, delivered-packet fidelity, raw prediction
+corrections, presentation error by source, snapshot age, acknowledgement time,
+replay depth, and worst samples. Predicted-local presentation error is explicitly
+diagnostic because intentional client lead prevents it from being a determinism
+assertion.
+
 ## Protocol and connection lifecycle
 
 Protocol version 1 has exact bounded JSON control unions and explicit

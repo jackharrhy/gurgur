@@ -32,6 +32,7 @@ apps/web/
   renderer.ts           Three.js scene, camera, objects, render loop
   interpolation.ts      remote snapshot histories and visual sampling
   input.ts              keyboard, pointer lock, gamepad, touch intent
+  network-trace.ts      bounded development recorder and download control
 ```
 
 `main.ts` composes the modules but owns no simulation state. The prediction worker
@@ -131,6 +132,11 @@ interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls the current authoritative Box3D debug frame at 10 Hz and draws
 broad-phase bounds, joints, and contact points above the scene. The overlay is
 diagnostic only and does not replace authoritative server interaction validation.
+On non-production servers the same debug view includes a Record/Stop network
+trace control. It appears only after the server capability route confirms
+capture support, stops automatically after 15 seconds, joins client streams with
+the server recording, and downloads one `.gurgur-trace.json`. Production trace
+routes return 404, so adding `?debug` to a deployed URL cannot enable recording.
 Sprite presentation consumes only `PresentationSpec` and the hashed logical
 sprite manifest; it never compares mapper classnames. The player billboard source
 is a committed Blender scene sized to the authoritative
@@ -175,6 +181,7 @@ The server exposes a deliberately small surface:
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |
 | `/debug/physics`                            | bounded current Box3D debug frame      |
+| `/debug/network-trace`, `/start`, `/stop`   | development-only bounded trace capture |
 | `/world.bin`                                | immutable compiled map bundle          |
 | `/box3d.wasm` and `/prediction-worker.js`   | prediction runtime assets              |
 | `/player-billboard.png`                     | generated directional player atlas     |

@@ -8,6 +8,7 @@ import {
   type InputCommand,
   type RuntimeEntityRef,
   type Snapshot,
+  type TracePredictionEvent,
   type Vec3,
 } from "@gurgur/engine";
 import { compileWorld, type WorldBundle, type WorldMessage } from "@gurgur/game";
@@ -16,6 +17,43 @@ import { PlayerPredictor } from "../src/prediction";
 const playerId = { index: 0x8000_0000, generation: 1 };
 
 describe("player-only prediction", () => {
+  test("emits tick- and sequence-correlated trace events only while enabled", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const events: TracePredictionEvent[] = [];
+    const predictor = new PlayerPredictor(() => {}, { onTrace: (event) => events.push(event) });
+    try {
+      predictor.setLocalPlayer(playerId);
+      await predictor.setWorld(world(bundle));
+      const start = spawn(bundle);
+      predictor.reconcile(snapshot(-1, start));
+      expect(events).toHaveLength(0);
+
+      predictor.setTraceEnabled(true);
+      predictor.pushInput(command(0));
+      const predicted = predictor.predictedPosition!;
+      predictor.reconcile(snapshot(0, predicted, 2));
+
+      expect(events[0]).toMatchObject({
+        kind: "input",
+        sequence: 0,
+        clientTick: 0,
+        outcome: "predicted",
+      });
+      expect(events[1]).toMatchObject({
+        kind: "reconciliation",
+        serverTick: 2,
+        outcome: "replayed",
+        acknowledgedInputSequence: 0,
+      });
+      expect(
+        (events[1] as Extract<TracePredictionEvent, { kind: "reconciliation" }>)
+          .workerTimeOriginUnixMs,
+      ).toBeGreaterThan(0);
+    } finally {
+      predictor.dispose();
+    }
+  });
+
   test("replays unacknowledged intent without changing the presented path", async () => {
     const bundle = await fixture("network-push-corridor");
     const predictor = new PlayerPredictor(() => {});

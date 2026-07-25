@@ -25,6 +25,7 @@ import {
   type PhysicsDebugFrame,
   type RuntimeId,
   type Snapshot,
+  type TraceServerFrame,
   type Vec3,
 } from "@gurgur/engine";
 import { createRuntimeBodies, runtimeBodyRef, type RuntimeBody } from "./runtime-bodies";
@@ -48,6 +49,7 @@ export class AuthoritativeGame {
   readonly #terminalBodyRepeatUntilTick = new Map<string, number>();
   readonly #discontinuityRepeatUntilTick = new Map<string, number>();
   readonly #tickDurationsMs: number[] = [];
+  #traceSink: ((frame: Omit<TraceServerFrame, "serverAtMs">) => void) | null = null;
   #discardedOverloadSeconds = 0;
   #worldEpoch: number;
   #serverTick: number;
@@ -170,6 +172,10 @@ export class AuthoritativeGame {
     return this.#simulation.players.acceptInput(id, command, this.#worldEpoch);
   }
 
+  setTraceSink(sink: ((frame: Omit<TraceServerFrame, "serverAtMs">) => void) | null): void {
+    this.#traceSink = sink;
+  }
+
   start(): void {
     if (this.#timer) return;
     this.#lastTime = performance.now();
@@ -192,6 +198,7 @@ export class AuthoritativeGame {
       const events = this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       this.#processPostPhysics(events);
       this.#serverTick += 1;
+      if (this.#traceSink) this.#traceSink(this.#traceFrame());
       this.#accumulator -= PHYSICS_DT;
       steps += 1;
       if (this.#serverTick % SNAPSHOT_INTERVAL_TICKS === 0)
@@ -339,6 +346,26 @@ export class AuthoritativeGame {
     this.#timer = null;
     this.save();
     this.#physics.dispose();
+  }
+
+  #traceFrame(): Omit<TraceServerFrame, "serverAtMs"> {
+    return {
+      worldEpoch: this.#worldEpoch,
+      serverTick: this.#serverTick,
+      bodies: this.#runtimeBodies.map(({ handle }) => this.#physics.state(handle)),
+      players: this.#simulation.players.views().map((player) => ({
+        id: { ...player.id },
+        position: { ...player.position },
+        yaw: player.yaw,
+        verticalVelocity: player.verticalVelocity,
+        grounded: player.grounded,
+        lastProcessedInputSequence: player.lastProcessedInputSequence,
+        lastJumpCounter: player.lastJumpCounter,
+        stepCooldown: player.stepCooldown,
+        crouched: player.crouched,
+        grabTarget: player.grabTarget ? { ...player.grabTarget } : null,
+      })),
+    };
   }
 
   #createGameSimulation(restored: PersistedWorld | null): GameSimulation {
