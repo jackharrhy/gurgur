@@ -188,6 +188,24 @@ try {
   ) {
     throw new Error(`player-view reveal gate failed: ${JSON.stringify(viewGate)}`);
   }
+  const camera = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __gurgurDiagnostics: {
+          camera(): { distance: number; safeDistance: number };
+        };
+      }
+    ).__gurgurDiagnostics.camera(),
+  );
+  if (
+    !Number.isFinite(camera.distance) ||
+    !Number.isFinite(camera.safeDistance) ||
+    camera.distance < 0 ||
+    camera.distance > camera.safeDistance + 1e-6 ||
+    camera.safeDistance > 4.2
+  ) {
+    throw new Error(`camera boom escaped its safe distance: ${JSON.stringify(camera)}`);
+  }
   if (scenario === "stale-session") {
     for (let reload = 0; reload < 3; reload += 1) {
       await page.reload();

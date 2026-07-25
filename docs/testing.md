@@ -52,6 +52,10 @@ scenarios cover grab, touch, gamepad, reconnect, and ordinary movement. Browser
 automation appends `?test`; the grab scenario also enables the general `?debug`
 view and requires a non-empty authoritative Box3D debug frame, covering the server
 callback, JSON route, browser polling, and Three.js overlay together.
+Camera tests cover same-frame inward clamping, rate-independent held recovery,
+double-sided thin-wall probes, and offset-ray corner clearance. Every browser
+scenario also requires the live boom distance to remain finite and no greater
+than its current collision-tested safe distance.
 The reconnect scenario first recovers from an invalid stored session and then
 performs three hard reloads, requiring each resumed page to reach usable WebRTC
 input before any stale-generation rejection.

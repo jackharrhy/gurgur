@@ -108,6 +108,7 @@ if (testEnabled) {
           runtimeId,
           ...structuredClone(body),
         })),
+      camera: () => renderer.cameraDiagnostics(),
     }),
   });
 }

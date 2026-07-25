@@ -36,6 +36,15 @@ import {
 } from "./retro-rendering";
 import playerBillboardLayout from "../../../content/generated/player-billboard/player-billboard.json";
 import { playerBillboardAtlasOffset, playerBillboardView } from "./player-billboard";
+import {
+  CAMERA_BOOM_LENGTH,
+  CAMERA_DISCONTINUITY_DISTANCE,
+  cameraBoomClearance,
+  createCameraBoomState,
+  createCameraCollisionMesh,
+  stepCameraBoom,
+  type CameraBoomState,
+} from "./camera";
 
 type MaterialTextureInfo = {
   url: string;
@@ -190,10 +199,16 @@ export class WorldRenderer {
   readonly #outlineMaskMaterial = createInteractionOutlineMaskMaterial();
   readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
   readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
+  readonly #cameraCollisionMaterial = new THREE.MeshBasicNodeMaterial({
+    side: THREE.DoubleSide,
+  });
+  readonly #cameraRaycaster = new THREE.Raycaster();
   readonly #pickupDebug: PickupDebugView | null;
   readonly #physicsDebug: PhysicsDebugView | null;
   #worldRoot = new THREE.Group();
   #realityRoot = new THREE.Group();
+  #cameraCollisionRoot = new THREE.Group();
+  readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
   #heldTarget: THREE.Object3D | null = null;
@@ -206,6 +221,10 @@ export class WorldRenderer {
   #viewYaw = 0;
   #viewPitch = -0.18;
   #cameraFollowing = false;
+  #cameraBoom: CameraBoomState = createCameraBoomState();
+  #cameraSafeDistance = CAMERA_BOOM_LENGTH;
+  #cameraFrameTime: number | null = null;
+  readonly #cameraPreviousPivot = new THREE.Vector3();
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -255,11 +274,15 @@ export class WorldRenderer {
     this.#scene.remove(this.#worldRoot);
     this.#realityScene.remove(this.#realityRoot);
     this.#worldRoot.traverse(disposeOwnedResources);
+    this.#cameraCollisionRoot.traverse(disposeOwnedResources);
     this.#worldRoot = new THREE.Group();
     this.#realityRoot = new THREE.Group();
+    this.#cameraCollisionRoot = new THREE.Group();
     this.#worldRoot.name = `world-${message.worldEpoch}`;
     this.#realityRoot.name = `reality-${message.worldEpoch}`;
+    this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
+    this.#cameraCollisionBodies.clear();
     this.#physicsPropIds.clear();
     this.#predictedBodies.clear();
     this.#interactionCandidate = null;
@@ -269,6 +292,10 @@ export class WorldRenderer {
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
     if (this.#physicsDebug) this.#physicsDebug.group.visible = false;
     this.#cameraFollowing = false;
+    this.#cameraBoom = createCameraBoomState();
+    this.#cameraSafeDistance = CAMERA_BOOM_LENGTH;
+    this.#cameraFrameTime = null;
+    this.#buildCameraCollisionWorld(message);
     const sky = message.bundle.settings.skyColor;
     const skyColor = new THREE.Color(sky.r, sky.g, sky.b);
     this.#scene.background = skyColor;
@@ -320,12 +347,20 @@ export class WorldRenderer {
 
   applyLifecycle(message: LifecycleMessage): void {
     for (const id of message.removed) {
-      const mesh = this.#meshes.get(idKey(id));
-      if (!mesh) continue;
-      this.#meshes.delete(idKey(id));
-      this.#predictedBodies.delete(idKey(id));
-      this.#worldRoot.remove(mesh);
-      mesh.traverse(disposeOwnedResources);
+      const identity = idKey(id);
+      const mesh = this.#meshes.get(identity);
+      if (mesh) {
+        this.#meshes.delete(identity);
+        this.#predictedBodies.delete(identity);
+        this.#worldRoot.remove(mesh);
+        mesh.traverse(disposeOwnedResources);
+      }
+      const cameraCollision = this.#cameraCollisionBodies.get(identity);
+      if (cameraCollision) {
+        this.#cameraCollisionBodies.delete(identity);
+        this.#cameraCollisionRoot.remove(cameraCollision);
+        cameraCollision.traverse(disposeOwnedResources);
+      }
     }
     for (const entity of message.created) if (entity.kind === "player") this.#addPlayer(entity);
   }
@@ -427,6 +462,13 @@ export class WorldRenderer {
     return this.#interactionCandidate ? "available" : "none";
   }
 
+  cameraDiagnostics(): { distance: number; safeDistance: number } {
+    return {
+      distance: this.#cameraBoom.distance,
+      safeDistance: this.#cameraSafeDistance,
+    };
+  }
+
   applyPhysicsDebugFrame(frame: PhysicsDebugFrame): void {
     if (!this.#physicsDebug) return;
     const positions: number[] = [];
@@ -507,13 +549,13 @@ export class WorldRenderer {
         );
         if (predictedLocal) {
           this.#apply([predictedLocal]);
-          this.#follow(predictedLocal);
+          this.#follow(predictedLocal, now);
           this.#onLocalPresentation(predictedLocal);
         } else if (this.#localPlayer) {
           const local = current.find((body) => idKey(body.id) === idKey(this.#localPlayer!));
           if (local) {
             this.#apply([local]);
-            this.#follow(local);
+            this.#follow(local, now);
           }
         }
       }
@@ -526,11 +568,13 @@ export class WorldRenderer {
     this.#renderer.setAnimationLoop(null);
     removeEventListener("resize", this.#resize);
     this.#worldRoot.traverse(disposeOwnedResources);
+    this.#cameraCollisionRoot.traverse(disposeOwnedResources);
     for (const material of this.#materials.values()) material.dispose();
     for (const texture of this.#textures.values()) texture.dispose();
     this.#outlineMaskMaterial.dispose();
     this.#availableOutlineMaterial.dispose();
     this.#heldOutlineMaterial.dispose();
+    this.#cameraCollisionMaterial.dispose();
     if (this.#pickupDebug) {
       this.#pickupDebug.geometry.dispose();
       this.#pickupDebug.origin.geometry.dispose();
@@ -622,6 +666,55 @@ export class WorldRenderer {
     mesh.receiveShadow = false;
     mesh.userData.interactionOccluder = !batch.sensor;
     return mesh;
+  }
+
+  #buildCameraCollisionWorld(message: WorldMessage): void {
+    // Camera containment follows authored collision rather than visible meshes so
+    // collision-only SKIP faces still bound the third-person view.
+    if (message.bundle.staticCollision.triangles.length > 0) {
+      this.#cameraCollisionRoot.add(
+        createCameraCollisionMesh(
+          message.bundle.staticCollision,
+          this.#cameraCollisionMaterial,
+          "camera-collision.static",
+        ),
+      );
+    }
+    for (const runtime of message.runtimeEntities) {
+      if (runtime.kind !== "world-entity") continue;
+      const entity = message.bundle.entities[runtime.entityIndex];
+      if (
+        !entity?.body ||
+        entity.body.kind === "sensor-brush" ||
+        entity.body.kind === "dynamic-brush"
+      ) {
+        // Loose replicated props would make the view pump as they roll through
+        // the boom; stable kinematic mechanisms remain camera obstacles.
+        continue;
+      }
+      const origin = message.bundle.brushes[entity.body.brushIndices[0]!]?.center;
+      if (!origin) continue;
+      const group = new THREE.Group();
+      group.name = `camera-collision.body.${runtime.entityIndex}`;
+      group.position.set(origin.x, origin.y, origin.z);
+      for (const brushIndex of entity.body.brushIndices) {
+        const brush = message.bundle.brushes[brushIndex];
+        if (!brush) continue;
+        const mesh = createCameraCollisionMesh(
+          { vertices: brush.localVertices, triangles: brush.triangles },
+          this.#cameraCollisionMaterial,
+          `camera-collision.brush.${brush.entityIndex}.${brush.sourceBrushIndex}`,
+        );
+        mesh.position.set(
+          brush.center.x - origin.x,
+          brush.center.y - origin.y,
+          brush.center.z - origin.z,
+        );
+        group.add(mesh);
+      }
+      this.#cameraCollisionBodies.set(idKey(runtime.id), group);
+      this.#cameraCollisionRoot.add(group);
+    }
   }
 
   #addPlayer(player: Extract<RuntimeEntityRef, { kind: "player" }>): void {
@@ -750,6 +843,16 @@ export class WorldRenderer {
   #apply(bodies: BodySnapshot[]): void {
     for (const body of bodies) {
       const mesh = this.#meshes.get(idKey(body.id));
+      const cameraCollision = this.#cameraCollisionBodies.get(idKey(body.id));
+      if (cameraCollision) {
+        cameraCollision.position.set(body.position.x, body.position.y, body.position.z);
+        cameraCollision.quaternion.set(
+          body.rotation.x,
+          body.rotation.y,
+          body.rotation.z,
+          body.rotation.w,
+        );
+      }
       if (!mesh) continue;
       mesh.position.set(body.position.x, body.position.y, body.position.z);
       mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
@@ -835,7 +938,7 @@ export class WorldRenderer {
     this.#pickupDebug.markerMaterial.color.setHex(color);
   }
 
-  #follow(player: BodySnapshot): void {
+  #follow(player: BodySnapshot, now: number): void {
     this.#pickupPlayerPosition ??= new THREE.Vector3();
     this.#pickupPlayerPosition.set(player.position.x, player.position.y, player.position.z);
     const target = new THREE.Vector3(player.position.x, player.position.y + 0.4, player.position.z);
@@ -845,10 +948,27 @@ export class WorldRenderer {
       Math.sin(this.#viewPitch),
       -Math.cos(this.#viewYaw) * horizontal,
     );
-    const desired = target.clone().addScaledVector(forward, -4.2);
-    if (this.#cameraFollowing) this.#camera.position.lerp(desired, 0.18);
-    else this.#camera.position.copy(desired);
+    const discontinuity =
+      this.#cameraFollowing &&
+      this.#cameraPreviousPivot.distanceTo(target) > CAMERA_DISCONTINUITY_DISTANCE;
+    if (!this.#cameraFollowing || discontinuity) {
+      this.#cameraBoom = createCameraBoomState();
+      this.#cameraFrameTime = now;
+    }
+    const boomDirection = forward.multiplyScalar(-1);
+    this.#cameraSafeDistance = cameraBoomClearance(
+      this.#cameraCollisionRoot,
+      target,
+      boomDirection,
+      this.#cameraRaycaster,
+    );
+    const deltaSeconds =
+      this.#cameraFrameTime === null ? 0 : Math.max(0, (now - this.#cameraFrameTime) / 1_000);
+    this.#cameraBoom = stepCameraBoom(this.#cameraBoom, this.#cameraSafeDistance, deltaSeconds);
+    this.#camera.position.copy(target).addScaledVector(boomDirection, this.#cameraBoom.distance);
     this.#cameraFollowing = true;
+    this.#cameraFrameTime = now;
+    this.#cameraPreviousPivot.copy(target);
     this.#camera.lookAt(target);
   }
 

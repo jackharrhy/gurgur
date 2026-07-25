@@ -46,6 +46,10 @@ slice:
   brush presentation;
 - static and moving brush presentation now front-face culls the compiler's
   outward triangle winding in both retro and reality passes;
+- the predicted third-person view now uses a collision-tested camera boom that
+  respects static `GURGUR/SKIP` boundaries and kinematic brush mechanisms,
+  retracts immediately, and recovers outward with held frame-rate-independent
+  damping;
 - browser smokes exercise the real server, WebSocket signaling, WebRTC channels,
   prediction worker, Box3D Wasm, and Three.js presentation.
 

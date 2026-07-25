@@ -57,6 +57,18 @@ The canvas remains hidden against a black page until the renderer has followed a
 finite predicted local-player pose in the current frame. Loading a new world
 closes that gate again, preventing a default-camera world frame from flashing
 before the player view is known.
+The third-person camera is a collision-tested boom anchored at the predicted
+player pose's head offset. A nine-ray, 0.18-metre-radius probe travels opposite
+the player-controlled view toward the preferred 4.2-metre distance using a
+dedicated double-sided collision mesh. Static collision includes invisible
+`GURGUR/SKIP` faces; kinematic doors and platforms contribute their complete
+moving brush geometry. Sensors, sprites, players, and loose dynamic props do not
+move the camera.
+Obstruction retracts the boom to its safe distance in the same frame. Clearance
+holds the nearest position for 80 milliseconds, then expands with a
+frame-rate-independent 180-millisecond half-life and no overshoot. Collision
+never changes yaw, pitch, or field of view, and a presentation discontinuity
+resets the boom before probing the new pose.
 
 ## Visual language
 
