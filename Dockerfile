@@ -5,16 +5,16 @@ COPY package.json bun.lock tsconfig.json .oxfmtrc.json .oxlintrc.json ./
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends chromium \
     && rm -rf /var/lib/apt/lists/*
-ENV CHROME_PATH=/usr/bin/chromium \
-    SMOKE_SOFTWARE_WEBGPU=1
+ENV CHROME_PATH=/usr/bin/chromium
 COPY apps ./apps
 COPY content ./content
 COPY docs ./docs
 COPY packages ./packages
+COPY third_party ./third_party
 COPY tools ./tools
 COPY scripts ./scripts
 RUN bun install --frozen-lockfile
-RUN bun run check && bun run build
+RUN bun run check:container && bun run build
 
 FROM oven/bun:1.3.14
 WORKDIR /app/dist

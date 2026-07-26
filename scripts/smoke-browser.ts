@@ -108,7 +108,7 @@ if (scenario === "grab" && process.env.SMOKE_DISABLE_DEBUG !== "1")
   url.searchParams.set("debug", "1");
 const browserName = process.env.SMOKE_BROWSER === "firefox" ? "firefox" : "chromium";
 const chromiumArgs =
-  process.platform === "linux"
+  process.platform === "linux" && scenario !== "webgpu-unsupported"
     ? [
         "--use-angle=vulkan",
         "--enable-features=Vulkan",

@@ -1621,11 +1621,3 @@
 "castShadow" "1"
 "volumetric" "1"
 }
-// entity 82
-{
-"classname" "light_spot"
-"origin" "-916 380 236"
-"angle" "32.000000"
-"direction" "0 0 -1"
-"color" "135 156 255"
-}

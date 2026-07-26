@@ -7,6 +7,12 @@ simulation, prediction, and presentation failures remain distinguishable.
 `bun run check` runs formatting, lint, TypeScript, unit/contract/simulation tests,
 the real server integration suite, shutdown/configuration integration, and the
 required Chromium prediction-drift scenario against a real Bun backend.
+`bun run check:container` runs the same non-browser gates plus the browser's
+unsupported-WebGPU capability path. Container image builds use that profile
+because GitHub's ordinary Linux builders provide neither a hardware GPU nor a
+reliable software-WebGPU implementation. They do not claim WebGPU rendering
+coverage; WebGPU-capable development and dedicated test hosts retain the real
+drift and presentation gates.
 Generated bundles, reports, runtime data, and TrenchBroom autosaves are ignored;
 authored fixtures and tests are not.
 
@@ -207,6 +213,7 @@ never a weakened assertion hidden in a test.
 
 ```sh
 bun run check
+bun run check:container
 bun run test:network -- single
 bun run test:network -- matrix --quick
 bun run test:browser -- drift

@@ -259,7 +259,7 @@ describe("Systems Garden map", () => {
     expect(spotlight?.presentation).toMatchObject({
       mode: "spot",
       castShadow: true,
-      volumetric: false,
+      volumetric: true,
     });
     expect(
       lights.some(
@@ -267,7 +267,7 @@ describe("Systems Garden map", () => {
           (entity.presentation.mode === "point" || entity.presentation.mode === "spot") &&
           entity.presentation.volumetric,
       ),
-    ).toBeFalse();
+    ).toBeTrue();
     expect(JSON.stringify(lights)).not.toContain("light_spot");
   });
 

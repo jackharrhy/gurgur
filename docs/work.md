@@ -114,10 +114,12 @@ accepted without a shim or unrelated replacement, as recorded in decision 0012.
 
 `bun run check` owns formatting, lint, types, unit/contract/simulation tests,
 real-server integration, shutdown/configuration, and one real Chromium-to-Bun
-prediction clock gate. The real network matrix owns 2, 8, 16, and 32 WebRTC
-peers, 128 dynamic bodies, Local/Typical/Adverse quality paths, a deliberately
-saturated Constrained path, a five-second outage, a receiver stall, and a
-connected epoch reset.
+prediction clock gate. Container image builds use `bun run check:container` for
+the same non-browser coverage plus the browser's unsupported-WebGPU gate; an
+ordinary GitHub Linux builder is not treated as WebGPU rendering evidence. The
+real network matrix owns 2, 8, 16, and 32 WebRTC peers, 128 dynamic bodies,
+Local/Typical/Adverse quality paths, a deliberately saturated Constrained path,
+a five-second outage, a receiver stall, and a connected epoch reset.
 
 The final 2026-07-23 seeded matrix passed every gate with zero correctness errors,
 zero state drops, zero queued state bytes, and zero contact-proxy extrapolation
