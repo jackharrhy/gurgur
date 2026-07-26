@@ -1,8 +1,16 @@
 import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
+import { createOwnershipClient } from "./ownership-client";
 import { WorldAudio } from "./audio";
-import type { PhysicsDebugFrame } from "@gurgur/engine";
+import type {
+  InputCommand,
+  NetworkObjectState,
+  PhysicsDebugFrame,
+  RuntimeId,
+  UseRequestMessage,
+} from "@gurgur/engine";
+import type { WorldMessage } from "@gurgur/game";
 import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
 import { installSpeechChat, type SpeechChat } from "./speech-chat";
 import { SpeechSynthesizer } from "./speech-synthesis";
@@ -124,13 +132,16 @@ const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
   document.body.dataset.audioState = state.state;
   document.body.dataset.audioAsset = state.asset ?? "";
 });
+let localPlayerId: RuntimeId | null = null;
+let currentWorld: WorldMessage | null = null;
+let lastOwnershipDrop: NetworkObjectState | null = null;
 
 const diagnosticBodies = new Map<
   string,
   {
     entityIndex: number;
     localTop: number;
-    authoritative?: {
+    networked?: {
       position: { x: number; y: number; z: number };
       rotation: { x: number; y: number; z: number; w: number };
     };
@@ -138,6 +149,22 @@ const diagnosticBodies = new Map<
       position: { x: number; y: number; z: number };
       rotation: { x: number; y: number; z: number; w: number };
     };
+  }
+>();
+const presentedStates = new Map<
+  string,
+  {
+    position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number; w: number };
+  }
+>();
+const observedStates = new Map<
+  string,
+  {
+    count: number;
+    stateSequence: number;
+    receivedAtMs: number;
+    position: { x: number; y: number; z: number };
   }
 >();
 if (testEnabled) {
@@ -152,12 +179,29 @@ if (testEnabled) {
         })),
       camera: () => renderer.cameraDiagnostics(),
       speech: () => renderer.speechDiagnostics(),
+      presentation: () =>
+        [...presentedStates.entries()].map(([runtimeId, state]) => ({
+          runtimeId,
+          ...structuredClone(state),
+        })),
+      network: () => ({
+        worldEpoch: currentWorld?.worldEpoch ?? null,
+        localPlayerId: localPlayerId ? { ...localPlayerId } : null,
+        entities: structuredClone(currentWorld?.runtimeEntities ?? []),
+      }),
+      replication: () =>
+        [...observedStates.entries()].map(([runtimeId, value]) => ({
+          runtimeId,
+          ...structuredClone(value),
+        })),
+      lastOwnershipDrop: () => (lastOwnershipDrop ? structuredClone(lastOwnershipDrop) : null),
     }),
   });
 }
 const renderer = new WorldRenderer(
   canvas,
   (body) => {
+    document.body.dataset.localPresentedAt = String(performance.now());
     document.body.dataset.renderedX = String(body.position.x);
     document.body.dataset.renderedY = String(body.position.y);
     document.body.dataset.renderedZ = String(body.position.z);
@@ -165,6 +209,10 @@ const renderer = new WorldRenderer(
   },
   (body) => {
     if (!testEnabled) return;
+    presentedStates.set(`${body.id.index}:${body.id.generation}`, {
+      position: { ...body.position },
+      rotation: { ...body.rotation },
+    });
     const diagnostic = diagnosticBodies.get(`${body.id.index}:${body.id.generation}`);
     if (diagnostic)
       diagnostic.rendered = {
@@ -200,21 +248,109 @@ let session: GameSession;
 let speechChat: SpeechChat | null = null;
 let loadedWorldEpoch: number | null = null;
 let stateTransportReady = false;
+let ownerPhysicsReady = false;
+let ownerWorldGeneration = 0;
+let lastUseCounter = 0;
+let nextUseRequestId = 1;
+let inputMoving = false;
 const enableInputIfReady = (): void => {
-  if (stateTransportReady && loadedWorldEpoch !== null) {
+  if (stateTransportReady && ownerPhysicsReady && loadedWorldEpoch !== null) {
     input.setWorld(loadedWorldEpoch);
     document.body.dataset.inputReady = "true";
+  } else {
+    document.body.dataset.inputReady = "false";
   }
+};
+const isLocallyOwned = (id: RuntimeId): boolean => {
+  if (!currentWorld || !localPlayerId) return false;
+  const descriptor = currentWorld.runtimeEntities.find(
+    (candidate) => candidate.id.index === id.index && candidate.id.generation === id.generation,
+  );
+  return Boolean(
+    descriptor?.ownerPlayerId &&
+    descriptor.ownerPlayerId.index === localPlayerId.index &&
+    descriptor.ownerPlayerId.generation === localPlayerId.generation,
+  );
+};
+const updateObservedStates = (states: readonly NetworkObjectState[]): void => {
+  for (const state of states) {
+    const identity = `${state.id.index}:${state.id.generation}`;
+    const observed = observedStates.get(identity);
+    observedStates.set(identity, {
+      count: (observed?.count ?? 0) + 1,
+      stateSequence: state.stateSequence,
+      receivedAtMs: performance.now(),
+      position: { ...state.position },
+    });
+    if (identity === localPlayerKey) {
+      document.body.dataset.playerReady = "true";
+      document.body.dataset.playerX = String(state.position.x);
+      document.body.dataset.playerY = String(state.position.y);
+      document.body.dataset.playerZ = String(state.position.z);
+      worldAudio.update(state.position);
+    }
+    if (!testEnabled) continue;
+    const diagnostic = diagnosticBodies.get(identity);
+    if (diagnostic)
+      diagnostic.networked = {
+        position: { ...state.position },
+        rotation: { ...state.rotation },
+      };
+  }
+};
+const owner = createOwnershipClient({
+  localStates(states, producedAtMs) {
+    document.body.dataset.ownerStateAt = String(performance.now());
+    renderer.applyLocalStates(states, producedAtMs);
+    updateObservedStates(states);
+  },
+  ownerStates(states) {
+    session.sendOwnerStates(states);
+  },
+  ownershipRequest(message) {
+    session.requestOwnership(message);
+  },
+  ownershipDrop(message) {
+    lastOwnershipDrop = structuredClone(message.state);
+    session.dropOwnership(message);
+  },
+  ownerCommit(states) {
+    session.commitOwnerStates(states);
+  },
+  error(message) {
+    document.body.dataset.ownerPhysics = "error";
+    document.body.dataset.ownerPhysicsError = message;
+    console.error(`owner physics: ${message}`);
+  },
+});
+const sendUseOnEdge = (command: InputCommand): void => {
+  if (command.interactCounter === lastUseCounter) return;
+  lastUseCounter = command.interactCounter;
+  if (!command.interactTarget) return;
+  const message: UseRequestMessage = {
+    type: "use-request",
+    protocolVersion: 5,
+    worldEpoch: command.worldEpoch,
+    requestId: nextUseRequestId++,
+    target: { ...command.interactTarget },
+  };
+  session.use(message);
 };
 const input = createPlayerInput(
   canvas,
   (command) => {
+    document.body.dataset.inputAt = String(performance.now());
+    const moving = Math.hypot(command.moveX, command.moveZ) > 1e-4;
+    if (moving && !inputMoving)
+      document.body.dataset.inputMovementStartedAt = String(performance.now());
+    inputMoving = moving;
     document.body.dataset.inputMoveX = String(command.moveX);
     document.body.dataset.inputMoveZ = String(command.moveZ);
     document.body.dataset.inputJumpCounter = String(command.jumpCounter);
     document.body.dataset.inputButtons = String(command.buttons);
     document.body.dataset.inputSequence = String(command.sequence);
-    session.sendInput(command);
+    owner.pushInput(command);
+    sendUseOnEdge(command);
   },
   (yaw, pitch) => {
     if (!followCamera) renderer.setViewAngles(yaw, pitch);
@@ -241,6 +377,7 @@ session = new GameSession(
       }
     },
     welcome(message) {
+      localPlayerId = { ...message.playerId };
       localPlayerKey = `${message.playerId.index}:${message.playerId.generation}`;
       renderer.setLocalPlayer(message.playerId);
     },
@@ -249,10 +386,15 @@ session = new GameSession(
       speechSynthesizer.reset();
       renderer.setWorld(message);
       worldAudio.setWorld(message.bundle);
-      document.body.dataset.inputReady = "false";
+      currentWorld = message;
+      lastOwnershipDrop = null;
       loadedWorldEpoch = message.worldEpoch;
+      ownerPhysicsReady = false;
+      ownerWorldGeneration += 1;
       enableInputIfReady();
       diagnosticBodies.clear();
+      presentedStates.clear();
+      observedStates.clear();
       if (testEnabled)
         for (const runtime of message.runtimeEntities) {
           if (runtime.kind !== "world-entity") continue;
@@ -270,30 +412,65 @@ session = new GameSession(
     },
     lifecycle(message) {
       renderer.applyLifecycle(message);
-    },
-    snapshot(message) {
-      renderer.applySnapshot(message);
-      document.body.dataset.worldEpoch = String(message.worldEpoch);
-      document.body.dataset.serverTick = String(message.serverTick);
-      const player = message.bodies.find(
-        (body) => `${body.id.index}:${body.id.generation}` === localPlayerKey,
-      );
-      if (player) {
-        document.body.dataset.playerReady = "true";
-        document.body.dataset.playerX = String(player.position.x);
-        document.body.dataset.playerY = String(player.position.y);
-        document.body.dataset.playerZ = String(player.position.z);
-        worldAudio.update(player.position);
+      owner.applyLifecycle(message);
+      if (currentWorld?.worldEpoch === message.worldEpoch) {
+        const removed = new Set(message.removed.map((id) => `${id.index}:${id.generation}`));
+        currentWorld.runtimeEntities = [
+          ...currentWorld.runtimeEntities.filter(
+            (entity) => !removed.has(`${entity.id.index}:${entity.id.generation}`),
+          ),
+          ...message.created,
+        ];
       }
-      if (testEnabled)
-        for (const body of message.bodies) {
-          const diagnostic = diagnosticBodies.get(`${body.id.index}:${body.id.generation}`);
-          if (diagnostic)
-            diagnostic.authoritative = {
-              position: { ...body.position },
-              rotation: { ...body.rotation },
-            };
-        }
+    },
+    bootstrap(states, receivedAtMs) {
+      renderer.applyBootstrap(states, receivedAtMs);
+      updateObservedStates(states);
+      const world = currentWorld;
+      const playerId = localPlayerId;
+      if (!world || !playerId || world.worldEpoch !== loadedWorldEpoch) return;
+      const generation = ++ownerWorldGeneration;
+      document.body.dataset.ownerPhysics = "loading";
+      void owner.setWorld(world, states, playerId).then(() => {
+        if (generation !== ownerWorldGeneration || currentWorld?.worldEpoch !== world.worldEpoch)
+          return;
+        ownerPhysicsReady = true;
+        document.body.dataset.ownerPhysics = "ready";
+        enableInputIfReady();
+      });
+    },
+    state(states, receivedAtMs) {
+      renderer.applyNetworkStates(
+        states.filter((state) => !isLocallyOwned(state.id)),
+        receivedAtMs,
+      );
+      owner.pushNetworkStates(states);
+      updateObservedStates(states);
+      document.body.dataset.worldEpoch = String(loadedWorldEpoch ?? "");
+    },
+    ownership(message, receivedAtMs) {
+      const descriptor = currentWorld?.runtimeEntities.find(
+        (entity) =>
+          entity.id.index === message.id.index && entity.id.generation === message.id.generation,
+      );
+      if (descriptor) {
+        descriptor.ownerPlayerId = message.ownerPlayerId ? { ...message.ownerPlayerId } : null;
+        descriptor.authorityVersion = message.authorityVersion;
+      }
+      const local =
+        localPlayerId !== null &&
+        message.ownerPlayerId !== null &&
+        message.ownerPlayerId.index === localPlayerId.index &&
+        message.ownerPlayerId.generation === localPlayerId.generation;
+      renderer.applyOwnershipState(message.state, local, receivedAtMs);
+      owner.ownershipChanged(message);
+      updateObservedStates([message.state]);
+    },
+    ownershipDenied(message) {
+      owner.ownershipDenied(message);
+    },
+    clock(serverTick) {
+      document.body.dataset.serverTick = String(serverTick);
     },
     network(rttMs, jitterMs) {
       document.body.dataset.rttMs = rttMs.toFixed(1);
@@ -302,8 +479,7 @@ session = new GameSession(
     transport(state) {
       document.body.dataset.transport = state;
       stateTransportReady = state === "webrtc";
-      if (stateTransportReady) enableInputIfReady();
-      else document.body.dataset.inputReady = "false";
+      enableInputIfReady();
     },
     speech(message) {
       document.body.dataset.lastSpeechText = message.text;
@@ -336,7 +512,7 @@ if (debugEnabled) {
   document.body.dataset.debug = "true";
   const panel = document.createElement("output");
   panel.id = "debug-status";
-  panel.textContent = "debug · waiting for authoritative physics";
+  panel.textContent = "debug · waiting for host physics";
   document.body.append(panel);
   const pollPhysics = async (): Promise<void> => {
     if (debugRequest) return;
@@ -378,6 +554,7 @@ addEventListener("pagehide", () => {
   session.close();
   speechChat?.dispose();
   speechSynthesizer.dispose();
+  owner.dispose();
   input.dispose();
   removeEventListener("pointerdown", unlockAudio, { capture: true });
   removeEventListener("keydown", unlockAudio, { capture: true });

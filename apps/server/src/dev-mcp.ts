@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { RuntimeEntityRef, RuntimeId, Vec3 } from "@gurgur/engine";
 import * as z from "zod/v4";
-import { type AuthoritativeGame, type DevPlayerIntentUpdate } from "./game";
+import { type DevPlayerIntentUpdate, type WorldHost } from "./game";
 import { runtimeBodyRef } from "./runtime-bodies";
 
 const MAX_REQUEST_BYTES = 1_048_576;
@@ -31,7 +31,7 @@ export type DevMcpListener = {
 };
 
 export type DevMcpOptions = {
-  game: AuthoritativeGame;
+  game: WorldHost;
   port: number;
   connectedNetworkPlayers(): RuntimeId[];
   created(entity: RuntimeEntityRef): void;
@@ -103,7 +103,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
     { name: "gurgur-dev-world", version: "1.0.0" },
     {
       instructions:
-        "This is an ephemeral development control plane for Gurgur's authoritative world. " +
+        "This is an ephemeral development control plane for Gurgur's host world. " +
         "Coordinates are metres in a right-handed Y-up world; player positions are capsule centres; " +
         "angles are radians. MCP player movement automatically stops after at most five seconds. " +
         "Spawned players and props are excluded from persistence and removed on world reset.",
@@ -113,7 +113,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
   mcp.registerTool(
     "get_world_state",
     {
-      title: "Get authoritative world state",
+      title: "Get host world state",
       description:
         "Read the current map revision, epoch, fixed server tick, gravity, body counts, and every player pose.",
       annotations: readOnlyAnnotations,
@@ -141,9 +141,9 @@ function createMcpServer(options: DevMcpOptions): McpServer {
   mcp.registerTool(
     "list_players",
     {
-      title: "List authoritative players",
+      title: "List players",
       description:
-        "List network-managed and MCP-controlled players with authoritative pose, movement state, and connection status. Optional proximity filtering uses capsule-centre positions.",
+        "List network-managed and MCP-controlled players with the host's latest accepted pose, movement state, and connection status. Optional proximity filtering uses capsule-centre positions.",
       inputSchema: z.object(nearbySchema).strict(),
       annotations: readOnlyAnnotations,
     },
@@ -156,9 +156,9 @@ function createMcpServer(options: DevMcpOptions): McpServer {
   mcp.registerTool(
     "list_props",
     {
-      title: "List authoritative props",
+      title: "List props",
       description:
-        "List authoritative physics props and their complete Box3D poses. Filter around a point to keep spatial probes compact.",
+        "List physics props and their complete host-accepted Box3D poses. Filter around a point to keep spatial probes compact.",
       inputSchema: z
         .object({
           ...nearbySchema,
@@ -186,7 +186,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
     {
       title: "List spawnable prop archetypes",
       description:
-        "List compiled physics-prop entity indices that can be cloned into ephemeral authoritative props.",
+        "List compiled physics-prop entity indices that can be cloned into ephemeral host-owned props.",
       annotations: readOnlyAnnotations,
     },
     () => {
@@ -198,7 +198,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
   mcp.registerTool(
     "raycast",
     {
-      title: "Raycast the authoritative world",
+      title: "Raycast the host world",
       description:
         "Cast a ray through the current Box3D world. Displacement is an offset from origin, not an endpoint.",
       inputSchema: z
@@ -218,7 +218,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
     {
       title: "Spawn an ephemeral prop",
       description:
-        "Clone a compiled physics-prop archetype into the authoritative Box3D world. Omit entityIndex to use the first available archetype.",
+        "Clone a compiled physics-prop archetype into the host Box3D world. Omit entityIndex to use the first available archetype.",
       inputSchema: z
         .object({
           entityIndex: z.number().int().min(0).optional(),
@@ -260,7 +260,7 @@ function createMcpServer(options: DevMcpOptions): McpServer {
     {
       title: "Spawn an MCP-controlled player",
       description:
-        "Spawn an ephemeral authoritative player. Position is the capsule centre; omit it to use the default map spawn.",
+        "Spawn an ephemeral host-owned player. Position is the capsule centre; omit it to use the default map spawn.",
       inputSchema: z
         .object({
           position: vec3Schema.optional(),
@@ -271,7 +271,13 @@ function createMcpServer(options: DevMcpOptions): McpServer {
     },
     ({ position, yaw }) => {
       const player = options.game.spawnDevPlayer(position, yaw);
-      options.created({ id: player.id, kind: "player" });
+      options.created({
+        id: player.id,
+        kind: "player",
+        ownerPlayerId: null,
+        authorityVersion: 1,
+        transferPolicy: "fixed",
+      });
       const state = readWorld(options).players.find((candidate) => sameId(candidate.id, player.id));
       return toolResult({ controllerId: player.controllerId, player: state ?? null });
     },

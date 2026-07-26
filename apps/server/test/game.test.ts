@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { PLAYER_HALF_HEIGHT, compileWorld, type WorldBundle } from "@gurgur/game";
+import { compileWorld, type WorldBundle } from "@gurgur/game";
 import {
-  INPUT_INTENT_TIMEOUT_TICKS,
   PHYSICS_DT,
   PROTOCOL_VERSION,
-  SNAPSHOT_FLAG_GRABBED,
   type InputCommand,
+  type NetworkBodyState,
+  type NetworkPlayerState,
+  type OwnershipRequestMessage,
   type RuntimeId,
-  type Snapshot,
 } from "@gurgur/engine";
-import { AuthoritativeGame } from "../src/game";
+import { WorldHost } from "../src/game";
 import { WorldStore } from "../src/store";
 
 const fixtures = [
@@ -19,12 +19,12 @@ const fixtures = [
   "network-domino-field",
 ] as const;
 
-describe("authoritative network physics", () => {
-  test("loads every authored interaction fixture and settles one finite Box3D world", async () => {
+describe("per-object authority host", () => {
+  test("loads every interaction fixture and simulates every unowned body at fixed steps", async () => {
     for (const name of fixtures) {
       const bundle = await fixture(name);
       const store = new WorldStore(":memory:");
-      const game = await AuthoritativeGame.create(
+      const game = await WorldHost.create(
         store,
         () => {},
         () => {},
@@ -36,16 +36,16 @@ describe("authoritative network physics", () => {
         for (let tick = 0; tick < 360; tick += 1) game.advance(PHYSICS_DT);
         const snapshot = game.snapshot();
         expect(snapshot.bodies).toHaveLength(expectedBodies);
-        for (const bodyState of snapshot.bodies) {
+        for (const snapshotBody of snapshot.bodies) {
           expect(
             [
-              ...Object.values(bodyState.position),
-              ...Object.values(bodyState.rotation),
-              ...Object.values(bodyState.linearVelocity ?? {}),
-              ...Object.values(bodyState.angularVelocity ?? {}),
+              ...Object.values(snapshotBody.position),
+              ...Object.values(snapshotBody.rotation),
+              ...Object.values(snapshotBody.linearVelocity ?? {}),
+              ...Object.values(snapshotBody.angularVelocity ?? {}),
             ].every(Number.isFinite),
           ).toBe(true);
-          expect(bodyState.position.y).toBeGreaterThan(-0.1);
+          expect(snapshotBody.position.y).toBeGreaterThan(-0.1);
         }
       } finally {
         game.stop();
@@ -54,219 +54,202 @@ describe("authoritative network physics", () => {
     }
   });
 
-  test("pushes a light prop only in the server simulation", async () => {
-    const bundle = await fixture("network-push-corridor");
+  test("accepts browser-owned player state and never advances that player from host input", async () => {
     const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
-      store,
-      () => {},
-      () => {},
-      { worldBundle: bundle },
-    );
-    try {
-      const player = game.connectPlayer("push-player");
-      const light = runtimeId(game, "corridor.light");
-      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
-      const before = body(game.snapshot(), light).position.x;
-      for (let sequence = 0; sequence < 180; sequence += 1) {
-        game.acceptInput(player, command(game, sequence, { moveX: 1, lookYaw: 0 }));
-        game.advance(PHYSICS_DT);
-      }
-      expect(body(game.snapshot(), light).position.x).toBeGreaterThan(before + 0.35);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
-  test("replicates authoritative grab ownership until the player releases it", async () => {
-    const bundle = await fixture("network-push-corridor");
-    const heavyEntity = bundle.entities.find(
-      (entity) => entity.authoredId === "corridor.heavy" && entity.kind === "physics-prop",
-    )!;
-    const heavyBrush = bundle.brushes[heavyEntity.body!.brushIndices[0]!]!;
-    const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
-      store,
-      () => {},
-      () => {},
-      {
-        worldBundle: bundle,
-        playerSpawn: {
-          x: heavyBrush.center.x,
-          y: PLAYER_HALF_HEIGHT,
-          z: heavyBrush.center.z + 2.5,
-        },
-      },
-    );
-    try {
-      const player = game.connectPlayer("grab-player");
-      const heavy = runtimeId(game, "corridor.heavy");
-      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
-
-      game.acceptInput(
-        player,
-        command(game, 0, {
-          lookPitch: -0.18,
-          interactTarget: heavy,
-          primaryCounter: 1,
-        }),
-      );
-      game.advance(PHYSICS_DT);
-      expect(game.grabbedTarget(player)).toEqual(heavy);
-      expect((body(game.snapshot(), heavy).flags ?? 0) & SNAPSHOT_FLAG_GRABBED).toBe(
-        SNAPSHOT_FLAG_GRABBED,
-      );
-
-      game.acceptInput(player, command(game, 1, { primaryCounter: 2 }));
-      game.advance(PHYSICS_DT);
-      expect(game.grabbedTarget(player)).toBeNull();
-      expect((body(game.snapshot(), heavy).flags ?? 0) & SNAPSHOT_FLAG_GRABBED).toBe(0);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
-  test("pulls a grabbed prop to the view target and keeps it in front through a turn", async () => {
-    const bundle = await fixture("network-boxes");
-    const heavyEntity = bundle.entities.find(
-      (entity) => entity.authoredId === "fixture.push" && entity.kind === "physics-prop",
-    )!;
-    const heavyBrush = bundle.brushes[heavyEntity.body!.brushIndices[0]!]!;
-    const spawn = {
-      x: heavyBrush.center.x,
-      y: PLAYER_HALF_HEIGHT,
-      z: heavyBrush.center.z + 2.5,
-    };
-    const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
-      store,
-      () => {},
-      () => {},
-      { worldBundle: bundle, playerSpawn: spawn },
-    );
-    try {
-      const player = game.connectPlayer("tracking-grab-player");
-      const heavy = runtimeId(game, "fixture.push");
-      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
-      const startingDistance = Math.abs(body(game.snapshot(), heavy).position.z - spawn.z);
-
-      game.acceptInput(
-        player,
-        command(game, 0, {
-          lookPitch: -0.18,
-          interactTarget: heavy,
-          primaryCounter: 1,
-        }),
-      );
-      for (let tick = 0; tick < 60; tick += 1) game.advance(PHYSICS_DT);
-      const held = body(game.snapshot(), heavy).position;
-      expect(game.grabbedTarget(player)).toEqual(heavy);
-      expect(Math.abs(held.z - spawn.z)).toBeLessThan(startingDistance - 0.3);
-
-      game.acceptInput(
-        player,
-        command(game, 1, {
-          lookYaw: Math.PI / 2,
-          lookPitch: 0,
-          interactTarget: heavy,
-          primaryCounter: 1,
-        }),
-      );
-      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
-      const turned = body(game.snapshot(), heavy).position;
-      expect(game.grabbedTarget(player)).toEqual(heavy);
-      expect(turned.x).toBeLessThan(spawn.x - 0.65);
-      expect(Math.abs(turned.z - spawn.z)).toBeLessThan(0.8);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
-  test("applies only the newest intent in a burst and preserves monotonic action counters", async () => {
-    const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
+    const game = await WorldHost.create(
       store,
       () => {},
       () => {},
     );
     try {
-      const player = game.connectPlayer("latest-intent");
-      for (let tick = 0; tick < 120; tick += 1) game.advance(PHYSICS_DT);
-      for (let sequence = 0; sequence < 300; sequence += 1) {
-        expect(
-          game.acceptInput(
-            player,
-            command(game, sequence, {
-              moveX: sequence === 299 ? 1 : -1,
-              buttons: sequence === 299 ? 1 : 0,
-              jumpCounter: sequence === 299 ? 1 : 0,
-            }),
-          ),
-        ).toBe(true);
-      }
-      game.advance(PHYSICS_DT);
-      const state = game.snapshot().players.find((candidate) => same(candidate.id, player))!;
-      expect(state.lastProcessedInputSequence).toBe(299);
-      expect(state.lastJumpCounter).toBe(1);
-      expect(state.verticalVelocity).toBeGreaterThan(0);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
-  test("expires a missing held intent quickly instead of walking for three quarters of a second", async () => {
-    const bundle = await fixture("network-push-corridor");
-    const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
-      store,
-      () => {},
-      () => {},
-      { worldBundle: bundle },
-    );
-    try {
-      const player = game.connectPlayer("input-timeout");
-      for (let tick = 0; tick < 90; tick += 1) game.advance(PHYSICS_DT);
-      game.acceptInput(player, command(game, 0, { moveZ: 1 }));
-      for (let tick = 0; tick < INPUT_INTENT_TIMEOUT_TICKS + 1; tick += 1) game.advance(PHYSICS_DT);
-      const expired = game.playerPosition(player)!;
+      const player = game.connectPlayer("browser-player");
+      const initial = playerState(game, player);
+      expect(game.acceptInput(player, input(game, 1))).toBe(false);
       for (let tick = 0; tick < 30; tick += 1) game.advance(PHYSICS_DT);
-      const stopped = game.playerPosition(player)!;
-      expect(Math.hypot(stopped.x - expired.x, stopped.z - expired.z)).toBeLessThan(0.03);
+      expect(game.playerPosition(player)).toEqual(initial.position);
+
+      const published = {
+        ...initial,
+        stateSequence: 1,
+        position: { x: initial.position.x + 3, y: initial.position.y, z: initial.position.z },
+        yaw: 0.75,
+      };
+      expect(game.acceptOwnedStates(player, [published])).toBe(true);
+      expect(game.playerPosition(player)).toEqual(published.position);
+      expect(game.acceptOwnedStates(player, [{ ...published, stateSequence: 0 }])).toBe(false);
     } finally {
       game.stop();
       store.close();
     }
   });
 
-  test("respawns an authoritative player that falls below map collision", async () => {
+  test("gives a grab lease to the first valid requester and contact never transfers it", async () => {
     const bundle = await fixture("network-push-corridor");
-    const emitted: Snapshot[] = [];
     const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
+    const game = await WorldHost.create(
       store,
-      (snapshot) => emitted.push(snapshot),
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const first = game.connectPlayer("first-grabber");
+      const second = game.connectPlayer("second-grabber");
+      const target = runtimeId(game, "corridor.light");
+      const targetState = bodyState(game, target);
+      placePlayer(game, first, targetState.position, 1);
+      placePlayer(game, second, targetState.position, 1);
+
+      const request = ownershipRequest(game, target, targetState.authorityVersion);
+      const granted = game.requestOwnership(first, request);
+      expect(typeof granted).not.toBe("string");
+      if (typeof granted === "string") throw new Error(granted);
+      expect(granted.ownerPlayerId).toEqual(first);
+      expect(granted.authorityVersion).toBe(targetState.authorityVersion + 1);
+      expect(game.requestOwnership(second, { ...request, requestId: 2 })).toBe("stale");
+
+      const heldPosition = { ...granted.state.position };
+      for (let tick = 0; tick < 120; tick += 1) game.advance(PHYSICS_DT);
+      const descriptor = descriptorFor(game, target);
+      expect(descriptor.ownerPlayerId).toEqual(first);
+      expect(bodyState(game, target).position).toEqual(heldPosition);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("rejects stale-owner state and preserves release velocity through host takeover", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const player = game.connectPlayer("release-player");
+      const target = runtimeId(game, "corridor.light");
+      const initial = bodyState(game, target);
+      placePlayer(game, player, initial.position, 1);
+      const grant = game.requestOwnership(
+        player,
+        ownershipRequest(game, target, initial.authorityVersion),
+      );
+      if (typeof grant === "string") throw new Error(grant);
+      if (grant.state.kind !== "body") throw new Error("prop grant returned player state");
+      const owned: NetworkBodyState = {
+        ...grant.state,
+        stateSequence: 7,
+        position: { x: initial.position.x, y: initial.position.y + 1, z: initial.position.z },
+        linearVelocity: { x: 3, y: 0, z: 0 },
+      };
+      expect(game.acceptOwnedStates(player, [owned])).toBe(true);
+      const changed = game.dropOwnership(player, {
+        worldEpoch: game.worldEpoch,
+        id: target,
+        authorityVersion: grant.authorityVersion,
+        state: owned,
+      });
+      expect(changed).not.toBeNull();
+      expect(changed!.ownerPlayerId).toBeNull();
+      expect(changed!.state.linearVelocity.x).toBeCloseTo(3, 5);
+      expect(game.acceptOwnedStates(player, [{ ...owned, stateSequence: 8 }])).toBe(false);
+      const releasedX = changed!.state.position.x;
+      game.advance(PHYSICS_DT);
+      expect(bodyState(game, target).position.x).toBeGreaterThan(releasedX);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("reclaims a held prop on disconnect and permits a new first-wins lease", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const disconnected = game.connectPlayer("disconnect-holder");
+      const successor = game.connectPlayer("successor");
+      const target = runtimeId(game, "corridor.light");
+      const initial = bodyState(game, target);
+      placePlayer(game, disconnected, initial.position, 1);
+      placePlayer(game, successor, initial.position, 1);
+      const grant = game.requestOwnership(
+        disconnected,
+        ownershipRequest(game, target, initial.authorityVersion),
+      );
+      if (typeof grant === "string") throw new Error(grant);
+
+      const reclaimed = game.reclaimOwnedBy(disconnected);
+      expect(reclaimed).toHaveLength(1);
+      expect(reclaimed[0]!.ownerPlayerId).toBeNull();
+      const takeover = game.requestOwnership(
+        successor,
+        ownershipRequest(game, target, reclaimed[0]!.authorityVersion),
+      );
+      expect(typeof takeover).not.toBe("string");
+      if (typeof takeover === "string") throw new Error(takeover);
+      expect(takeover.ownerPlayerId).toEqual(successor);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("reconnect and reset publish fresh player authority assignments", async () => {
+    const store = new WorldStore(":memory:");
+    const worlds: number[] = [];
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      (world) => worlds.push(world.worldEpoch),
+    );
+    try {
+      const player = game.connectPlayer("reconnect-player");
+      const initial = playerState(game, player);
+      const reassigned = game.reassignPlayer(player);
+      expect(reassigned?.authorityVersion).toBe(initial.authorityVersion + 1);
+      expect(
+        game.acceptOwnedStates(player, [
+          { ...initial, stateSequence: 1, authorityVersion: initial.authorityVersion },
+        ]),
+      ).toBe(false);
+
+      const oldEpoch = game.worldEpoch;
+      game.reset();
+      expect(game.worldEpoch).toBe(oldEpoch + 1);
+      expect(worlds).toEqual([oldEpoch + 1]);
+      expect(playerState(game, player).authorityVersion).toBe(reassigned!.authorityVersion + 1);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("keeps the 16-player/128-prop host tick budget", async () => {
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
       () => {},
       {
-        worldBundle: bundle,
-        playerSpawn: { x: 1_000, y: 1, z: 1_000 },
+        extraDynamicBodies: 122,
       },
     );
     try {
-      const player = game.connectPlayer("void-recovery");
-      for (let tick = 0; tick < 360; tick += 1) game.advance(PHYSICS_DT);
-      const samples = emitted.flatMap((snapshot) =>
-        snapshot.bodies.filter((candidate) => same(candidate.id, player)),
-      );
-      expect(samples.length).toBeGreaterThan(30);
-      expect(
-        samples.every(({ position }) =>
-          [position.x, position.y, position.z].every(Number.isFinite),
-        ),
-      ).toBe(true);
+      for (let index = 0; index < 16; index += 1) game.connectPlayer(`budget-${index}`);
+      for (let tick = 0; tick < 600; tick += 1) game.advance(PHYSICS_DT);
+      expect(game.bootstrapStates().filter((state) => state.kind === "player")).toHaveLength(16);
+      const metrics = game.metrics();
+      expect(metrics.tickP95Ms).toBeLessThan(8);
+      expect(metrics.tickP99Ms).toBeLessThan(12);
     } finally {
       game.stop();
       store.close();
@@ -276,7 +259,7 @@ describe("authoritative network physics", () => {
   test("persists bodies by authored identity and invalidates runtime generations on reset", async () => {
     const bundle = await fixture("network-domino-field");
     const store = new WorldStore(":memory:");
-    const first = await AuthoritativeGame.create(
+    const first = await WorldHost.create(
       store,
       () => {},
       () => {},
@@ -287,13 +270,11 @@ describe("authoritative network physics", () => {
     const oldIds = new Set(first.worldMessage().runtimeEntities.map(({ id }) => key(id)));
     first.stop();
 
-    const restored = await AuthoritativeGame.create(
+    const restored = await WorldHost.create(
       store,
       () => {},
       () => {},
-      {
-        worldBundle: bundle,
-      },
+      { worldBundle: bundle },
     );
     try {
       expect(restored.snapshot().bodies.map(({ position }) => position)).toEqual(
@@ -312,18 +293,31 @@ describe("authoritative network physics", () => {
   });
 });
 
-function command(
-  game: AuthoritativeGame,
-  sequence: number,
-  overrides: Partial<InputCommand> = {},
-): InputCommand {
+function ownershipRequest(
+  game: WorldHost,
+  target: RuntimeId,
+  authorityVersion: number,
+): OwnershipRequestMessage {
   return {
-    type: "input",
+    type: "ownership-request",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch: game.worldEpoch,
+    requestId: 1,
+    target: { ...target },
+    authorityVersion,
+    holdDistance: 2,
+    relativeRotation: { x: 0, y: 0, z: 0, w: 1 },
+  };
+}
+
+function input(game: WorldHost, sequence: number): InputCommand {
+  return {
+    type: "input" as const,
     protocolVersion: PROTOCOL_VERSION,
     worldEpoch: game.worldEpoch,
     sequence,
     clientTick: sequence,
-    moveX: 0,
+    moveX: 1,
     moveZ: 0,
     lookYaw: 0,
     lookPitch: 0,
@@ -332,21 +326,66 @@ function command(
     interactCounter: 0,
     interactTarget: null,
     primaryCounter: 0,
-    ...overrides,
   };
 }
 
-function runtimeId(game: AuthoritativeGame, authoredId: string): RuntimeId {
-  const world = game.worldMessage();
-  return world.runtimeEntities.find(
-    (runtime) =>
-      runtime.kind === "world-entity" &&
-      world.bundle.entities[runtime.entityIndex]?.authoredId === authoredId,
-  )!.id;
+function placePlayer(
+  game: WorldHost,
+  id: RuntimeId,
+  position: NetworkPlayerState["position"],
+  sequence: number,
+) {
+  const current = playerState(game, id);
+  expect(
+    game.acceptOwnedStates(id, [
+      {
+        ...current,
+        stateSequence: sequence,
+        position: { ...position },
+      },
+    ]),
+  ).toBe(true);
 }
 
-function body(snapshot: Snapshot, id: RuntimeId) {
-  return snapshot.bodies.find((candidate) => same(candidate.id, id))!;
+function playerState(game: WorldHost, id: RuntimeId): NetworkPlayerState {
+  const state = game
+    .bootstrapStates()
+    .find(
+      (candidate): candidate is NetworkPlayerState =>
+        candidate.kind === "player" && same(candidate.id, id),
+    );
+  if (!state) throw new Error("player state is unavailable");
+  return structuredClone(state);
+}
+
+function bodyState(game: WorldHost, id: RuntimeId): NetworkBodyState {
+  const state = game
+    .bootstrapStates()
+    .find(
+      (candidate): candidate is NetworkBodyState =>
+        candidate.kind === "body" && same(candidate.id, id),
+    );
+  if (!state) throw new Error("body state is unavailable");
+  return structuredClone(state);
+}
+
+function descriptorFor(game: WorldHost, id: RuntimeId) {
+  const descriptor = game
+    .worldMessage()
+    .runtimeEntities.find((candidate) => same(candidate.id, id));
+  if (!descriptor) throw new Error("runtime descriptor is unavailable");
+  return descriptor;
+}
+
+function runtimeId(game: WorldHost, authoredId: string): RuntimeId {
+  const world = game.worldMessage();
+  const runtime = world.runtimeEntities.find(
+    (candidate) =>
+      candidate.kind === "world-entity" &&
+      world.bundle.entities[candidate.entityIndex]?.authoredId === authoredId,
+  );
+  if (!runtime) throw new Error(`runtime entity is unavailable: ${authoredId}`);
+  return { ...runtime.id };
 }
 
 function same(left: RuntimeId, right: RuntimeId): boolean {

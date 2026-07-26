@@ -1,9 +1,6 @@
 import { PROTOCOL_VERSION } from "./config";
-import type { InputCommand, Snapshot } from "./types";
 import type { LifecycleMessage, RuntimeEntityRef } from "./world";
 
-export const SNAPSHOT_TAG = 1;
-export const INPUT_TAG = 2;
 export const LIFECYCLE_TAG = 3;
 
 const encoder = new TextEncoder();
@@ -28,42 +25,6 @@ export function decodeLifecycle(bytes: ArrayBuffer | ArrayBufferView): Lifecycle
     throw new Error("invalid lifecycle packet");
   }
   return value as LifecycleMessage;
-}
-
-export function encodeInput(command: InputCommand): ArrayBuffer {
-  return encodeTaggedJson(INPUT_TAG, command);
-}
-
-export function decodeInput(bytes: ArrayBuffer | ArrayBufferView): InputCommand {
-  const value = decodeTaggedJson(bytes, INPUT_TAG);
-  if (
-    !isObject(value) ||
-    value.type !== "input" ||
-    value.protocolVersion !== PROTOCOL_VERSION ||
-    !Number.isSafeInteger(value.worldEpoch) ||
-    !Number.isSafeInteger(value.sequence)
-  ) {
-    throw new Error("invalid input packet");
-  }
-  return value as InputCommand;
-}
-
-export function encodeSnapshot(snapshot: Snapshot): ArrayBuffer {
-  return encodeTaggedJson(SNAPSHOT_TAG, snapshot);
-}
-
-export function decodeSnapshot(bytes: ArrayBuffer | ArrayBufferView): Snapshot {
-  const value = decodeTaggedJson(bytes, SNAPSHOT_TAG);
-  if (
-    !isObject(value) ||
-    !Number.isSafeInteger(value.worldEpoch) ||
-    !Number.isSafeInteger(value.serverTick) ||
-    !Array.isArray(value.bodies) ||
-    !Array.isArray(value.players)
-  ) {
-    throw new Error("invalid snapshot packet");
-  }
-  return value as Snapshot;
 }
 
 function encodeTaggedJson(tag: number, value: unknown): ArrayBuffer {
@@ -97,6 +58,9 @@ function isRuntimeEntityRef(value: unknown): value is RuntimeEntityRef {
   return (
     isObject(value) &&
     isRuntimeId(value.id) &&
+    (value.ownerPlayerId === null || isRuntimeId(value.ownerPlayerId)) &&
+    Number.isSafeInteger(value.authorityVersion) &&
+    (value.transferPolicy === "fixed" || value.transferPolicy === "grab-lease") &&
     (value.kind === "player" ||
       (value.kind === "world-entity" && Number.isSafeInteger(value.entityIndex)))
   );

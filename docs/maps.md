@@ -132,13 +132,14 @@ The base schema contains:
 | `light_spot`        | finite cone light                               |
 
 The schema drives compiler validation, FGD generation, and the TrenchBroom game
-configuration. The authoritative server constructs the corresponding runtime
-registries from the validated compiled entities. Properties are typed and
+configuration. Bun constructs the corresponding runtime registries and
+per-object authority descriptors from the validated compiled entities.
+Properties are typed and
 composable; arbitrary mapper scripts and runtime code strings are forbidden.
 
 Compilation requires exactly one `worldspawn`, at least one uniquely named
 player spawn, and exactly one spawn named `default`. Authored gravity drives
-authoritative and predicted physics/controller behavior; authored sky color
+host and owner-worker physics/controller behavior; authored sky color
 drives renderer background and fog. Every target property must resolve, while
 multiple recipients may intentionally share a `targetname`.
 
@@ -174,7 +175,7 @@ The compiler requires that listener-local pair. While the local listener
 remains inside any such convex volume, the referenced audio node is claimed;
 leaving the last volume releases it. Audio nodes author a logical MP3 asset ID,
 volume, loop flag, fade durations, and deterministic overlap priority. These
-per-listener presentation claims require no authoritative transport or
+per-listener presentation claims require no coordinator message or
 persisted state.
 
 Navigation meshes are not part of Gurgur's runtime or bundle format. If navigation
@@ -182,8 +183,8 @@ becomes product scope, it must be generated from this compiler's collision
 surface and versioned independently from authored truth.
 
 `env_sprite` is deliberately render-only. Its map-space origin, sprite name,
-height, and glow flag compile into the immutable bundle, but the authoritative
-server creates no body, mechanism, persistence record, or runtime identity for it.
+height, and glow flag compile into the immutable bundle, but Bun creates no
+body, mechanism, persistence record, or runtime identity for it.
 
 The four mapper light classnames compile into one closed, generic `light`
 presentation capability. Colors are authored as linear RGB components.

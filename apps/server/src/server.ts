@@ -5,17 +5,29 @@ import { RTCPeerConnection, type RTCDataChannel, type RTCIceServer } from "werif
 import {
   PHYSICS_HZ,
   PROTOCOL_VERSION,
-  SNAPSHOT_HZ,
+  STATE_PUBLISH_HZ,
   STATE_BACKPRESSURE_BYTES,
   STATE_MAX_RETRANSMITS,
-  decodeInput,
+  OWNED_STATE_TAG,
+  OWNERSHIP_DROP_TAG,
+  OWNER_COMMIT_TAG,
+  STATE_ACK_TAG,
+  StateReplicationPeer,
+  binaryPacketTag,
+  cloneNetworkState,
+  decodeOwnedState,
+  decodeOwnershipDrop,
+  decodeOwnerCommit,
+  decodeStateAck,
   decodeClientControl,
+  encodeBootstrapState,
   encodeLifecycle,
-  encodeSnapshot,
-  type InputCommand,
+  encodeOwnershipChanged,
+  encodeStateCluster,
   type RuntimeId,
   type LifecycleMessage,
-  type Snapshot,
+  type NetworkObjectState,
+  type OwnershipChangedPacket,
   type SpeechMessage,
   type SpeechRejectedMessage,
   type Vec3,
@@ -24,7 +36,7 @@ import {
   type WorldManifestMessage,
 } from "@gurgur/engine";
 import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/game";
-import { AuthoritativeGame } from "./game";
+import { WorldHost } from "./game";
 import {
   loadAssetManifest,
   loadAudioAsset,
@@ -41,10 +53,14 @@ type ClientData = {
   sessionToken: string | null;
   socketGeneration: number;
   peerConnection: RTCPeerConnection | null;
-  inputChannel: RTCDataChannel | null;
+  ownerChannel: RTCDataChannel | null;
   stateChannel: RTCDataChannel | null;
+  replication: StateReplicationPeer;
   droppedStatePackets: number;
   rtcNegotiating: boolean;
+  ownerPacketWindowStartedAt: number;
+  ownerStatePacketCount: number;
+  ackPacketCount: number;
 };
 type SessionRecord = {
   playerId: RuntimeId;
@@ -53,6 +69,7 @@ type SessionRecord = {
   disconnectTimer: Timer | null;
 };
 let sourceSpeechWorker: Promise<Blob> | null = null;
+let sourcePhysicsWorker: Promise<Blob> | null = null;
 const LINTALKER_SCRIPT_SHA256 = "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c";
 const LINTALKER_WASM_SHA256 = "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b";
 
@@ -63,13 +80,13 @@ export type GurgurServer = {
   stop(): void;
 };
 
-export type ServerMetrics = ReturnType<AuthoritativeGame["metrics"]> & {
+export type ServerMetrics = ReturnType<WorldHost["metrics"]> & {
   worldEpoch: number;
   serverTick: number;
   connectedClients: number;
   backpressuredClients: number;
   queuedBytes: number;
-  maxSnapshotAgeMs: number;
+  maxStateAgeMs: number;
   stateTransportClients: number;
   droppedStatePackets: number;
 };
@@ -127,6 +144,12 @@ export async function createGurgurServer(
   const speechWorker = (await adjacentSpeechWorker.exists())
     ? adjacentSpeechWorker
     : await buildSourceSpeechWorker();
+  const adjacentPhysicsWorker = Bun.file(
+    new URL("../../web/src/physics-worker.js", import.meta.url),
+  );
+  const physicsWorker = (await adjacentPhysicsWorker.exists())
+    ? adjacentPhysicsWorker
+    : await buildSourcePhysicsWorker();
   const lintalkerScript = Bun.file(
     new URL("../../../third_party/lintalker/wintalker.js", import.meta.url),
   );
@@ -159,6 +182,8 @@ export async function createGurgurServer(
   const speechRateLimiter = new SpeechRateLimiter();
   const devClientEnabled = Bun.env.NODE_ENV !== "production" && options.devClientEnabled !== false;
   let shuttingDown = false;
+  const pendingStateBroadcast = new Map<string, NetworkObjectState>();
+  let stateBroadcastTimer: Timer | null = null;
   const metrics = (): ServerMetrics => {
     const active = [...clients].filter((socket) => socket.data.playerId);
     return {
@@ -173,7 +198,7 @@ export async function createGurgurServer(
         (sum, socket) => sum + (socket.data.stateChannel?.bufferedAmount ?? 0),
         0,
       ),
-      maxSnapshotAgeMs: 0,
+      maxStateAgeMs: 0,
       stateTransportClients: active.filter(
         (socket) => socket.data.stateChannel?.readyState === "open",
       ).length,
@@ -181,21 +206,47 @@ export async function createGurgurServer(
     };
   };
 
-  const broadcast = (snapshot: Snapshot): void => {
-    const packet = encodeSnapshot(snapshot);
+  const flushStateBroadcast = (): void => {
+    stateBroadcastTimer = null;
+    const states = [...pendingStateBroadcast.values()];
+    pendingStateBroadcast.clear();
+    if (states.length === 0 || shuttingDown) return;
+    const now = performance.now();
     for (const socket of clients) {
       if (!socket.data.playerId) continue;
       const channel = socket.data.stateChannel;
       if (channel?.readyState !== "open") continue;
-      if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
-        socket.data.droppedStatePackets += 1;
-        continue;
+      const clusters = socket.data.replication.createClusters(game.worldEpoch, states, now);
+      for (const cluster of clusters) {
+        if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
+          socket.data.droppedStatePackets += 1;
+          break;
+        }
+        try {
+          channel.send(Buffer.from(encodeStateCluster(cluster)));
+        } catch {
+          socket.close(1013, "state transport failed");
+          break;
+        }
       }
-      try {
-        channel.send(Buffer.from(packet));
-      } catch {
-        socket.close(1013, "state transport failed");
-      }
+    }
+  };
+  const broadcast = (states: NetworkObjectState[]): void => {
+    for (const state of states)
+      pendingStateBroadcast.set(
+        `${state.id.index}:${state.id.generation}`,
+        cloneNetworkState(state),
+      );
+    stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 1_000 / STATE_PUBLISH_HZ);
+  };
+
+  const broadcastOwnership = (message: OwnershipChangedPacket): void => {
+    pendingStateBroadcast.delete(`${message.id.index}:${message.id.generation}`);
+    const packet = encodeOwnershipChanged(message);
+    for (const socket of clients) {
+      if (!socket.data.playerId) continue;
+      socket.data.replication.seedReliable([message.state]);
+      socket.send(packet);
     }
   };
 
@@ -203,17 +254,29 @@ export async function createGurgurServer(
     message: LifecycleMessage,
     except?: Bun.ServerWebSocket<ClientData>,
   ): void => {
+    for (const removed of message.removed)
+      pendingStateBroadcast.delete(`${removed.index}:${removed.generation}`);
     const packet = encodeLifecycle(message);
     for (const socket of clients)
       if (socket !== except && socket.data.playerId) socket.send(packet);
   };
 
   const broadcastWorld = (world: WorldMessage): void => {
+    pendingStateBroadcast.clear();
+    if (stateBroadcastTimer) clearTimeout(stateBroadcastTimer);
+    stateBroadcastTimer = null;
     const message = JSON.stringify(toManifest(world));
-    for (const socket of clients) if (socket.data.playerId) socket.send(message);
+    const states = game.bootstrapStates();
+    const bootstrap = encodeBootstrapState({ worldEpoch: world.worldEpoch, states });
+    for (const socket of clients) {
+      if (!socket.data.playerId) continue;
+      socket.data.replication.seedReliable(states);
+      socket.send(message);
+      socket.send(bootstrap);
+    }
   };
 
-  const game = await AuthoritativeGame.create(store, broadcast, broadcastWorld, {
+  const game = await WorldHost.create(store, broadcast, broadcastWorld, {
     playerSpawn: options.playerSpawn,
     extraDynamicBodies: options.extraDynamicBodies,
     worldBundle: options.worldBundle,
@@ -247,27 +310,54 @@ export async function createGurgurServer(
           },
         )
       : devUnavailable();
-  const acceptInputPacket = (
+  const acceptOwnerPacket = (
     socket: Bun.ServerWebSocket<ClientData>,
     packet: ArrayBuffer | ArrayBufferView,
   ): boolean => {
-    let command: InputCommand;
     try {
-      command = decodeInput(packet);
+      const now = performance.now();
+      if (now - socket.data.ownerPacketWindowStartedAt >= 1_000) {
+        socket.data.ownerPacketWindowStartedAt = now;
+        socket.data.ownerStatePacketCount = 0;
+        socket.data.ackPacketCount = 0;
+      }
+      const tag = binaryPacketTag(packet);
+      if (tag === OWNED_STATE_TAG) {
+        socket.data.ownerStatePacketCount += 1;
+        if (socket.data.ownerStatePacketCount > 120) return true;
+        const ownerState = decodeOwnedState(packet);
+        if (
+          ownerState.worldEpoch === game.worldEpoch &&
+          socket.data.playerId !== null &&
+          game.acceptOwnedStates(socket.data.playerId, ownerState.states)
+        ) {
+          broadcast(ownerState.states);
+        }
+        return true;
+      }
+      if (tag === STATE_ACK_TAG) {
+        socket.data.ackPacketCount += 1;
+        if (socket.data.ackPacketCount > 1_024) return true;
+        const ack = decodeStateAck(packet);
+        if (ack.worldEpoch === game.worldEpoch) socket.data.replication.acknowledge(ack);
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
-    if (!socket.data.playerId) return false;
-    return validInputCommand(command) && game.acceptInput(socket.data.playerId, command);
   };
   const closeRtc = (socket: Bun.ServerWebSocket<ClientData>): void => {
-    socket.data.inputChannel?.close();
-    socket.data.stateChannel?.close();
-    if (socket.data.peerConnection) void socket.data.peerConnection.close();
-    socket.data.inputChannel = null;
+    const ownerChannel = socket.data.ownerChannel;
+    const stateChannel = socket.data.stateChannel;
+    const peerConnection = socket.data.peerConnection;
+    socket.data.ownerChannel = null;
     socket.data.stateChannel = null;
     socket.data.peerConnection = null;
     socket.data.rtcNegotiating = false;
+    ownerChannel?.close();
+    stateChannel?.close();
+    if (peerConnection) void peerConnection.close();
   };
   const startRtcOffer = async (socket: Bun.ServerWebSocket<ClientData>): Promise<void> => {
     if (socket.data.rtcNegotiating) {
@@ -286,16 +376,14 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v4", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v5", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
     socket.data.stateChannel = stateChannel;
     stateChannel.stateChanged.subscribe((state) => {
-      if (state !== "open" || socket.data.stateChannel !== stateChannel) return;
-      const playerId = socket.data.playerId;
-      if (!playerId) return;
-      stateChannel.send(Buffer.from(encodeSnapshot(game.snapshot())));
+      if (state === "closed" && socket.data.stateChannel === stateChannel)
+        socket.close(1013, "state transport closed");
     });
     peer.connectionStateChange.subscribe((state) => {
       if (socket.data.peerConnection === peer && state === "failed")
@@ -306,11 +394,15 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-input-v4" && !socket.data.inputChannel) {
-        socket.data.inputChannel = channel;
+      if (channel.label === "gurgur-owner-v5" && !socket.data.ownerChannel) {
+        socket.data.ownerChannel = channel;
+        channel.stateChanged.subscribe((state) => {
+          if (state === "closed" && socket.data.ownerChannel === channel)
+            socket.close(1013, "owner transport closed");
+        });
         channel.onMessage.subscribe((packet) => {
-          if (typeof packet === "string" || !acceptInputPacket(socket, packet))
-            socket.close(1007, "invalid input datagram");
+          if (typeof packet === "string" || !acceptOwnerPacket(socket, packet))
+            socket.close(1007, "invalid owner-state datagram");
         });
         return;
       }
@@ -373,6 +465,9 @@ export async function createGurgurServer(
         headers: { "content-type": "application/wasm" },
       }),
       "/speech-worker.js": new Response(speechWorker, {
+        headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
+      }),
+      "/physics-worker.js": new Response(physicsWorker, {
         headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
       }),
       "/lintalker.js": {
@@ -537,10 +632,14 @@ export async function createGurgurServer(
               sessionToken: null,
               socketGeneration: 0,
               peerConnection: null,
-              inputChannel: null,
+              ownerChannel: null,
               stateChannel: null,
+              replication: new StateReplicationPeer(),
               droppedStatePackets: 0,
               rtcNegotiating: false,
+              ownerPacketWindowStartedAt: performance.now(),
+              ownerStatePacketCount: 0,
+              ackPacketCount: 0,
             },
           })
         )
@@ -618,7 +717,7 @@ export async function createGurgurServer(
             socket.data.playerId = session.playerId;
             socket.data.sessionToken = token;
             socket.data.socketGeneration = control.socketGeneration;
-            game.beginInputStream(session.playerId);
+            const reassigned = createdPlayer ? null : game.reassignPlayer(session.playerId);
             if (replaced && replaced !== socket) replaced.close(4001, "replaced by reconnect");
             const welcome: WelcomeMessage = {
               type: "welcome",
@@ -627,12 +726,21 @@ export async function createGurgurServer(
               playerId: session.playerId,
               mapRevision: game.mapRevision,
               physicsHz: PHYSICS_HZ,
-              snapshotHz: SNAPSHOT_HZ,
+              stateHz: STATE_PUBLISH_HZ,
               sessionToken: token!,
               socketGeneration: control.socketGeneration,
             };
             socket.send(JSON.stringify(welcome));
             socket.send(JSON.stringify(toManifest(game.worldMessage())));
+            const bootstrapStates = game.bootstrapStates();
+            socket.data.replication.seedReliable(bootstrapStates);
+            socket.send(
+              encodeBootstrapState({
+                worldEpoch: game.worldEpoch,
+                states: bootstrapStates,
+              }),
+            );
+            if (reassigned) broadcastOwnership(reassigned);
             void startRtcOffer(socket);
             if (createdPlayer) {
               const created = game
@@ -653,7 +761,42 @@ export async function createGurgurServer(
                   },
                   socket,
                 );
+              const createdState = game
+                .bootstrapStates()
+                .find((state) => sameId(state.id, session!.playerId));
+              if (createdState)
+                broadcastOwnership({
+                  worldEpoch: game.worldEpoch,
+                  requestId: null,
+                  id: { ...createdState.id },
+                  ownerPlayerId: { ...session.playerId },
+                  authorityVersion: createdState.authorityVersion,
+                  state: createdState,
+                });
             }
+            return;
+          }
+          if (control.type === "ownership-request" && socket.data.playerId) {
+            const result = game.requestOwnership(socket.data.playerId, control);
+            if (typeof result === "string") {
+              socket.send(
+                JSON.stringify({
+                  type: "ownership-denied",
+                  protocolVersion: PROTOCOL_VERSION,
+                  worldEpoch: game.worldEpoch,
+                  requestId: control.requestId,
+                  target: control.target,
+                  reason: result,
+                }),
+              );
+            } else {
+              broadcastOwnership(result);
+            }
+            return;
+          }
+          if (control.type === "use-request" && socket.data.playerId) {
+            if (control.worldEpoch === game.worldEpoch)
+              game.useOwnedPlayer(socket.data.playerId, control.target);
             return;
           }
           if (control.type === "speak" && socket.data.playerId && socket.data.sessionToken) {
@@ -725,7 +868,36 @@ export async function createGurgurServer(
           socket.close(1007, "invalid control packet");
           return;
         }
-        socket.close(1003, "binary WebSocket gameplay packets are unsupported");
+        try {
+          if (binaryPacketTag(message) === OWNER_COMMIT_TAG && socket.data.playerId) {
+            const commit = decodeOwnerCommit(message);
+            if (
+              commit.worldEpoch === game.worldEpoch &&
+              game.acceptOwnedStates(socket.data.playerId, commit.states)
+            ) {
+              for (const state of commit.states)
+                broadcastOwnership({
+                  worldEpoch: game.worldEpoch,
+                  requestId: null,
+                  id: { ...state.id },
+                  ownerPlayerId: { ...socket.data.playerId },
+                  authorityVersion: state.authorityVersion,
+                  state,
+                });
+            }
+            return;
+          }
+          if (binaryPacketTag(message) === OWNERSHIP_DROP_TAG && socket.data.playerId) {
+            const changed = game.dropOwnership(socket.data.playerId, decodeOwnershipDrop(message));
+            if (changed) {
+              broadcastOwnership(changed);
+              return;
+            }
+          }
+        } catch {
+          // Invalid reliable gameplay packets close the control connection below.
+        }
+        socket.close(1007, "invalid reliable gameplay packet");
       },
       close(socket) {
         clients.delete(socket);
@@ -735,6 +907,7 @@ export async function createGurgurServer(
         if (!session || session.socket !== socket) return;
         session.socket = null;
         if (shuttingDown) return;
+        for (const changed of game.reclaimOwnedBy(session.playerId)) broadcastOwnership(changed);
         session.disconnectTimer = setTimeout(() => {
           if (session.socket || !sessions.delete(token!)) return;
           speechRateLimiter.forget(token!);
@@ -759,14 +932,25 @@ export async function createGurgurServer(
         port: options.devMcpPort,
         connectedNetworkPlayers: () =>
           [...clients].flatMap((socket) => (socket.data.playerId ? [socket.data.playerId] : [])),
-        created: (entity) =>
+        created: (entity) => {
           broadcastLifecycle({
             type: "lifecycle",
             protocolVersion: PROTOCOL_VERSION,
             worldEpoch: game.worldEpoch,
             created: [entity],
             removed: [],
-          }),
+          });
+          const state = game.bootstrapStates().find((candidate) => sameId(candidate.id, entity.id));
+          if (state)
+            broadcastOwnership({
+              worldEpoch: game.worldEpoch,
+              requestId: null,
+              id: { ...entity.id },
+              ownerPlayerId: entity.ownerPlayerId ? { ...entity.ownerPlayerId } : null,
+              authorityVersion: state.authorityVersion,
+              state,
+            });
+        },
         removed: (id) =>
           broadcastLifecycle({
             type: "lifecycle",
@@ -791,6 +975,9 @@ export async function createGurgurServer(
     stop() {
       if (shuttingDown) return;
       shuttingDown = true;
+      if (stateBroadcastTimer) clearTimeout(stateBroadcastTimer);
+      stateBroadcastTimer = null;
+      pendingStateBroadcast.clear();
       for (const session of sessions.values())
         if (session.disconnectTimer) clearTimeout(session.disconnectTimer);
       for (const socket of clients) {
@@ -830,37 +1017,32 @@ function buildSourceSpeechWorker(): Promise<Blob> {
   return sourceSpeechWorker;
 }
 
+function buildSourcePhysicsWorker(): Promise<Blob> {
+  sourcePhysicsWorker ??= Bun.build({
+    entrypoints: [new URL("../../web/src/physics-worker.ts", import.meta.url).pathname],
+    target: "browser",
+    format: "esm",
+    minify: true,
+  }).then((result) => {
+    if (!result.success || !result.outputs[0])
+      throw new Error("failed to build browser physics worker");
+    return result.outputs[0];
+  });
+  return sourcePhysicsWorker;
+}
+
 async function fileHash(file: Blob): Promise<string> {
   return createHash("sha256")
     .update(new Uint8Array(await file.arrayBuffer()))
     .digest("hex");
 }
 
-function validInputCommand(input: InputCommand): boolean {
-  const finite = (value: number): boolean => Number.isFinite(value);
-  if (
-    input.type !== "input" ||
-    input.protocolVersion !== PROTOCOL_VERSION ||
-    !finite(input.moveX) ||
-    !finite(input.moveZ) ||
-    !finite(input.lookYaw) ||
-    !finite(input.lookPitch) ||
-    Math.abs(input.moveX) > 1.01 ||
-    Math.abs(input.moveZ) > 1.01 ||
-    Math.abs(input.lookYaw) > 1_000_000 ||
-    Math.abs(input.lookPitch) > Math.PI / 2 + 0.01 ||
-    (input.interactTarget !== null &&
-      (!Number.isInteger(input.interactTarget.index) ||
-        !Number.isInteger(input.interactTarget.generation) ||
-        input.interactTarget.index < 0 ||
-        input.interactTarget.generation < 0))
-  )
-    return false;
-  return true;
-}
-
 function persistentIdForToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function sameId(a: RuntimeId, b: RuntimeId): boolean {
+  return a.index === b.index && a.generation === b.generation;
 }
 
 function readRtcPortRange(): [number, number] | undefined {

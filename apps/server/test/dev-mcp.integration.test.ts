@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 describe("dev MCP control plane", () => {
-  test("is opt-in, loopback-only, and controls ephemeral authoritative actors", async () => {
+  test("is opt-in, loopback-only, and controls ephemeral host actors", async () => {
     const directory = await mkdtemp(join(tmpdir(), "gurgur-dev-mcp-"));
     cleanup.push(() => rm(directory, { recursive: true, force: true }));
     const disabled = await createGurgurServer({

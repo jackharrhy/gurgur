@@ -1,4 +1,4 @@
-import type { RuntimeId, Vec3 } from "./types";
+import type { RuntimeId, TransferPolicy, Vec3 } from "./types";
 
 export type Vec2 = { x: number; y: number };
 export type Rgb = { r: number; g: number; b: number };
@@ -138,14 +138,20 @@ export type WorldBundle<TEntity extends CompiledEntityCapabilities = CompiledEnt
   renderBatches: CompiledRenderBatch[];
 };
 
+type AuthorityDescriptor = {
+  ownerPlayerId: RuntimeId | null;
+  authorityVersion: number;
+  transferPolicy: TransferPolicy;
+};
+
 export type RuntimeEntityRef =
-  | { id: RuntimeId; kind: "world-entity"; entityIndex: number }
-  | { id: RuntimeId; kind: "player" };
+  | ({ id: RuntimeId; kind: "world-entity"; entityIndex: number } & AuthorityDescriptor)
+  | ({ id: RuntimeId; kind: "player" } & AuthorityDescriptor);
 
 export type WorldMessage<TEntity extends CompiledEntityCapabilities = CompiledEntityCapabilities> =
   {
     type: "world";
-    protocolVersion: 4;
+    protocolVersion: 5;
     worldEpoch: number;
     bundle: WorldBundle<TEntity>;
     runtimeEntities: RuntimeEntityRef[];
@@ -153,7 +159,7 @@ export type WorldMessage<TEntity extends CompiledEntityCapabilities = CompiledEn
 
 export type WorldManifestMessage = {
   type: "world";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   mapRevision: string;
   bundleUrl: string;
@@ -162,7 +168,7 @@ export type WorldManifestMessage = {
 
 export type LifecycleMessage = {
   type: "lifecycle";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   created: RuntimeEntityRef[];
   removed: RuntimeId[];

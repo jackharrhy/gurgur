@@ -15,6 +15,7 @@ specification tentative.
 - [`0016-webgpu-lighting.md`](0016-webgpu-lighting.md)
 - [`0017-loopback-development-mcp.md`](0017-loopback-development-mcp.md)
 - [`0018-positional-lintalker-speech.md`](0018-positional-lintalker-speech.md)
+- [`0019-object-ownership-netcode.md`](0019-object-ownership-netcode.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

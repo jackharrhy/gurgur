@@ -1,15 +1,47 @@
 # Testing
 
-`bun run check` currently runs formatting, lint, TypeScript, and the remaining
-unit, simulation, persistence, content, and focused integration tests.
+`bun run check` runs formatting, lint, TypeScript, unit/simulation tests,
+persistence/content tests, and the real Bun/WebRTC protocol-v5 integration
+suite.
 
-The former multiplayer matrix, link shaper, prediction/interpolation tests,
-delivery scheduler tests, network trace tests, and networking-dependent browser
-smokes were removed with the failed networking design. `bun run test:network`
-and `bun run test:browser` are explicit stubs so they cannot be mistaken for
-evidence.
+## Network commands
 
-Any replacement networking design must arrive with focused wire, transport,
-latency, loss, recovery, reconnect, epoch-reset, and real-browser coverage before
-either stub is restored. No network quality profiles or latency budgets are
-currently selected.
+- `bun run test:network` runs the 16-player/128-prop release matrix.
+- `bun run test:network -- --quick` runs a six-client development matrix.
+- `bun run test:network stress` reports 32 players/256 props without blocking a
+  release.
+- `bun run test:browser` runs real Chrome movement/banding, pickup/release,
+  simultaneous contention, disconnect takeover, and connected-reset scenarios.
+- `bun run test:browser movement|pickup|contention` selects one browser scenario.
+
+The transport harness uses a real Bun server and real unordered WebRTC data
+channels. Seeded impairment layers apply these end-to-end profiles:
+
+| Profile |    RTT | Jitter | Loss |
+| ------- | -----: | -----: | ---: |
+| Local   |   2 ms |   0 ms |   0% |
+| Typical |  80 ms |  20 ms |   1% |
+| Adverse | 150 ms |  40 ms |   5% |
+
+## Release budgets
+
+The 16-player/128-prop gate requires:
+
+- local and Typical remote objects advance on at least 95% of eligible render
+  frames at both 60 Hz and 120 Hz;
+- remote state age p95 below 200 ms Typical and 300 ms Adverse;
+- average state traffic below 2 Mbit/s per recipient;
+- zero stale-authority acceptance;
+- release handoff discontinuity below 5 cm;
+- host simulation tick below 8 ms p95 and 12 ms p99.
+
+The real-browser local movement gate measures input-edge to presented owner state
+and requires no more than one fixed worker tick plus the next render frame. The
+browser suite also verifies first-grabber-wins, carry/turn/release, reliable or
+disconnect-backed release recovery, disconnect while holding, and a connected
+epoch reset.
+
+Focused codec tests cover bounds, full bootstrap, acknowledged baselines,
+250 ms resend, sequence wrap, loss, duplication, and reordering. Host ownership
+tests cover denial, no contact transfer, stale owner state, release velocity,
+disconnect takeover, reconnect reassignment, reset, and the host tick budget.

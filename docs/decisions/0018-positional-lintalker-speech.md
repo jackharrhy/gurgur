@@ -4,7 +4,7 @@ Status: accepted on 2026-07-25.
 
 Gurgur sends bounded utterance text over the reliable WebSocket control channel
 and performs speech synthesis independently in every receiving browser. The
-server supplies the authoritative speaker runtime ID, derives a stable ordinary
+server supplies the coordinator-validated speaker runtime ID, derives a stable ordinary
 voice from its session token, applies epoch and token-bucket policy, broadcasts
 to all joined clients including the sender, and retains no utterance.
 

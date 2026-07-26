@@ -2,53 +2,34 @@
 
 This is the only status document. Canonical behavior lives in the sibling docs.
 
-Updated: 2026-07-25.
+Updated: 2026-07-26.
 
 ## Current state
 
-The failed networking design has been reset to a compile-safe baseline:
+Protocol v5 is implemented as one per-object-authority vertical slice:
 
-- one Bun server still owns the persistent authoritative Box3D world and advances
-  it at a fixed 60 Hz;
-- clients still send intent only, on a disposable unordered WebRTC data channel;
-- lifecycle, signaling, speech, reset, and world replacement remain on the
-  reliable WebSocket control path;
-- protocol v4 uses deliberately plain tagged JSON packets, one input command per
-  packet, and full authoritative state samples;
-- the server has no interest scheduler, selective state acknowledgement,
-  per-client replication history, terminal-state delivery machinery, or network
-  trace recorder;
-- the browser renders only the newest authoritative sample. It has no local
-  prediction, replay, reconciliation, interpolation, extrapolation, adaptive
-  clock, or client Box3D worker;
-- `mapRevision`, `worldEpoch`, persistence, authored identity, runtime identity,
-  fixed stepping, lighting, audio, speech, entity behavior, and development MCP
-  control remain separate and intact.
+- browsers simulate and publish their own players in a dedicated 60 Hz Box3D
+  module worker;
+- Bun simulates unowned props and every fixed host object;
+- exclusive first-wins grab leases move held-prop simulation into the browser;
+- nonowners use kinematic collision proxies and 100 ms buffered presentation;
+- local owner presentation interpolates fixed worker steps without prediction;
+- reliable bootstrap, lifecycle, authority, release, respawn, and reset carry
+  complete state;
+- unordered owner/cluster traffic uses bounded binary deltas, acknowledgements,
+  resend, backpressure coalescing, and stale authority rejection;
+- disconnect immediately reclaims leases while preserving the ten-second frozen
+  player reconnect grace;
+- persistence stores Bun state and the latest accepted browser-owned state.
 
-The baseline is intentionally not production-quality netcode. Visible 30 Hz
-stepping and latency are expected, full snapshots are wasteful, and detailed
-local grab presentation is incomplete.
-
-## Stubbed validation
-
-The former network matrix, network trace schema and UI, prediction/interpolation
-tests, delivery scheduler tests, protocol-v3 tests, real-server networking
-integration suite, and networking-dependent browser smoke script were removed.
-`bun run test:network` and `bun run test:browser` fail with explicit reset
-messages. `bun run check` covers the remaining repository only.
+The real Bun/WebRTC integration suite, profiled network matrix, real Chrome
+scenarios, and protocol/ownership/presentation tests are active. The release
+matrix gates 16 players/128 props; 32 players/256 props remains a nonblocking
+stress report.
 
 ## Active focus
 
-Reimplement networking from the invariant boundary:
-
-- choose and document a small state/input protocol;
-- add server state publication without ordered-current-state backlogs;
-- add client presentation and local response deliberately, with real latency in
-  the first vertical slice;
-- restore focused protocol, multiplayer, reset/reconnect, and real-browser
-  evidence alongside the implementation;
-- establish new network profiles and budgets from measured behavior rather than
-  inheriting the deleted design's claims.
-
-Do not reintroduce old prediction, interest, acknowledgement, trace, or quality
-machinery merely to satisfy deleted tests.
+No protocol-v5 implementation work is intentionally deferred. Future protocol
+work should begin only from a measured failing budget or a product requirement;
+do not add prediction, reconciliation, extrapolation, collision ownership
+transfer, or speculative interest management.

@@ -1,15 +1,15 @@
 import * as THREE from "three/webgpu";
 import {
-  SNAPSHOT_FLAG_GRABBED,
+  NETWORK_FLAG_HELD,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
+  type NetworkObjectState,
   type CompiledRenderBatch,
   type PhysicsDebugFrame,
   type PhysicsDebugPrimitive,
   type RuntimeEntityRef,
   type RuntimeId,
-  type Snapshot,
   type Vec3,
 } from "@gurgur/engine";
 import { PLAYER_GRAB_REACH, type WorldMessage } from "@gurgur/game";
@@ -38,6 +38,7 @@ import {
   type CameraBoomState,
 } from "./camera";
 import { createPresentationLight, VOLUMETRIC_LIGHT_LAYER } from "./lighting";
+import { PresentationBuffer } from "./presentation";
 
 type MaterialTextureInfo = {
   url: string;
@@ -142,7 +143,7 @@ function createPickupDebugView(): PickupDebugView {
 
 function createPhysicsDebugView(): PhysicsDebugView {
   const group = new THREE.Group();
-  group.name = "authoritative-physics-debug";
+  group.name = "host-physics-debug";
   group.renderOrder = 999;
   group.visible = false;
   const geometry = new THREE.BufferGeometry();
@@ -224,7 +225,7 @@ export class WorldRenderer {
   readonly #scene = new THREE.Scene();
   readonly #realityScene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
-  #latestSnapshot: Snapshot | null = null;
+  readonly #presentation = new PresentationBuffer();
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
@@ -329,7 +330,7 @@ export class WorldRenderer {
     this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
     this.#cameraCollisionBodies.clear();
-    this.#latestSnapshot = null;
+    this.#presentation.reset([], performance.now());
     this.#interactionCandidate = null;
     this.#outlinedTarget = null;
     this.#pickupPlayerPosition = null;
@@ -418,6 +419,7 @@ export class WorldRenderer {
     for (const id of message.removed) {
       const identity = idKey(id);
       this.#stopSpeech(identity, 0);
+      this.#presentation.remove(id);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         this.#meshes.delete(identity);
@@ -483,19 +485,34 @@ export class WorldRenderer {
     return true;
   }
 
-  applySnapshot(snapshot: Snapshot): void {
-    const current = this.#latestSnapshot;
-    if (
-      current &&
-      (current.worldEpoch > snapshot.worldEpoch ||
-        (current.worldEpoch === snapshot.worldEpoch && current.serverTick > snapshot.serverTick))
-    )
-      return;
-    this.#latestSnapshot = snapshot;
-    this.applyAuthoritativeInteractionState(snapshot.bodies);
+  applyBootstrap(states: readonly NetworkObjectState[], receivedAtMs = performance.now()): void {
+    this.#presentation.reset(states, receivedAtMs);
+    this.applyNetworkInteractionState(states);
   }
 
-  applyAuthoritativeInteractionState(bodies: BodySnapshot[]): void {
+  applyNetworkStates(
+    states: readonly NetworkObjectState[],
+    receivedAtMs = performance.now(),
+  ): void {
+    this.#presentation.pushNetwork(states, receivedAtMs);
+    this.applyNetworkInteractionState(states);
+  }
+
+  applyLocalStates(states: readonly NetworkObjectState[], receivedAtMs = performance.now()): void {
+    this.#presentation.pushLocal(states, receivedAtMs);
+    this.applyNetworkInteractionState(states);
+  }
+
+  applyOwnershipState(
+    state: NetworkObjectState,
+    local: boolean,
+    receivedAtMs = performance.now(),
+  ): void {
+    this.#presentation.replaceReliable(state, receivedAtMs, local);
+    this.applyNetworkInteractionState([state]);
+  }
+
+  applyNetworkInteractionState(bodies: readonly BodySnapshot[]): void {
     for (const body of bodies) {
       const mesh = this.#meshes.get(idKey(body.id));
       if (!mesh) continue;
@@ -540,9 +557,9 @@ export class WorldRenderer {
         const runtimeObject = this.#meshes.get(idKey(target)) ?? null;
         const flags = Number(runtimeObject?.userData.snapshotFlags ?? 0);
         this.#interactionCandidate =
-          object.userData.grabbable && (flags & SNAPSHOT_FLAG_GRABBED) === 0 ? runtimeObject : null;
+          object.userData.grabbable && (flags & NETWORK_FLAG_HELD) === 0 ? runtimeObject : null;
         this.#updateInteractionOutline();
-        const unavailable = object.userData.grabbable && (flags & SNAPSHOT_FLAG_GRABBED) !== 0;
+        const unavailable = object.userData.grabbable && (flags & NETWORK_FLAG_HELD) !== 0;
         this.#updatePickupDebug(
           origin,
           hit.point,
@@ -665,12 +682,12 @@ export class WorldRenderer {
   start(): void {
     const render = (): void => {
       if (document.hidden) return;
-      const snapshot = this.#latestSnapshot;
-      if (snapshot) {
-        const now = performance.now();
-        this.#apply(snapshot.bodies);
+      const now = performance.now();
+      const bodies = this.#presentation.sample(now);
+      if (bodies.length > 0) {
+        this.#apply(bodies);
         const localPresentation = this.#localPlayer
-          ? (snapshot.bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!)) ?? null)
+          ? (bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!)) ?? null)
           : null;
         if (localPresentation) {
           this.#onLocalPresentation(localPresentation);
@@ -686,7 +703,7 @@ export class WorldRenderer {
           const followed =
             localPresentation && idKey(localPresentation.id) === targetKey
               ? localPresentation
-              : snapshot.bodies.find((body) => idKey(body.id) === targetKey);
+              : bodies.find((body) => idKey(body.id) === targetKey);
           if (followed) {
             this.#pickupPlayerPosition ??= new THREE.Vector3();
             this.#pickupPlayerPosition.set(

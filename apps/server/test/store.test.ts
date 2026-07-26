@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { WorldStore } from "../src/store";
 
 describe("WorldStore", () => {
-  test("round-trips authoritative state and rejects another map revision", () => {
+  test("round-trips host state and rejects another map revision", () => {
     const store = new WorldStore(":memory:");
     try {
       const world = {

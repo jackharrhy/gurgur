@@ -77,6 +77,20 @@ if (!speechWorkerResult.success) {
   process.exit(1);
 }
 
+const physicsWorkerResult = await Bun.build({
+  entrypoints: ["apps/web/src/physics-worker.ts"],
+  outdir: "dist",
+  root: ".",
+  target: "browser",
+  format: "esm",
+  minify: true,
+  sourcemap: "linked",
+});
+if (!physicsWorkerResult.success) {
+  for (const log of physicsWorkerResult.logs) console.error(log);
+  process.exit(1);
+}
+
 await mkdir("dist/apps/server/src", { recursive: true });
 await mkdir("dist/content/generated", { recursive: true });
 await mkdir("dist/content/generated/player-billboard", { recursive: true });
@@ -132,5 +146,5 @@ await Bun.write(
   Bun.file("third_party/lintalker/wintalker.wasm"),
 );
 console.log(
-  `built ${result.outputs.length + speechWorkerResult.outputs.length} files, box3d.wasm, LinTalker, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
+  `built ${result.outputs.length + speechWorkerResult.outputs.length + physicsWorkerResult.outputs.length} files, box3d.wasm, LinTalker, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
 );

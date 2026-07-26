@@ -3,9 +3,10 @@
 Status: accepted on 2026-07-21.
 
 Use one native `Bun.serve` process for HTML/assets, HTTP routes, control
-WebSockets, WebRTC gameplay peers, authoritative simulation, and `bun:sqlite`.
-The browser uses vanilla TypeScript, CSS, and direct Three.js. Ship one Dockerfile
-and one runtime process.
+WebSockets, WebRTC gameplay peers, host simulation and coordination, and
+`bun:sqlite`. The browser uses vanilla TypeScript, CSS, direct Three.js, and a
+module worker for client-owned physics. Ship one Dockerfile and one server
+runtime process.
 
 Remix 3 is beta and declares a Node runtime for its CLI. Remix, React, Elysia, and
 Vite add routing, rendering, adapter, or development-server layers that the game

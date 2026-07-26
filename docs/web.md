@@ -26,6 +26,9 @@ apps/web/
   client.ts             gameplay client composition after WebGPU succeeds
   style.css
   session.ts            WebSocket control, WebRTC signaling, datagram dispatch
+  ownership-client.ts   authority lifecycle and worker message bridge
+  physics-worker.ts     60 Hz owned simulation and remote collision proxies
+  presentation.ts       local-step and buffered remote interpolation
   renderer.ts           Three.js scene, camera, objects, render loop
   input.ts              keyboard, pointer lock, gamepad, touch intent
   speech-chat.ts        transient T-to-talk form and input capture
@@ -47,7 +50,7 @@ automation; ordinary play does not expose entity-specific instrumentation.
 On non-production servers,
 `?follow=<runtime-index>:<generation>&yaw=<radians>&pitch=<radians>` binds only
 the presentation camera and pickup preview to a replicated runtime body. The
-local network player and authoritative input ownership do not change. The browser
+local network player's ownership and input do not change. The browser
 accepts the follow request only after the server's
 development capability route confirms it, reports acquisition through generic
 body data attributes, and otherwise falls back to the ordinary local view.
@@ -56,19 +59,21 @@ body data attributes, and otherwise falls back to the ordinary local view.
 
 There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
-objects are keyed by generation-bearing runtime identity. Each frame applies the
-newest received authoritative state directly to Three.js objects.
+objects are keyed by generation-bearing runtime identity. Locally owned objects
+interpolate consecutive completed 60 Hz worker steps. Remote objects render from
+a 100 ms state buffer without extrapolation; the associated Box3D bodies remain
+motion-disabled collision proxies.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission. Leaving the page closes the
 WebSocket, RTCPeerConnection, data channels, speech worker, active speech sources, geometries,
 materials, and renderer resources.
 The canvas remains hidden against a black page until the renderer has followed a
-finite authoritative local-player pose in the current frame. Loading a new world
+finite locally owned player pose in the current frame. Loading a new world
 closes that gate again, preventing a default-camera world frame from flashing
 before the player view is known.
 The third-person camera is a collision-tested boom anchored at the latest
-authoritative player pose's head offset. A nine-ray, 0.18-metre-radius probe travels opposite
+presented player pose's head offset. A nine-ray, 0.18-metre-radius probe travels opposite
 the player-controlled view toward the preferred 4.2-metre distance using a
 dedicated double-sided collision mesh. Static collision includes invisible
 `GURGUR/SKIP` faces; kinematic doors and platforms contribute their complete
@@ -148,9 +153,8 @@ Ambient lights set the medium density; directional and ambient lights affect
 surfaces but do not contribute volumetric scattering. Glow sprites remain a
 deliberate unlit presentation exception.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
-low-resolution scene pass. Mint means locally available. The reset baseline
-replicates only global grab ownership, so holder-specific amber feedback is
-currently absent.
+low-resolution scene pass. Mint means locally available; amber identifies a prop
+owned by the local player's active grab lease.
 Exact, colorless silhouettes first accumulate stencil coverage without testing
 or changing world depth. The expanded hull then ignores world depth but draws
 only where coverage remains zero, and player billboards render afterward against
@@ -158,14 +162,14 @@ the original world depth. Outlines therefore remain legible through level
 geometry without filling the prop interior or drawing over a visible player.
 Appending `?debug` enables the general diagnostic overlay. It renders the client
 pickup cast using the same player-chest origin, view direction, and 3.25-metre
-reach as server validation: mint marks an available prop hit, blue marks an
+reach as Bun's grant validation: mint marks an available prop hit, blue marks an
 interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
-also polls the current authoritative Box3D debug frame at 10 Hz and draws
-broad-phase bounds, joints, and contact points above the scene. The overlay is
-diagnostic only and does not replace authoritative server interaction validation.
+also polls Bun's current Box3D debug frame at 10 Hz and draws broad-phase bounds,
+joints, and contact points above the scene. The overlay is diagnostic only and
+does not replace coordinator validation of ownership and reliable interactions.
 Sprite presentation consumes only `PresentationSpec` and the hashed logical
 sprite manifest; it never compares mapper classnames. The player billboard source
-is a committed Blender scene sized to the authoritative
+is a committed Blender scene sized to the shared
 player collider. A code-defined 120-view latitude-ring rig covers camera elevation
 from -75 through +75 degrees without oversampling the poles.
 `bun run content -- setup-player-harness` rebuilds that rig in the saved scene;
@@ -173,7 +177,7 @@ from -75 through +75 degrees without oversampling the poles.
 views, a texture atlas, and metadata under `content/generated/`. The presentation
 layer rotates the live 3D
 player-to-camera vector into player-local space and selects the authored view with
-the greatest dot product. The sprite quad is centered on the authoritative capsule
+the greatest dot product. The sprite quad is centered on the presented capsule
 pose and uses the bake camera's exact orthographic dimensions.
 Billboard source frames render at 64 x 64 with a single Eevee sample, temporal
 reprojection disabled, a minimal reconstruction filter, and five constant
@@ -186,19 +190,19 @@ interaction rays, map geometry, and network transforms remain full precision.
 
 Per-listener area music consumes typed `play`/`stop` outputs from compiled
 `trigger` entities targeting `ambient-audio` entity indices, without mapper
-classname checks. The client tests its latest authoritative player center against each
+classname checks. The client tests its latest local player center against each
 authored convex trigger brush, retains overlapping claims, and selects competing
 music by priority and bundle order.
 Playback uses Web Audio after the first player gesture, with authored crossfades
 and hashed logical MP3 URLs under `content/audio`. Audio remains local
-presentation: it adds no protocol message, authoritative transform, or persisted
+presentation: it adds no protocol message, network transform, or persisted
 game state.
 
 ## Positional synthesized speech
 
 `T` exits pointer lock, clears held keyboard, touch, and gamepad state, focuses a
-120-character field, and leaves the 60 Hz input stream running with zero movement
-and action intent. Enter validates and sends exactly once, then attempts to
+120-character field, and leaves the 60 Hz local worker controller running with
+zero movement and action intent. Enter validates and sends exactly once, then attempts to
 restore pointer lock; failure keeps the existing click-to-lock fallback. Escape
 cancels without sending. Invalid local text remains editable with a short status,
 while server rejection produces only a temporary status.
@@ -242,6 +246,7 @@ The server exposes a deliberately small surface:
 | `/lintalker.js?v=<sha256>`                  | pinned synthesis factory               |
 | `/lintalker.wasm?v=<sha256>`                | pinned synthesis engine                |
 | `/speech-worker.js`                         | off-main-thread synthesis bridge       |
+| `/physics-worker.js`                        | owned Box3D simulation worker          |
 | `/healthz`                                  | process and event-loop health          |
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |

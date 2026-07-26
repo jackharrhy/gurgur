@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 
-const [command, subcommand] = process.argv.slice(2);
+const [command, subcommand, ...args] = process.argv.slice(2);
 
 async function run(
   argv: string[],
@@ -46,12 +46,31 @@ async function content(action = "compile"): Promise<void> {
   throw new Error("content requires compile, setup, render-player, or setup-player-harness");
 }
 
-function testBrowser(): never {
-  throw new Error("browser networking smoke tests are stubbed during the netcode reset");
+async function testBrowser(action = "all"): Promise<void> {
+  if (!["all", "movement", "pickup", "contention"].includes(action))
+    throw new Error("test:browser requires all, movement, pickup, or contention");
+  await run(["bun", "scripts/smoke-browser.ts"], {
+    env: { SMOKE_SCENARIO: action },
+  });
 }
 
-function testNetwork(): never {
-  throw new Error("network harness is stubbed during the netcode reset");
+async function testNetwork(action = "matrix"): Promise<void> {
+  const quick = action === "--quick" || args.includes("--quick");
+  if (action === "--quick") action = "matrix";
+  if (!["single", "matrix", "stress"].includes(action))
+    throw new Error("test:network requires single, matrix, or stress");
+  const script =
+    action === "matrix"
+      ? "tools/network-harness/src/matrix.ts"
+      : "tools/network-harness/src/run.ts";
+  await run(["bun", script], {
+    env: {
+      ...(action === "stress"
+        ? { HARNESS_CLIENTS: "32", HARNESS_PROPS: "256", HARNESS_NONBLOCKING: "1" }
+        : {}),
+      ...(quick ? { HARNESS_QUICK: "1" } : {}),
+    },
+  });
 }
 
 async function soak(action: string | undefined): Promise<void> {
@@ -126,8 +145,8 @@ async function dev(): Promise<void> {
 }
 
 if (command === "content") await content(subcommand);
-else if (command === "test-browser") testBrowser();
-else if (command === "test-network") testNetwork();
+else if (command === "test-browser") await testBrowser(subcommand);
+else if (command === "test-network") await testNetwork(subcommand);
 else if (command === "soak") await soak(subcommand);
 else if (command === "dev") await dev();
 else throw new Error("unknown repository command");

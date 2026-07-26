@@ -1,5 +1,10 @@
 import type { ServerTextMessage } from "./control-codec";
-import type { Snapshot } from "./types";
+import type { BootstrapStatePacket, OwnershipChangedPacket, StateClusterPacket } from "./types";
 import type { LifecycleMessage } from "./world";
 
-export type ServerPacket = ServerTextMessage | Snapshot | LifecycleMessage;
+export type ServerPacket =
+  | ServerTextMessage
+  | BootstrapStatePacket
+  | StateClusterPacket
+  | OwnershipChangedPacket
+  | LifecycleMessage;

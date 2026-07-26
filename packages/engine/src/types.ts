@@ -63,6 +63,107 @@ export type PhysicsDebugFrame = {
   truncated: boolean;
 };
 
+export type TransferPolicy = "fixed" | "grab-lease";
+
+export type NetworkObjectKind = "body" | "player";
+
+export type NetworkBodyState = {
+  kind: "body";
+  id: RuntimeId;
+  authorityVersion: number;
+  stateSequence: number;
+  position: Vec3;
+  rotation: Quat;
+  linearVelocity: Vec3;
+  angularVelocity: Vec3;
+  flags: number;
+};
+
+export type NetworkPlayerState = {
+  kind: "player";
+  id: RuntimeId;
+  authorityVersion: number;
+  stateSequence: number;
+  position: Vec3;
+  rotation: Quat;
+  linearVelocity: Vec3;
+  angularVelocity: Vec3;
+  flags: number;
+  yaw: number;
+  verticalVelocity: number;
+  grounded: boolean;
+  crouched: boolean;
+  lastJumpCounter: number;
+  stepCooldown: number;
+};
+
+export type NetworkObjectState = NetworkBodyState | NetworkPlayerState;
+
+export type StateDelta = {
+  kind: NetworkObjectKind;
+  id: RuntimeId;
+  authorityVersion: number;
+  stateSequence: number;
+  baselineSequence: number | null;
+  fieldMask: number;
+  position?: Vec3;
+  rotation?: Quat;
+  linearVelocity?: Vec3;
+  angularVelocity?: Vec3;
+  flags?: number;
+  player?: {
+    yaw: number;
+    verticalVelocity: number;
+    grounded: boolean;
+    crouched: boolean;
+    lastJumpCounter: number;
+    stepCooldown: number;
+  };
+};
+
+export type OwnedStatePacket = {
+  worldEpoch: number;
+  states: NetworkObjectState[];
+};
+
+export type OwnerCommitPacket = OwnedStatePacket;
+
+export type StateClusterPacket = {
+  worldEpoch: number;
+  clusterSequence: number;
+  states: StateDelta[];
+};
+
+export type StateAckPacket = {
+  worldEpoch: number;
+  entries: Array<{
+    id: RuntimeId;
+    authorityVersion: number;
+    stateSequence: number;
+  }>;
+};
+
+export type BootstrapStatePacket = {
+  worldEpoch: number;
+  states: NetworkObjectState[];
+};
+
+export type OwnershipChangedPacket = {
+  worldEpoch: number;
+  requestId: number | null;
+  id: RuntimeId;
+  ownerPlayerId: RuntimeId | null;
+  authorityVersion: number;
+  state: NetworkObjectState;
+};
+
+export type OwnershipDropPacket = {
+  worldEpoch: number;
+  id: RuntimeId;
+  authorityVersion: number;
+  state: NetworkBodyState;
+};
+
 export type PlayerStateSnapshot = {
   id: RuntimeId;
   position: Vec3;
@@ -77,19 +178,19 @@ export type PlayerStateSnapshot = {
 
 export type WelcomeMessage = {
   type: "welcome";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   playerId: RuntimeId;
   mapRevision: string;
   physicsHz: number;
-  snapshotHz: number;
+  stateHz: number;
   sessionToken: string;
   socketGeneration: number;
 };
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion: 4;
+  protocolVersion: 5;
   mapRevision: string | null;
   worldEpoch: number | null;
   sessionToken: string | null;
@@ -98,7 +199,7 @@ export type HelloMessage = {
 
 export type PingMessage = {
   type: "ping";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -106,7 +207,7 @@ export type PingMessage = {
 
 export type PongMessage = {
   type: "pong";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -115,7 +216,7 @@ export type PongMessage = {
 
 export type RtcOfferMessage = {
   type: "rtc-offer";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
   iceServers: Array<{ urls: string; username?: string; credential?: string }>;
@@ -123,7 +224,7 @@ export type RtcOfferMessage = {
 
 export type RtcAnswerMessage = {
   type: "rtc-answer";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   description: { type: "answer"; sdp: string };
 };
@@ -132,7 +233,7 @@ export type SpeechVoice = 0 | 1 | 2 | 3 | 4;
 
 export type SpeakMessage = {
   type: "speak";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   requestId: number;
   text: string;
@@ -140,7 +241,7 @@ export type SpeakMessage = {
 
 export type SpeechMessage = {
   type: "speech";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   requestId: number;
   speakerId: RuntimeId;
@@ -150,24 +251,59 @@ export type SpeechMessage = {
 
 export type SpeechRejectedMessage = {
   type: "speech-rejected";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   requestId: number;
   reason: "rate-limited" | "world-changed";
   retryAfterMs: number;
 };
 
-export type ClientControlMessage = HelloMessage | PingMessage | RtcAnswerMessage | SpeakMessage;
+export type OwnershipRequestMessage = {
+  type: "ownership-request";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number;
+  target: RuntimeId;
+  authorityVersion: number;
+  holdDistance: number;
+  relativeRotation: Quat;
+};
+
+export type OwnershipDeniedMessage = {
+  type: "ownership-denied";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number;
+  target: RuntimeId;
+  reason: "stale" | "unavailable" | "out-of-range";
+};
+
+export type UseRequestMessage = {
+  type: "use-request";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number;
+  target: RuntimeId;
+};
+
+export type ClientControlMessage =
+  | HelloMessage
+  | PingMessage
+  | RtcAnswerMessage
+  | SpeakMessage
+  | OwnershipRequestMessage
+  | UseRequestMessage;
 export type ServerControlMessage =
   | WelcomeMessage
   | PongMessage
   | RtcOfferMessage
   | SpeechMessage
-  | SpeechRejectedMessage;
+  | SpeechRejectedMessage
+  | OwnershipDeniedMessage;
 
 export type InputCommand = {
   type: "input";
-  protocolVersion: 4;
+  protocolVersion: 5;
   worldEpoch: number;
   sequence: number;
   clientTick: number;

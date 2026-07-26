@@ -26,6 +26,23 @@ describe("bounded client control union", () => {
         requestId: 7,
         text: "Hello from a browser.",
       },
+      {
+        type: "ownership-request",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 1,
+        requestId: 8,
+        target: { index: 2, generation: 3 },
+        authorityVersion: 4,
+        holdDistance: 1.5,
+        relativeRotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+      {
+        type: "use-request",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 1,
+        requestId: 9,
+        target: { index: 2, generation: 3 },
+      },
     ];
     for (const message of messages) {
       expect(JSON.stringify(decodeClientControl(JSON.stringify(message)))).toBe(
@@ -121,7 +138,7 @@ describe("bounded server control union", () => {
         playerId: { index: 1, generation: 2 },
         mapRevision: "revision",
         physicsHz: 60,
-        snapshotHz: 30,
+        stateHz: 30,
         sessionToken: "0123456789abcdef",
         socketGeneration: 0,
       },
@@ -136,8 +153,17 @@ describe("bounded server control union", () => {
             id: { index: 1, generation: 1 },
             kind: "world-entity",
             entityIndex: 2,
+            ownerPlayerId: null,
+            authorityVersion: 1,
+            transferPolicy: "grab-lease",
           },
-          { id: { index: 2, generation: 1 }, kind: "player" },
+          {
+            id: { index: 2, generation: 1 },
+            kind: "player",
+            ownerPlayerId: { index: 2, generation: 1 },
+            authorityVersion: 1,
+            transferPolicy: "fixed",
+          },
         ],
       },
       {
@@ -179,6 +205,14 @@ describe("bounded server control union", () => {
         requestId: 9,
         reason: "world-changed",
         retryAfterMs: 0,
+      },
+      {
+        type: "ownership-denied",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: 2,
+        requestId: 10,
+        target: { index: 4, generation: 5 },
+        reason: "unavailable",
       },
     ];
     for (const message of messages) {

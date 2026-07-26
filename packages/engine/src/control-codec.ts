@@ -2,6 +2,8 @@ import { PROTOCOL_VERSION } from "./config";
 import type {
   ClientControlMessage,
   HelloMessage,
+  OwnershipDeniedMessage,
+  OwnershipRequestMessage,
   PingMessage,
   PongMessage,
   RtcAnswerMessage,
@@ -9,11 +11,13 @@ import type {
   SpeakMessage,
   SpeechMessage,
   SpeechRejectedMessage,
+  UseRequestMessage,
   WelcomeMessage,
 } from "./types";
 import type { RuntimeEntityRef, WorldManifestMessage } from "./world";
 
 type RecordValue = Record<string, unknown>;
+const MAX_SERVER_CONTROL_LENGTH = 262_144;
 
 export function decodeClientControl(text: string): ClientControlMessage {
   if (text.length === 0 || text.length > 32_768)
@@ -32,6 +36,8 @@ export function decodeClientControl(text: string): ClientControlMessage {
   if (value.type === "ping") return ping(value);
   if (value.type === "rtc-answer") return rtcAnswer(value);
   if (value.type === "speak") return speak(value);
+  if (value.type === "ownership-request") return ownershipRequest(value);
+  if (value.type === "use-request") return useRequest(value);
   throw new Error("unknown control packet type");
 }
 
@@ -41,7 +47,8 @@ export type ServerTextMessage =
   | RtcOfferMessage
   | WorldManifestMessage
   | SpeechMessage
-  | SpeechRejectedMessage;
+  | SpeechRejectedMessage
+  | OwnershipDeniedMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
   const value = parseControl(text);
@@ -51,11 +58,12 @@ export function decodeServerControl(text: string): ServerTextMessage {
   if (value.type === "rtc-offer") return rtcOffer(value);
   if (value.type === "speech") return speech(value);
   if (value.type === "speech-rejected") return speechRejected(value);
+  if (value.type === "ownership-denied") return ownershipDenied(value);
   throw new Error("unknown control packet type");
 }
 
 function parseControl(text: string): RecordValue {
-  if (text.length === 0 || text.length > 32_768)
+  if (text.length === 0 || text.length > MAX_SERVER_CONTROL_LENGTH)
     throw new Error("control packet length is invalid");
   let value: unknown;
   try {
@@ -98,7 +106,7 @@ function welcome(value: RecordValue): WelcomeMessage {
     "playerId",
     "mapRevision",
     "physicsHz",
-    "snapshotHz",
+    "stateHz",
     "sessionToken",
     "socketGeneration",
   ]);
@@ -107,7 +115,7 @@ function welcome(value: RecordValue): WelcomeMessage {
     !runtimeId(value.playerId) ||
     !string(value.mapRevision, 128, 1) ||
     !finitePositive(value.physicsHz) ||
-    !finitePositive(value.snapshotHz) ||
+    !finitePositive(value.stateHz) ||
     !string(value.sessionToken, 128, 16) ||
     !safeInteger(value.socketGeneration, 0)
   ) {
@@ -210,6 +218,57 @@ function speechRejected(value: RecordValue): SpeechRejectedMessage {
   return value as SpeechRejectedMessage;
 }
 
+function ownershipRequest(value: RecordValue): OwnershipRequestMessage {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "requestId",
+    "target",
+    "authorityVersion",
+    "holdDistance",
+    "relativeRotation",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.target) ||
+    !safeInteger(value.authorityVersion, 0) ||
+    !finite(value.holdDistance) ||
+    value.holdDistance < 0.25 ||
+    value.holdDistance > 10 ||
+    !quat(value.relativeRotation)
+  ) {
+    throw new Error("ownership request fields are invalid");
+  }
+  return value as OwnershipRequestMessage;
+}
+
+function useRequest(value: RecordValue): UseRequestMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "target"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.target)
+  ) {
+    throw new Error("use request fields are invalid");
+  }
+  return value as UseRequestMessage;
+}
+
+function ownershipDenied(value: RecordValue): OwnershipDeniedMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "target", "reason"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.target) ||
+    !["stale", "unavailable", "out-of-range"].includes(value.reason as string)
+  ) {
+    throw new Error("ownership denial fields are invalid");
+  }
+  return value as OwnershipDeniedMessage;
+}
+
 function rtcOffer(value: RecordValue): RtcOfferMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "description", "iceServers"]);
   if (
@@ -256,21 +315,36 @@ function sessionDescription(value: unknown, type: "offer" | "answer"): boolean {
 
 function validateRuntimeEntity(value: unknown): asserts value is RuntimeEntityRef {
   if (!record(value)) throw new Error("runtime entity is invalid");
+  const authorityFields = ["id", "kind", "ownerPlayerId", "authorityVersion", "transferPolicy"];
   if (value.kind === "world-entity") {
-    exact(value, ["id", "kind", "entityIndex"]);
-    if (!runtimeId(value.id) || !safeInteger(value.entityIndex, 0))
+    exact(value, [...authorityFields, "entityIndex"]);
+    if (!runtimeId(value.id) || !safeInteger(value.entityIndex, 0) || !authorityDescriptor(value))
       throw new Error("runtime world entity is invalid");
     return;
   }
-  exact(value, ["id", "kind"]);
-  if (value.kind !== "player" || !runtimeId(value.id))
+  exact(value, authorityFields);
+  if (value.kind !== "player" || !runtimeId(value.id) || !authorityDescriptor(value))
     throw new Error("runtime player entity is invalid");
+}
+
+function authorityDescriptor(value: RecordValue): boolean {
+  return (
+    (value.ownerPlayerId === null || runtimeId(value.ownerPlayerId)) &&
+    safeInteger(value.authorityVersion, 0) &&
+    (value.transferPolicy === "fixed" || value.transferPolicy === "grab-lease")
+  );
 }
 
 function runtimeId(value: unknown): boolean {
   if (!record(value)) return false;
   exact(value, ["index", "generation"]);
   return safeInteger(value.index, 0) && safeInteger(value.generation, 0);
+}
+
+function quat(value: unknown): boolean {
+  if (!record(value)) return false;
+  exact(value, ["x", "y", "z", "w"]);
+  return finite(value.x) && finite(value.y) && finite(value.z) && finite(value.w);
 }
 
 function record(value: unknown): value is RecordValue {

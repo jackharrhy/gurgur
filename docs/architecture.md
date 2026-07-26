@@ -2,131 +2,103 @@
 
 ## Runtime
 
-One Bun process imports and serves the browser HTML application, accepts native
-Bun WebSockets, terminates WebRTC gameplay data channels, runs the authoritative
-game state and Box3D world, and persists snapshots through `bun:sqlite`. Browser
-clients use vanilla TypeScript and direct Three.js.
+One Bun process serves the browser application, accepts WebSockets, terminates
+WebRTC data channels, coordinates the world, simulates host-owned objects, and
+persists accepted state through `bun:sqlite`.
 
-In development, that same process also owns an optional MCP control plane on a
-second listener bound strictly to `127.0.0.1`. It reads the live authoritative
-world and creates only ephemeral diagnostic actors. Production never creates
-this listener.
+Each browser runs two execution domains:
 
-The selected runtime stack is:
+- the main thread samples input, manages the session, buffers presentation, and
+  renders with Three.js/WebGPU;
+- a dedicated module worker loads the same Box3D adapter as Bun and simulates
+  objects owned by that browser.
 
-- Bun 1.3.x with `Bun.serve`, native server WebSockets, HTML imports, the Bun
-  bundler, and `bun:sqlite`;
-- TypeScript for application, compiler, and protocol code;
-- Three.js over a required WebGPU backend for browser rendering;
-- `box3d.js@0.0.2`, single-threaded separate-Wasm build, in Bun;
-- `werift@0.23.0` for server-side ICE, DTLS, SCTP, and WebRTC data channels;
-- direct application registries rather than BitECS or a general game engine.
+Bun uses `werift@0.23.0`; browsers use the platform WebRTC implementation.
+`box3d.js@0.0.2` is loaded as separate Wasm in Bun and in the physics worker.
+There is no separate frontend server, game server service, or authority-election
+system.
 
-Gurgur does not use Remix, React, Elysia, Express, Vite, or a separate frontend
-server. Bun owns HTTP routes, frontend asset delivery, WebSocket upgrades, the
-simulation loop, and persistence in the same process and on the same origin.
-Werift owns the UDP gameplay transport inside that process; it is not another
-authority or service.
-
-Production code accesses Box3D only through Gurgur's physics adapter. Box3D owns
-live physical state; application registries own stable identity and gameplay
-state.
-
-Persistent external resources have explicit lifecycle owners, but other modules
-depend on small structural capability interfaces rather than concrete classes.
-Pure transforms and short-lived registries use functions and plain data.
-`GameSimulation` owns players, controller policy, interactions, mechanisms,
-signals, and gameplay serialization. The server host composes world loading,
-runtime-body construction, fixed stepping, current-state publication, and
-tick-boundary persistence transactions; it does not reimplement gameplay policy.
+In development, Bun may expose a second MCP listener bound to `127.0.0.1`.
+MCP-created players, props, and diagnostics are host-owned and ephemeral.
 
 ## Source boundaries
 
 ```text
 apps/
-  web/             HTML, vanilla TS, Three.js, input, latest-state rendering
-  server/          authoritative host, HTTP/WebSocket/WebRTC, persistence, metrics
+  web/             input, session, owner physics worker, presentation, Three.js
+  server/          world host/coordinator, transport, persistence, metrics
 packages/
-  engine/          math, protocol, Valve parsing, generic capabilities, Box3D adapter
-  game/            entity catalog/union, compiler, controller, simulation, game state
+  engine/          protocol, replication, Box3D adapter, generic capabilities
+  game/            compiler, entities, shared controller/carry/simulation policy
 tools/
+  network-harness/ real Bun/WebRTC profiled multiplayer harness
   generate-fgd/
   compile-map/
 content/
   maps/ textures/ sprites/ models/ generated/
 ```
 
-Browser, DOM, and Three.js code stay out of both packages. SQLite, filesystem,
-administration, and server sockets stay in the server app. The engine never
-knows mapper classnames or gameplay union members. Game code sees the host only
-through `GameEngine`; that capability omits stepping, disposal, debug extraction,
-and arbitrary body creation.
+DOM and Three.js stay out of packages. SQLite, filesystem, administration, and
+server sockets stay in the server app. The engine never knows mapper classnames.
+Player and prop controllers live in `packages/game` so the browser authority and
+Bun's MCP/host authorities use the same fixed-step policy.
 
 ## State ownership
 
-| State                          | Owner                 | Lifetime                |
-| ------------------------------ | --------------------- | ----------------------- |
-| Authored geometry and defaults | compiled world bundle | one `mapRevision`       |
-| Live bodies and constraints    | server Box3D world    | one `worldEpoch`        |
-| Gameplay and entity state      | game simulation       | one `worldEpoch`        |
-| Latest received view           | each client           | disposable              |
-| Durable application state      | SQLite                | across process restarts |
+| State                                       | Authority / owner     | Lifetime                    |
+| ------------------------------------------- | --------------------- | --------------------------- |
+| Authored geometry/defaults                  | compiled world bundle | one `mapRevision`           |
+| Browser network player                      | that browser          | connected player assignment |
+| Held prop                                   | lease-holding browser | one grab lease              |
+| Unheld prop                                 | Bun host              | until a lease grant         |
+| Mechanism, trigger, mover, diagnostic actor | Bun host              | one `worldEpoch`            |
+| Ownership/lifecycle registry                | Bun coordinator       | one `worldEpoch`            |
+| Nonowned collision proxy                    | each nonowner         | disposable                  |
+| Buffered presentation                       | each browser          | disposable                  |
+| Latest accepted durable state               | Bun/SQLite            | process restarts            |
 
-Box3D handles, Wasm pointers, and registry slots are process-local. They are
-wrapped in generation-bearing runtime handles and never persisted or sent as
-stable identity.
+Only the current authority simulates an object dynamically. Other peers keep a
+kinematic or motion-disabled proxy for collision and queries and render from a
+separate interpolation buffer.
 
 ## Identity and versioning
 
-| Concept                 | Meaning                                                     |
-| ----------------------- | ----------------------------------------------------------- |
-| `authoredId`            | explicit stable ID for a persistent map entity              |
-| `{ index, generation }` | runtime network identity safe against slot reuse            |
-| `mapRevision`           | SHA-256 content hash of the compiled world bundle           |
-| `worldEpoch`            | monotonic reset/reload generation used to reject stale work |
-| `protocolVersion`       | exact client/server wire compatibility version              |
+| Concept                 | Meaning                                       |
+| ----------------------- | --------------------------------------------- |
+| `authoredId`            | stable persistence key for a map entity       |
+| `{ index, generation }` | runtime identity safe against slot reuse      |
+| `ownerPlayerId`         | nullable current browser owner                |
+| `authorityVersion`      | monotonic ownership-assignment generation     |
+| `stateSequence`         | uint16 per-object disposable-state sequence   |
+| `mapRevision`           | SHA-256 compiled bundle identity              |
+| `worldEpoch`            | global reset/reload generation                |
+| `protocolVersion`       | exact wire compatibility version; currently 5 |
 
-Every persistent authored entity has a unique explicit `authoredId`, enforced by
-the compiler. Source positions are diagnostics, never identity.
+These values are independent. Runtime IDs, Box3D handles, and Wasm pointers are
+never persistence keys.
 
 ## Persistence
 
-SQLite stores typed application state in strict tables using WAL mode, prepared
-statements, and tick-boundary transactions. The default snapshot interval is five
-seconds; important mechanism changes also request a snapshot at the next tick
-boundary.
+SQLite stores typed application state using WAL mode, prepared statements, and
+tick-boundary transactions. Bun persists its own Box3D state and the latest state
+it accepted from browser owners. A normal release supplies a reliable final prop
+state; transport loss causes immediate host takeover from the last accepted
+state.
 
-A snapshot writes world metadata, body state, player state, and one strictly
-validated `game_state` JSON value in a single tick-boundary transaction.
-`game_state` contains mechanism/trigger/relay/button state and delayed signals;
-the game package owns its schema. The snapshot never contains raw Box3D memory,
-Wasm pointers, or runtime network IDs.
-
-Startup restores a snapshot only when its `mapRevision` matches the compiled
-bundle. Otherwise the server starts from authored defaults. This pre-release
-schema is clean-start only: schema changes require deleting the local database,
-not carrying migrations or compatibility branches.
-
-MCP-spawned props and players are diagnostic process state. They are excluded
-from persistence and discarded on reset or shutdown.
+A save writes world metadata, bodies, players, and strictly validated gameplay
+state atomically. Startup restores only a matching `mapRevision`. Ownership is
+not durable across process startup: restored props begin host-owned.
 
 ## Reset transaction
 
-A reset stops input consumption, increments `worldEpoch`, discards durable body
-state, recreates the Box3D world from the compiled bundle, respawns connected
-players, writes the reset snapshot, publishes a full snapshot, and resumes input.
-Clients discard received state associated with the previous epoch.
+Global reset increments `worldEpoch`, revokes every lease, recreates Bun's Box3D
+world, rebuilds every connected browser worker, respawns and reassigns connected
+players with new authority versions, persists the authored baseline, and sends a
+reliable world bootstrap. Old-epoch control and state are rejected.
 
 ## Deployment
 
-One Dockerfile builds generated maps and browser assets, then produces one runtime
-image containing Bun and the server bundle. The container starts exactly one Bun
-process, listens on one HTTP port and a bounded UDP range, and serves HTTP,
-static assets, health checks, administrative endpoints, WebSocket control, and
-WebRTC gameplay data from that process.
-
-SQLite lives at `/data/gurgur.sqlite` on a mounted persistent volume. Compiled
-world content is immutable image content. On `SIGTERM`, the server stops accepting
-new connections, completes the current tick, writes a final snapshot, closes
-SQLite, WebSocket, and WebRTC resources, then exits within the container grace
-period.
+One Docker image contains Bun, the server bundle, browser assets, both browser
+workers, Box3D Wasm, compiled world content, and SQLite support. One Bun process
+serves HTTP/WebSocket and a bounded WebRTC UDP range. `/data/gurgur.sqlite` is the
+only durable writable path.

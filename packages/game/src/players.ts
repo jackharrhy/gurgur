@@ -1,6 +1,8 @@
 import {
   INPUT_INTENT_TIMEOUT_TICKS,
+  isNewerSequence16,
   type InputCommand,
+  type NetworkPlayerState,
   type RuntimeEntityRef,
   type RuntimeId,
   type Vec3,
@@ -54,6 +56,9 @@ type Player = {
   lastInteractCounter: number;
   lastPrimaryCounter: number;
   grab: PropGrab | null;
+  externallyOwned: boolean;
+  authorityVersion: number;
+  stateSequence: number;
 };
 
 type PlayerSlot = { generation: number; player: Player | null };
@@ -69,20 +74,28 @@ export type GamePlayerView = {
   stepCooldown: number;
   crouched: boolean;
   grabTarget: RuntimeId | null;
+  externallyOwned: boolean;
+  authorityVersion: number;
 };
 
 export type GamePlayers = {
   views(): GamePlayerView[];
   proxies(): RuntimeId[];
   runtimeRefs(): RuntimeEntityRef[];
+  networkStates(): NetworkPlayerState[];
   persisted(): PersistedPlayerState[];
   position(id: RuntimeId): Vec3 | null;
   grabbedTarget(id: RuntimeId): RuntimeId | null;
   canResume(persistentId: string): boolean;
-  connect(persistentId?: string, initial?: { position: Vec3; yaw: number }): RuntimeId;
+  connect(
+    persistentId?: string,
+    initial?: { position: Vec3; yaw: number },
+    options?: { externallyOwned?: boolean },
+  ): RuntimeId;
   disconnect(id: RuntimeId, options?: { persist?: boolean }): boolean;
-  beginInputStream(id: RuntimeId): boolean;
   acceptInput(id: RuntimeId, command: InputCommand, worldEpoch: number): boolean;
+  applyOwnedState(id: RuntimeId, state: NetworkPlayerState): boolean;
+  reassign(id: RuntimeId): NetworkPlayerState | null;
   step(): void;
   reset(): void;
 };
@@ -158,6 +171,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     persistentId: string,
     restored?: PersistedPlayerState,
     initial?: { position: Vec3; yaw: number },
+    externallyOwned = false,
   ): Player => {
     const state: PlayerControllerState = initial
       ? defaultState(initial.position, initial.yaw)
@@ -185,8 +199,11 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       lastInteractCounter: 0,
       lastPrimaryCounter: 0,
       grab: null,
+      externallyOwned,
+      authorityVersion: 1,
+      stateSequence: 0,
     };
-    if (restored?.grabbedAuthoredId) {
+    if (!externallyOwned && restored?.grabbedAuthoredId) {
       const target = bodyForAuthoredId(restored.grabbedAuthoredId);
       const alreadyOwned = players().some(
         (candidate) => candidate.grab && target && sameId(candidate.grab.target, target),
@@ -218,6 +235,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         };
     player.pendingInput = null;
     player.grab = null;
+    player.stateSequence = 0;
     if (worldRecreated) {
       player.lastSequence = -1;
       player.lastProcessedInputSequence = -1;
@@ -272,6 +290,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
 
   const step = (): void => {
     for (const player of players()) {
+      if (player.externallyOwned) continue;
       const pending = player.pendingInput;
       player.pendingInput = null;
       if (pending) {
@@ -306,6 +325,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         tryGrab(player);
       }
       updateGrab(player);
+      player.stateSequence = (player.stateSequence + 1) & 0xffff;
     }
   };
 
@@ -322,9 +342,19 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         stepCooldown: player.state.stepCooldown,
         crouched: player.state.crouched,
         grabTarget: player.grab ? { ...player.grab.target } : null,
+        externallyOwned: player.externallyOwned,
+        authorityVersion: player.authorityVersion,
       })),
     proxies: () => players().map((player) => ({ ...player.proxy })),
-    runtimeRefs: () => players().map((player) => ({ id: { ...player.id }, kind: "player" })),
+    runtimeRefs: () =>
+      players().map((player) => ({
+        id: { ...player.id },
+        kind: "player",
+        ownerPlayerId: player.externallyOwned ? { ...player.id } : null,
+        authorityVersion: player.authorityVersion,
+        transferPolicy: "fixed",
+      })),
+    networkStates: () => players().map(networkState),
     persisted: () => [
       ...players().map(persistedPlayer),
       ...dormant.values().map((player) => structuredClone(player)),
@@ -338,7 +368,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       return target ? { ...target } : null;
     },
     canResume: (persistentId) => dormant.has(persistentId),
-    connect(persistentId = crypto.randomUUID(), initial) {
+    connect(persistentId = crypto.randomUUID(), initial, connectOptions = {}) {
       if (players().some((player) => player.persistentId === persistentId))
         throw new Error("persistent player identity is already connected");
       const slotIndex = freeSlots.pop() ?? slots.length;
@@ -346,7 +376,16 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       const id = { index: PLAYER_INDEX_BASE + slotIndex, generation };
       const restored = dormant.get(persistentId);
       dormant.delete(persistentId);
-      slots[slotIndex] = { generation, player: newPlayer(id, persistentId, restored, initial) };
+      slots[slotIndex] = {
+        generation,
+        player: newPlayer(
+          id,
+          persistentId,
+          restored,
+          initial,
+          connectOptions.externallyOwned ?? false,
+        ),
+      };
       return id;
     },
     disconnect(id, disconnectOptions = {}) {
@@ -362,19 +401,9 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       engine.requestSave();
       return true;
     },
-    beginInputStream(id) {
-      const player = resolve(id)?.player;
-      if (!player) return false;
-      player.pendingInput = null;
-      player.lastSequence = -1;
-      player.lastProcessedInputSequence = -1;
-      player.lastInputServerTick = engine.tick;
-      player.input = { ...player.input, moveX: 0, moveZ: 0, buttons: 0 };
-      return true;
-    },
     acceptInput(id, command, worldEpoch) {
       const player = resolve(id)?.player;
-      if (!player) return false;
+      if (!player || player.externallyOwned) return false;
       if (command.worldEpoch !== worldEpoch || command.sequence <= player.lastSequence) return true;
       player.lastSequence = command.sequence;
       player.pendingInput = {
@@ -391,10 +420,55 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       };
       return true;
     },
+    applyOwnedState(id, state) {
+      const player = resolve(id)?.player;
+      if (
+        !player ||
+        !player.externallyOwned ||
+        !sameId(id, state.id) ||
+        state.authorityVersion !== player.authorityVersion ||
+        (!isNewerSequence16(state.stateSequence, player.stateSequence) &&
+          state.stateSequence !== player.stateSequence)
+      ) {
+        return false;
+      }
+      const wasCrouched = player.state.crouched;
+      player.state = {
+        position: { ...state.position },
+        yaw: state.yaw,
+        verticalVelocity: state.verticalVelocity,
+        grounded: state.grounded,
+        crouched: state.crouched,
+        lastJumpCounter: state.lastJumpCounter,
+        stepCooldown: state.stepCooldown,
+      };
+      player.stateSequence = state.stateSequence;
+      if (wasCrouched !== state.crouched) {
+        engine.destroyBody(player.proxy);
+        player.proxy = engine.createPlayerProxy(state.position, playerCapsule(state.crouched));
+      } else {
+        engine.updatePlayerProxy(player.proxy, state.position, state.yaw);
+      }
+      return true;
+    },
+    reassign(id) {
+      const player = resolve(id)?.player;
+      if (!player?.externallyOwned) return null;
+      player.authorityVersion = (player.authorityVersion + 1) >>> 0;
+      if (player.authorityVersion === 0) player.authorityVersion = 1;
+      player.stateSequence = 0;
+      return networkState(player);
+    },
     step,
     reset() {
       dormant.clear();
-      for (const player of players()) respawn(player, true);
+      for (const player of players()) {
+        if (player.externallyOwned) {
+          player.authorityVersion = (player.authorityVersion + 1) >>> 0;
+          if (player.authorityVersion === 0) player.authorityVersion = 1;
+        }
+        respawn(player, true);
+      }
     },
   };
 }
@@ -408,6 +482,26 @@ function defaultState(position: Vec3, yaw: number): PlayerControllerState {
     lastJumpCounter: 0,
     stepCooldown: 0,
     crouched: false,
+  };
+}
+
+function networkState(player: Player): NetworkPlayerState {
+  return {
+    kind: "player",
+    id: { ...player.id },
+    authorityVersion: player.authorityVersion,
+    stateSequence: player.stateSequence,
+    position: { ...player.state.position },
+    rotation: yawRotation(player.state.yaw),
+    linearVelocity: { x: 0, y: player.state.verticalVelocity, z: 0 },
+    angularVelocity: { x: 0, y: 0, z: 0 },
+    flags: 0,
+    yaw: player.state.yaw,
+    verticalVelocity: player.state.verticalVelocity,
+    grounded: player.state.grounded,
+    crouched: player.state.crouched,
+    lastJumpCounter: player.state.lastJumpCounter,
+    stepCooldown: player.state.stepCooldown,
   };
 }
 
@@ -439,6 +533,10 @@ function grabPose(player: Player): GrabPose {
     lookYaw: player.input.lookYaw,
     lookPitch: player.input.lookPitch,
   };
+}
+
+function yawRotation(yaw: number) {
+  return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) };
 }
 
 function scale(value: Vec3, amount: number): Vec3 {

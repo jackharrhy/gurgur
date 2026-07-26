@@ -2,8 +2,9 @@
 
 Status: accepted on 2026-07-21.
 
-Use Box3D's geometric capsule mover with a following kinematic proxy on the
-authoritative server. Do not use a dynamic rigid body as the player.
+Use Box3D's geometric capsule mover with a following kinematic proxy. Run the
+same controller on the current player authority: a network player's browser
+worker or Bun for an MCP player. Do not use a dynamic rigid body as the player.
 
 The local experiment exercised `b3World_CollideMover`, `b3SolvePlanes`, and
 `b3World_CastMover` against ground and wall geometry, proving depenetration, wall
@@ -17,4 +18,5 @@ and bounded dynamic-body impulses. Physics regressions preserve those invariants
 A geometric mover gives direct intent-driven control while explicit impulses
 retain the puzzle interaction Gurgur needs. The proxy makes the otherwise virtual mover
 visible to sensors, raycasts, and projectiles without letting a rigid body drive
-movement.
+movement. Remote worlds keep that proxy motion-disabled; ordinary contact never
+changes its authority.

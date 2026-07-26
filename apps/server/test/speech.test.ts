@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SpeechRateLimiter, speechVoiceForSessionToken } from "../src/speech";
 
-describe("authoritative speech policy", () => {
+describe("coordinator speech policy", () => {
   test("assigns one stable ordinary voice from the server session token", () => {
     const token = "01234567-89ab-cdef-0123-456789abcdef";
     const voice = speechVoiceForSessionToken(token);

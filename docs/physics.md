@@ -2,18 +2,19 @@
 
 ## Engine and binding
 
-Gurgur uses Erin Catto's Box3D 0.1.0 through `box3d.js@0.0.2`. The Bun authority
-loads the package's single-threaded separate-Wasm artifact. The inline artifact
-is retained for diagnostics only. Native Box3D, multithreaded Wasm, Box2D,
-Crashcat, Rapier, and Jolt are not runtime dependencies.
+Gurgur uses Erin Catto's Box3D 0.1.0 through `box3d.js@0.0.2`. Bun and a
+dedicated browser module worker load the package's single-threaded
+separate-Wasm artifact through the same adapter. The inline artifact is retained
+for diagnostics only. Native Box3D, multithreaded Wasm, Box2D, Crashcat, Rapier,
+and Jolt are not runtime dependencies.
 
 The dependency is pinned as a pair:
 
 - `box3d.js` commit `72491a34adcf6fc1cf562199d51b3766d5210e9d`;
 - vendored Box3D commit `8441b4a06d6d09dcfb0b0f704df4d847d1437b92`.
 
-Host code imports Gurgur's physics adapter from `packages/engine`. Raw Embind
-objects and Wasm views do not cross that boundary. Gameplay simulation instead
+Host and worker code import Gurgur's physics adapter from `packages/engine`. Raw
+Embind objects and Wasm views do not cross that boundary. Gameplay simulation instead
 receives the narrower `GameEngine` capability: body lookup/state,
 kinematic targets, filtered raycasts, player proxies, bounded dynamic-body target
 drives, and save requests.
@@ -45,14 +46,22 @@ growth.
 
 ## Simulation
 
-The server advances one world at exactly 60 Hz with four Box3D substeps. Forces,
-impulses, kinematic targets, controller input, and mechanism commands are applied
-before the step. Contacts, sensors, moved bodies, sleep transitions, and deferred
-destruction are processed afterward.
+Every physics authority advances its world at exactly 60 Hz with four Box3D
+substeps. Forces, impulses, kinematic targets, controller input, and mechanism
+commands are applied before the step. Contacts, sensors, moved bodies, sleep
+transitions, and deferred destruction are processed afterward.
 
-The host loop executes at most four catch-up ticks per turn. Persistence captures
-application state only at a completed tick boundary. The browser does not run
-Box3D or a second controller simulation.
+Bun dynamically simulates unowned props, fixed-authority mechanisms, MCP
+players, and diagnostics. A browser worker dynamically simulates that browser's
+player and any prop for which it holds a grab lease. Every other network object
+in either world is a motion-disabled kinematic proxy driven by received state.
+Ordinary contact never changes authority. The authority registry, not the
+presence of a local body, decides which controller and bodies may advance.
+
+The host and browser loops execute at most four catch-up ticks per turn.
+Persistence captures host application state only at a completed tick boundary.
+Locally owned rendering interpolates consecutive completed worker steps. Remote
+rendering uses a separate 100 ms state buffer and never extrapolates.
 
 ## Coordinates and scale
 
@@ -87,7 +96,8 @@ The player uses Box3D's geometric capsule mover, not a dynamic rigid body.
 Player lifecycle, intent policy, interaction state, controller rules, collider
 dimensions, and tuning live in `packages/game`; the engine retains only generic
 capsule/query primitives. The standing capsule is 1.8 m tall with a 0.35 m
-radius. The server runs the controller from fixed input commands.
+radius. The shared controller consumes fixed input commands on the current
+authority: the owning browser for network players and Bun for MCP players.
 
 Each controller tick:
 
@@ -99,14 +109,15 @@ Each controller tick:
 6. clips velocity and applies bounded reaction impulses to contacted dynamic bodies.
 
 A fixed-tick controller result must be finite and move no more than one metre.
-The server rejects a larger Box3D depenetration result, retains the prior pose,
-consumes the yaw/jump edge, and zeroes vertical velocity. This is a safety
-invariant for pathological overlapping contact piles, not ordinary speed
+The current authority rejects a larger Box3D depenetration result, retains the
+prior pose, consumes the yaw/jump edge, and zeroes vertical velocity. This is a
+safety invariant for pathological overlapping contact piles, not ordinary speed
 clamping.
 
-The authority respawns a player at `info_player_start` after it falls ten metres
+The player authority respawns it at `info_player_start` after it falls ten metres
 below the map's lowest static collision vertex. Respawn clears held movement and
-grabs and recreates the query proxy. A disconnected player therefore cannot
+grabs, recreates the query proxy, and commits the discontinuity through reliable
+control. A disconnected network player's frozen host proxy therefore cannot
 accumulate unbounded free-fall state beneath the map.
 
 Ground is walkable through 50 degrees. The controller steps up at most 0.30 m and
@@ -124,10 +135,15 @@ geometric mover, capsule-fit, sweep, and ordinary controller-ray queries.
 ## Prop carry controller
 
 Grabbing is a game-owned target controller, not a rope or distance constraint.
-The server chooses the first grabbable body on its authoritative 3.25 m view ray;
-the client runtime ID is presentation feedback rather than trusted acquisition
-state. The controller derives a stable carry distance from compiled prop extent,
-then advances a target point toward the player’s chest-forward view at a bounded
+The browser chooses the first grabbable body on its 3.25 m view ray and requests
+an exclusive lease containing that identity, current authority version, hold
+distance, and captured relative rotation. Bun validates type, version, epoch,
+finite values, availability, and reach against the latest player proxy; the
+first valid request wins. A grant atomically supplies complete state before the
+browser makes the prop dynamic.
+
+The controller derives a stable carry distance from compiled prop extent, then
+advances a target point toward the player’s chest-forward view at a bounded
 speed. A filtered ray that excludes the held body shortens that target before
 world geometry.
 
@@ -138,7 +154,10 @@ driven toward the orientation captured relative to player yaw at acquisition,
 with bounded angular speed and acceleration. Driving the center of mass avoids
 off-axis torque from an arbitrary face hit.
 
-The game owns exclusivity, target smoothing, obstruction clearance, persistence,
-and release. It drops a body that becomes invalid, exceeds maximum range, or
-remains more than 1.75 m behind its controller target for one second. Transport
-continues to replicate only authoritative body state and grab ownership.
+The owning browser runs target smoothing and obstruction clearance. It drops a
+body that becomes invalid, exceeds maximum range, or remains more than 1.75 m
+behind its controller target for one second. A reliable drop includes final
+transform and linear/angular velocity; the browser immediately returns to a
+proxy while Bun atomically increments the authority version and resumes dynamic
+simulation. Bun owns lease exclusivity, host takeover, lifecycle, and
+persistence of the latest accepted state.

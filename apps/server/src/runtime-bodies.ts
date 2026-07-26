@@ -4,6 +4,7 @@ import type {
   Quat,
   RuntimeEntityRef,
   RuntimeId,
+  TransferPolicy,
   Vec3,
 } from "@gurgur/engine";
 import type { WorldBundle } from "@gurgur/game";
@@ -14,10 +15,21 @@ export type RuntimeBody = {
   id: RuntimeId;
   entityIndex: number;
   authoredId: string;
+  ownerPlayerId: RuntimeId | null;
+  authorityVersion: number;
+  stateSequence: number;
+  transferPolicy: TransferPolicy;
 };
 
 export function runtimeBodyRef(body: RuntimeBody): RuntimeEntityRef {
-  return { id: body.id, kind: "world-entity", entityIndex: body.entityIndex };
+  return {
+    id: body.id,
+    kind: "world-entity",
+    entityIndex: body.entityIndex,
+    ownerPlayerId: body.ownerPlayerId ? { ...body.ownerPlayerId } : null,
+    authorityVersion: body.authorityVersion,
+    transferPolicy: body.transferPolicy,
+  };
 }
 
 export function createRuntimeBodies(
@@ -72,7 +84,7 @@ export function createRuntimeProp(
           })),
           ...material,
         });
-  return { handle, id: handle, entityIndex, authoredId };
+  return networkBody(handle, entityIndex, authoredId, "grab-lease");
 }
 
 function createAuthoredBodies(
@@ -105,7 +117,7 @@ function createAuthoredBodies(
         position: { x: 0, y: 0, z: 0 },
         vertices: firstBrush.worldVertices,
       });
-      bodies.push({ handle, id: handle, entityIndex, authoredId });
+      bodies.push(networkBody(handle, entityIndex, authoredId, "fixed"));
       continue;
     }
     const type: BodyKind =
@@ -150,7 +162,14 @@ function createAuthoredBodies(
       physics.setBodyVelocity(handle, saved.linearVelocity, saved.angularVelocity);
       physics.setBodyAwake(handle, saved.awake);
     }
-    bodies.push({ handle, id: handle, entityIndex, authoredId });
+    bodies.push(
+      networkBody(
+        handle,
+        entityIndex,
+        authoredId,
+        spec.kind === "dynamic-brush" && entity.interaction === "grab" ? "grab-lease" : "fixed",
+      ),
+    );
   }
   return bodies;
 }
@@ -197,6 +216,24 @@ function createStressBodies(
           friction: templateEntity.body.friction,
           restitution: templateEntity.body.restitution,
         });
-    return { id: handle, handle, authoredId, entityIndex };
+    return networkBody(handle, entityIndex, authoredId, "grab-lease");
   });
+}
+
+function networkBody(
+  handle: RuntimeId,
+  entityIndex: number,
+  authoredId: string,
+  transferPolicy: TransferPolicy,
+): RuntimeBody {
+  return {
+    id: handle,
+    handle,
+    entityIndex,
+    authoredId,
+    ownerPlayerId: null,
+    authorityVersion: 1,
+    stateSequence: 0,
+    transferPolicy,
+  };
 }
