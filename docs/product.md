@@ -20,9 +20,12 @@ authenticated administrator can reset the entire world to its authored state.
 - A reset is global, explicit, authenticated, and visible to every client.
 - Falling ten metres below authored static collision respawns the same player
   identity at `info_player_start`.
-- The play view is the world canvas alone, with no HUD, reticle, or visible cursor.
+- Ordinary play is the world canvas alone, with no HUD, reticle, or visible
+  cursor. Pressing `T` temporarily opens the speech input.
 - Authored area music follows each listener independently and fades with typed
   map volumes; it is not shared authoritative world state.
+- Submitted speech is ephemeral audio only: it has no caption, history,
+  persistence, or replay. The server owns speaker identity and voice assignment.
 - Realtime voice is outside the current product scope.
 
 ## Interaction feedback
@@ -48,3 +51,9 @@ administration and reconnect.
 
 Puzzle completion is not durable state. Physical and mechanism state can persist,
 but the authored world is always the reset baseline.
+
+Text-to-speech is not a general text-chat system. `T` releases pointer lock and
+neutralizes gameplay intent while the field is active; Enter submits one
+utterance and Escape cancels. Every browser synthesizes accepted text and plays
+it from the speaker's current player position. The transient field and brief
+validation status are the only interface.

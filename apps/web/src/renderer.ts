@@ -54,6 +54,26 @@ type MaterialTextureInfo = {
   renderMode: "retro" | "reality";
 };
 
+type ActiveSpeech = {
+  speaker: string;
+  sound: THREE.PositionalAudio;
+  disposed: boolean;
+};
+
+export function speechReverbImpulse(sampleRate: number, seconds = 0.35): Float32Array {
+  const length = Math.max(1, Math.round(sampleRate * seconds));
+  const impulse = new Float32Array(length);
+  let state = 0x6d2b79f5;
+  for (let index = 0; index < length; index += 1) {
+    state = Math.imul(state ^ (state >>> 15), 1 | state);
+    state ^= state + Math.imul(state ^ (state >>> 7), 61 | state);
+    const noise = (((state ^ (state >>> 14)) >>> 0) / 0x7fffffff - 1) * 0.6;
+    const envelope = (1 - index / length) ** 3;
+    impulse[index] = noise * envelope;
+  }
+  return impulse;
+}
+
 export function normalizeMaterialUv(
   uv: { x: number; y: number },
   texture: Pick<MaterialTextureInfo, "width" | "height">,
@@ -252,6 +272,10 @@ export class WorldRenderer {
   #cameraSafeDistance = CAMERA_BOOM_LENGTH;
   #cameraFrameTime: number | null = null;
   readonly #cameraPreviousPivot = new THREE.Vector3();
+  #speechListener: THREE.AudioListener | null = null;
+  #speechConvolver: ConvolverNode | null = null;
+  #speechWetGain: GainNode | null = null;
+  readonly #activeSpeech: ActiveSpeech[] = [];
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -299,6 +323,7 @@ export class WorldRenderer {
   }
 
   setWorld(message: WorldMessage): void {
+    for (const active of this.#activeSpeech.slice()) this.#stopActiveSpeech(active, 0);
     this.#scene.remove(this.#worldRoot);
     this.#scene.remove(this.#lightRoot);
     this.#realityScene.remove(this.#realityRoot);
@@ -408,6 +433,7 @@ export class WorldRenderer {
   applyLifecycle(message: LifecycleMessage): void {
     for (const id of message.removed) {
       const identity = idKey(id);
+      this.#stopSpeech(identity, 0);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         this.#meshes.delete(identity);
@@ -427,6 +453,51 @@ export class WorldRenderer {
 
   setLocalPlayer(id: RuntimeId): void {
     this.#localPlayer = id;
+  }
+
+  async unlockSpeechAudio(): Promise<void> {
+    const listener = this.#ensureSpeechListener();
+    await listener.context.resume();
+    document.body.dataset.speechAudio = listener.context.state;
+  }
+
+  playSpeech(speakerId: RuntimeId, sampleRate: number, samples: Int16Array): boolean {
+    const listener = this.#speechListener;
+    if (!listener || listener.context.state !== "running") {
+      document.body.dataset.speechAudio = "locked";
+      return false;
+    }
+    const speaker = idKey(speakerId);
+    const anchor = this.#meshes.get(speaker);
+    if (!anchor || samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate <= 0)
+      return false;
+    this.#stopSpeech(speaker, 0.05);
+    while (this.#activeSpeech.length >= 4) this.#stopActiveSpeech(this.#activeSpeech[0]!, 0.05);
+    const buffer = listener.context.createBuffer(1, samples.length, sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < samples.length; index += 1)
+      channel[index] = samples[index]! / 32_768;
+    const sound = new THREE.PositionalAudio(listener);
+    sound.position.y = 0.4;
+    sound.setBuffer(buffer);
+    sound.setDistanceModel("linear");
+    sound.setRefDistance(2);
+    sound.setMaxDistance(24);
+    sound.setRolloffFactor(1);
+    sound.setVolume(0.75);
+    if (this.#speechConvolver) sound.gain.connect(this.#speechConvolver);
+    const active = { speaker, sound, disposed: false };
+    this.#activeSpeech.push(active);
+    anchor.add(sound);
+    sound.play();
+    if (sound.source instanceof AudioBufferSourceNode)
+      sound.source.addEventListener("ended", () => this.#removeActiveSpeech(active), {
+        once: true,
+      });
+    document.body.dataset.speechAudio = "playing";
+    document.body.dataset.speechSpeaker = speaker;
+    document.body.dataset.speechActive = String(this.#activeSpeech.length);
+    return true;
   }
 
   setPredictedPlayer(body: BodySnapshot | null, predictionTick: number | null): void {
@@ -543,6 +614,44 @@ export class WorldRenderer {
     return {
       distance: this.#cameraBoom.distance,
       safeDistance: this.#cameraSafeDistance,
+    };
+  }
+
+  speechDiagnostics(): {
+    listenerAttached: boolean;
+    contextState: AudioContextState | "absent";
+    wetGain: number | null;
+    impulseSeconds: number | null;
+    active: Array<{
+      speaker: string;
+      parent: string | null;
+      distanceModel: DistanceModelType;
+      refDistance: number;
+      maxDistance: number;
+      rolloffFactor: number;
+      volume: number;
+    }>;
+  } {
+    const impulse = this.#speechConvolver?.buffer;
+    return {
+      listenerAttached: this.#speechListener?.parent === this.#camera,
+      contextState: this.#speechListener?.context.state ?? "absent",
+      wetGain: this.#speechWetGain?.gain.value ?? null,
+      impulseSeconds: impulse ? impulse.length / impulse.sampleRate : null,
+      active: this.#activeSpeech.map(({ speaker, sound }) => ({
+        speaker,
+        parent:
+          sound.parent?.userData.runtimeId &&
+          typeof sound.parent.userData.runtimeId.index === "number" &&
+          typeof sound.parent.userData.runtimeId.generation === "number"
+            ? idKey(sound.parent.userData.runtimeId as RuntimeId)
+            : null,
+        distanceModel: sound.getDistanceModel(),
+        refDistance: sound.getRefDistance(),
+        maxDistance: sound.getMaxDistance(),
+        rolloffFactor: sound.getRolloffFactor(),
+        volume: sound.getVolume(),
+      })),
     };
   }
 
@@ -700,6 +809,13 @@ export class WorldRenderer {
   dispose(): void {
     this.#renderer.setAnimationLoop(null);
     removeEventListener("resize", this.#resize);
+    for (const active of this.#activeSpeech.slice()) this.#stopActiveSpeech(active, 0);
+    this.#speechConvolver?.disconnect();
+    this.#speechWetGain?.disconnect();
+    if (this.#speechListener) this.#camera.remove(this.#speechListener);
+    this.#speechListener = null;
+    this.#speechConvolver = null;
+    this.#speechWetGain = null;
     this.#worldRoot.traverse(disposeOwnedResources);
     this.#lightRoot.traverse(disposeLightResources);
     this.#realityLightRoot.traverse(disposeLightResources);
@@ -722,6 +838,78 @@ export class WorldRenderer {
     }
     this.#pipeline.dispose();
     this.#renderer.dispose();
+  }
+
+  #ensureSpeechListener(): THREE.AudioListener {
+    if (this.#speechListener) return this.#speechListener;
+    const listener = new THREE.AudioListener();
+    this.#camera.add(listener);
+    const context = listener.context;
+    const impulse = speechReverbImpulse(context.sampleRate);
+    const impulseBuffer = context.createBuffer(1, impulse.length, context.sampleRate);
+    impulseBuffer.getChannelData(0).set(impulse);
+    const convolver = context.createConvolver();
+    convolver.buffer = impulseBuffer;
+    const wetGain = context.createGain();
+    wetGain.gain.value = 0.12;
+    convolver.connect(wetGain);
+    wetGain.connect(listener.getInput());
+    this.#speechListener = listener;
+    this.#speechConvolver = convolver;
+    this.#speechWetGain = wetGain;
+    return listener;
+  }
+
+  #stopSpeech(speaker: string, fadeSeconds: number): void {
+    for (const active of this.#activeSpeech.slice())
+      if (active.speaker === speaker) this.#stopActiveSpeech(active, fadeSeconds);
+  }
+
+  #stopActiveSpeech(active: ActiveSpeech, fadeSeconds: number): void {
+    const index = this.#activeSpeech.indexOf(active);
+    if (index < 0) return;
+    this.#activeSpeech.splice(index, 1);
+    this.#updateSpeechState();
+    const { sound } = active;
+    if (sound.isPlaying && fadeSeconds > 0) {
+      const now = sound.context.currentTime;
+      sound.gain.gain.cancelScheduledValues(now);
+      sound.gain.gain.setValueAtTime(sound.gain.gain.value, now);
+      sound.gain.gain.linearRampToValueAtTime(0, now + fadeSeconds);
+      sound.stop(fadeSeconds);
+      window.setTimeout(() => this.#disposeActiveSpeech(active), fadeSeconds * 1_000 + 20);
+    } else if (sound.isPlaying) {
+      sound.stop();
+      this.#disposeActiveSpeech(active);
+    } else {
+      this.#disposeActiveSpeech(active);
+    }
+  }
+
+  #removeActiveSpeech(active: ActiveSpeech): void {
+    const index = this.#activeSpeech.indexOf(active);
+    if (index >= 0) this.#activeSpeech.splice(index, 1);
+    this.#disposeActiveSpeech(active);
+    this.#updateSpeechState();
+  }
+
+  #disposeActiveSpeech(active: ActiveSpeech): void {
+    if (active.disposed) return;
+    active.disposed = true;
+    active.sound.parent?.remove(active.sound);
+    if (this.#speechConvolver) {
+      try {
+        active.sound.gain.disconnect(this.#speechConvolver);
+      } catch {
+        // The wet send may already have been disconnected during teardown.
+      }
+    }
+    active.sound.disconnect();
+  }
+
+  #updateSpeechState(): void {
+    document.body.dataset.speechActive = String(this.#activeSpeech.length);
+    if (this.#activeSpeech.length === 0) document.body.dataset.speechAudio = "idle";
   }
 
   #meshForBrush(brush: CompiledBrush, local: boolean): THREE.Mesh {

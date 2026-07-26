@@ -37,7 +37,7 @@ fast player and prop motion by as much as one fixed step.
 Each connection also owns a coalescing body-state scheduler. Held and recently
 released bodies use an eight-record fast lane, nearby awake state has a
 two-snapshot deadline, transition and terminal-sleep commits are capped at four
-records, and remaining state accumulates importance until selected. Protocol v2
+records, and remaining state accumulates importance until selected. Protocol v3
 piggybacks the latest received state tick and a selective 32-tick mask on
 redundant input bundles. The scheduler uses that receipt evidence only to retire
 a delivered terminal sleeping revision. It never queues an ordered state delta

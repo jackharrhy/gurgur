@@ -34,6 +34,9 @@ apps/web/
   renderer.ts           Three.js scene, camera, objects, render loop
   interpolation.ts      remote snapshot histories and visual sampling
   input.ts              keyboard, pointer lock, gamepad, touch intent
+  speech-chat.ts        transient T-to-talk form and input capture
+  speech-synthesis.ts   bounded synthesis queue and worker bridge
+  speech-worker.ts      synchronous LinTalker JS/Wasm execution
   network-trace.ts      bounded development recorder and download control
 ```
 
@@ -43,8 +46,10 @@ message and does not request world content, assets, or a network session.
 `client.ts` composes the modules but owns no simulation state. The prediction
 worker owns predicted physics. `session.ts` owns network state. `renderer.ts`
 owns Three.js objects and `requestAnimationFrame`. The shipped play page contains
-only the world canvas: no HUD, reticle, visible cursor, caption, or control
-overlay. `?test` enables a generic read-only diagnostic object for browser
+only the world canvas during ordinary play: no HUD, reticle, visible cursor,
+caption, or persistent control overlay. The transient `T` speech field is hidden
+outside text entry and leaves no caption or history. `?test` enables a generic
+read-only diagnostic object for browser
 automation; ordinary play does not expose entity-specific instrumentation.
 On non-production servers,
 `?follow=<runtime-index>:<generation>&yaw=<radians>&pitch=<radians>` binds only
@@ -67,7 +72,8 @@ prediction ticks at the current fractional server-clock phase.
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission without advancing local physics by
 elapsed wall time. Leaving the page closes the WebSocket, RTCPeerConnection,
-data channels, prediction worker, geometries, materials, and renderer resources.
+data channels, prediction and speech workers, active speech sources, geometries,
+materials, and renderer resources.
 The canvas remains hidden against a black page until the renderer has followed a
 finite predicted local-player pose in the current frame. Loading a new world
 closes that gate again, preventing a default-camera world frame from flashing
@@ -204,6 +210,42 @@ and hashed logical MP3 URLs under `content/audio`. Audio remains local
 presentation: it adds no protocol message, authoritative transform, or persisted
 game state.
 
+## Positional synthesized speech
+
+`T` exits pointer lock, clears held keyboard, touch, and gamepad state, focuses a
+120-character field, and leaves the 60 Hz input stream running with zero movement
+and action intent. Enter validates and sends exactly once, then attempts to
+restore pointer lock; failure keeps the existing click-to-lock fallback. Escape
+cancels without sending. Invalid local text remains editable with a short status,
+while server rejection produces only a temporary status.
+
+Accepted text is synthesized independently by every browser. A dedicated classic
+worker lazily imports the pinned Emscripten `WinTalker` factory and runs its
+synchronous `wt_set_voice` and `wt_speak` calls away from rendering. It transfers
+22.05 kHz mono signed-16-bit PCM back to the main thread. Output longer than
+15 seconds is rejected. One active job and at most eight waiting jobs are
+retained; when full, the oldest unstarted job is discarded. World replacement
+increments a generation, clears waiting work, and discards any old result.
+
+The renderer owns one `AudioListener` on the camera. Speech creates a
+`PositionalAudio` at the current replicated player mesh's head offset, using
+linear attenuation, a 2 m reference distance, 24 m maximum distance, rolloff 1,
+and volume 0.75. The direct path remains dry. A second 0.12-gain branch passes
+through one deterministic 350 ms exponential-noise convolver shared by speech
+only; authored area music is unchanged. At most four speakers are active. New
+speech fades the same speaker's prior source for 50 ms, and a fifth speaker
+fades the oldest source. Player removal, world replacement, and page disposal
+stop and disconnect their speech. PCM completed while autoplay is locked is
+discarded instead of replayed later.
+
+The vendored browser build is pinned to `dectalk/lintalker` commit
+`5376b9ea76fe1fe86fecddd8b2b14f208ac64a21`. Source URL, hashes, and the
+project-owner provenance decision are recorded in
+[`../third_party/lintalker/README.md`](../third_party/lintalker/README.md) and
+[decision 0018](decisions/0018-positional-lintalker-speech.md). The JS and Wasm
+are copied into reproducible builds; `/assets.json` supplies SHA-256-addressed
+URLs with immutable caching.
+
 ## Routes
 
 The server exposes a deliberately small surface:
@@ -213,6 +255,9 @@ The server exposes a deliberately small surface:
 | `/` and SPA fallback                        | browser application                    |
 | `/game`                                     | control/signaling WebSocket upgrade    |
 | `/audio/<logical-id>.mp3?v=<sha256>`        | immutable authored audio asset         |
+| `/lintalker.js?v=<sha256>`                  | pinned synthesis factory               |
+| `/lintalker.wasm?v=<sha256>`                | pinned synthesis engine                |
+| `/speech-worker.js`                         | off-main-thread synthesis bridge       |
 | `/healthz`                                  | process and event-loop health          |
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |
@@ -252,10 +297,10 @@ Secrets are never bundled into browser assets.
 
 The world canvas is keyboard-focusable. Movement remains available when pointer
 lock is denied or unavailable; pointer lock controls relative mouse look, not
-whether keyboard intent is sampled. The canvas suppresses the browser's native
-focus outline because the full-viewport game surface has no adjacent focus
-targets; focus itself remains intact. The browser accepts the server RTC offer
-and uses the dynamically supplied ICE configuration when creating its peer.
+whether keyboard intent is sampled. Speech text entry is the one temporary
+adjacent focus target. The canvas suppresses the browser's native focus outline;
+focus itself remains intact. The browser accepts the server RTC offer and uses
+the dynamically supplied ICE configuration when creating its peer.
 
 GitHub Actions builds this Dockerfile on pushes to `main`, version tags, and
 manual dispatches, then publishes it to `ghcr.io/<owner>/<repository>`. The

@@ -376,7 +376,7 @@ async function createClient(
   const peer = new RTCPeerConnection({
     iceAdditionalHostAddresses: ["127.0.0.1"],
   });
-  const inputChannel = peer.createDataChannel("gurgur-input-v2", {
+  const inputChannel = peer.createDataChannel("gurgur-input-v3", {
     ordered: false,
     maxRetransmits: 0,
   });
@@ -438,7 +438,7 @@ async function createClient(
       5_000,
     );
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v2" || client.stateChannel) {
+      if (channel.label !== "gurgur-state-v3" || client.stateChannel) {
         channel.close();
         return;
       }

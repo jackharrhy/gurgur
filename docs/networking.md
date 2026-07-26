@@ -27,7 +27,7 @@ recorded and discarded rather than creating a latency spiral.
 The browser samples intent on an absolute-deadline 60 Hz schedule. Early timer
 wakes are re-armed rather than counted as samples, and delayed wakes skip obsolete
 network sends instead of emitting a catch-up burst. Each datagram contains the
-newest command plus up to two predecessors. Protocol v2's input-bundle header
+newest command plus up to two predecessors. Protocol v3's input-bundle header
 also carries the latest received state tick and a selective 32-tick receipt mask.
 This acknowledgement lets replication retire delivered terminal state; it never
 makes state reliable or ordered. Redundancy recovers ordinary input loss without
@@ -245,14 +245,32 @@ MCP actors are omitted from SQLite and removed by world reset.
 
 ## Protocol and connection lifecycle
 
-Protocol version 2 has exact bounded JSON control unions and explicit
+Protocol version 3 has exact bounded JSON control unions and explicit
 little-endian binary codecs. `mapRevision`, `worldEpoch`, runtime identity, and
 protocol version remain separate:
 
 - HTTP transfers the immutable, revision-addressed world bundle;
 - WebSocket carries hello/welcome, world manifest, lifecycle, reset,
-  ping/pong, WebRTC signaling, and the initial complete snapshot;
+  ping/pong, WebRTC signaling, ephemeral speech, and the initial complete
+  snapshot;
 - WebRTC carries disposable input and current state datagrams.
+
+Speech remains on reliable control because an accepted utterance is a bounded
+event, not disposable current state. A joined client sends `speak` with its
+current `worldEpoch`, a request ID, and text. The server normalizes outer
+whitespace and broadcasts `speech` to every joined client, including the sender,
+with the authoritative player runtime ID and a voice derived from the
+server-issued session token. The five available voice indices are Fred, Kathy,
+Princess, Junior, and Ralph; a reconnect with the same token retains its voice.
+Utterances are never stored or replayed, and an unjoined socket receives none.
+
+Text is restricted to 1–120 printable ASCII characters. Control characters and
+`[[` are invalid so LinTalker commands cannot alter synthesis mode, delimiter,
+rate, or volume. Structurally invalid packets retain the ordinary
+close-on-invalid policy. A stale epoch returns `speech-rejected` with
+`world-changed`; rate exhaustion returns `speech-rejected` with a retry delay.
+The per-session bucket holds two utterances and replenishes one every two
+seconds. The process-wide bucket holds eight and replenishes four per second.
 
 World lifecycle records identify runtime actors only by source tag, runtime
 index/generation, and immutable compiled `entityIndex`; players use the reserved
@@ -285,8 +303,8 @@ local network. When an answer contains mDNS candidates, its end-of-candidates
 marker is withheld so slow or unavailable mDNS resolution cannot make Werift
 prematurely fail an empty checklist; incoming checks can still establish the
 peer-reflexive path, while server-reflexive and relay candidates remain intact.
-The client creates `gurgur-input-v2` as unordered with no retransmissions. The
-server creates `gurgur-state-v2` as unordered with at most one retransmission.
+The client creates `gurgur-input-v3` as unordered with no retransmissions. The
+server creates `gurgur-state-v3` as unordered with at most one retransmission.
 Creating a channel at its sender is mandatory: partial reliability is a sender
 policy.
 

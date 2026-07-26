@@ -12,14 +12,14 @@ authored fixtures and tests are not.
 
 ## Layers
 
-| Layer       | Purpose                                                               |
-| ----------- | --------------------------------------------------------------------- |
-| Unit        | codecs, quantization, datagram shaping, handles, map parsing, storage |
-| Contract    | protocol unions, transport channels, adapter ownership                |
-| Simulation  | fixed-tick authoritative and predicted interaction scripts            |
-| Multiplayer | real server, real WebRTC peers, shaped datagrams, many clients        |
-| Browser     | worker prediction, WebRTC session, Three.js presentation, input       |
-| Soak        | physics churn, connection churn, persistence, reset, long-run drift   |
+| Layer       | Purpose                                                                 |
+| ----------- | ----------------------------------------------------------------------- |
+| Unit        | codecs, quantization, datagram shaping, handles, map parsing, storage   |
+| Contract    | protocol unions, transport channels, adapter ownership                  |
+| Simulation  | fixed-tick authoritative and predicted interaction scripts              |
+| Multiplayer | real server, real WebRTC peers, shaped datagrams, many clients          |
+| Browser     | workers, WebRTC session, Three.js presentation, input, positional audio |
+| Soak        | physics churn, connection churn, persistence, reset, long-run drift     |
 
 There are no skipped networking or physics tests. A player-visible regression
 belongs at the lowest layer that reproduces it and in a browser scenario when
@@ -80,6 +80,16 @@ ephemeral authoritative player at a fixed pose, opens a browser with that
 generation-bearing runtime ID plus explicit yaw and pitch, and requires the
 renderer to acquire the same replicated pose before cleanup. Stable follow
 screenshots provide a repeatable visual comparison for lighting regressions.
+The `-- speech` scenario opens two real clients. It proves that `T` clears held
+movement, Escape sends nothing, forbidden LinTalker commands remain editable,
+and Enter emits one reliable request. Both clients must receive the same
+authoritative speaker event while their server ticks continue, synthesize
+finite non-empty PCM through the real pinned Wasm, and attach audio to the same
+runtime player. The gate inspects the linear 2–24 m falloff, rolloff, 0.75 volume,
+shared 350 ms convolver, and 0.12 wet send. Unit tests separately cover exact
+v3 speech codecs, server buckets and stable voice derivation, queue eviction,
+stale-generation discard, transferable PCM reconstruction, and deterministic
+impulse decay.
 Camera tests cover same-frame inward clamping, rate-independent held recovery,
 double-sided thin-wall probes, and offset-ray corner clearance. Every browser
 scenario also requires the live boom distance to remain finite and no greater

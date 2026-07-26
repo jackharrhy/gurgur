@@ -19,12 +19,15 @@ import {
   type GurgurTraceStartResponse,
   type RuntimeEntityRef,
   type Snapshot,
+  type SpeechMessage,
+  type SpeechRejectedMessage,
   type WelcomeMessage,
   type WorldManifestMessage,
 } from "@gurgur/engine";
 import { decodeWorldBundle } from "@gurgur/game";
 import { createGurgurServer } from "../src/server";
 import { guardIceUdpSockets } from "../src/rtc";
+import { speechVoiceForSessionToken } from "../src/speech";
 
 describe("authoritative server", () => {
   test("records and returns a joined dev trace while the disabled route stays absent", async () => {
@@ -136,6 +139,7 @@ describe("authoritative server", () => {
         >;
         sprites: Record<string, string>;
         audio: Record<string, string>;
+        speech: { workerUrl: string; scriptUrl: string; wasmUrl: string };
       };
       const concreteManifest = textureManifest.materials["GURGUR/CONCRETE"]!;
       expect(concreteManifest.url).toMatch(/^\/textures\/GURGUR\/CONCRETE\.png\?v=[0-9a-f]{64}$/);
@@ -146,6 +150,11 @@ describe("authoritative server", () => {
       expect(concreteManifest.renderMode).toBe("retro");
       expect(textureManifest.sprites.fern).toMatch(/^\/sprites\/fern\.png\?v=[0-9a-f]{64}$/);
       expect(textureManifest.audio.dylan).toMatch(/^\/audio\/dylan\.mp3\?v=[0-9a-f]{64}$/);
+      expect(textureManifest.speech).toEqual({
+        workerUrl: "/speech-worker.js",
+        scriptUrl: expect.stringMatching(/^\/lintalker\.js\?v=[0-9a-f]{64}$/),
+        wasmUrl: expect.stringMatching(/^\/lintalker\.wasm\?v=[0-9a-f]{64}$/),
+      });
       const concreteTextureUrl = new URL(concreteManifest.url, `http://127.0.0.1:${server.port}`);
       expect(concreteTextureUrl.pathname).toBe("/textures/GURGUR/CONCRETE.png");
       const concreteTexture = await fetch(concreteTextureUrl.href);
@@ -162,6 +171,27 @@ describe("authoritative server", () => {
       expect(dylanAudio.headers.get("content-type")).toBe("audio/mpeg");
       expect(dylanAudio.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
       expect(new TextDecoder().decode((await dylanAudio.bytes()).slice(0, 3))).toBe("ID3");
+      const speechWorker = await fetch(
+        new URL(textureManifest.speech.workerUrl, `http://127.0.0.1:${server.port}`),
+      );
+      expect(speechWorker.headers.get("content-type")).toBe("text/javascript");
+      expect(speechWorker.headers.get("cache-control")).toBe("no-cache");
+      const lintalkerScript = await fetch(
+        new URL(textureManifest.speech.scriptUrl, `http://127.0.0.1:${server.port}`),
+      );
+      expect(lintalkerScript.headers.get("content-type")).toBe("text/javascript");
+      expect(lintalkerScript.headers.get("cache-control")).toBe(
+        "public, max-age=31536000, immutable",
+      );
+      expect(await lintalkerScript.text()).toContain("var WinTalker=");
+      const lintalkerWasm = await fetch(
+        new URL(textureManifest.speech.wasmUrl, `http://127.0.0.1:${server.port}`),
+      );
+      expect(lintalkerWasm.headers.get("content-type")).toBe("application/wasm");
+      expect(lintalkerWasm.headers.get("cache-control")).toBe(
+        "public, max-age=31536000, immutable",
+      );
+      expect(new TextDecoder().decode((await lintalkerWasm.bytes()).slice(0, 4))).toBe("\0asm");
       const connected = await connectClient(`ws://127.0.0.1:${server.port}/game`);
       client = connected;
       expect(connected.stateChannel.maxRetransmits).toBe(STATE_MAX_RETRANSMITS);
@@ -210,6 +240,141 @@ describe("authoritative server", () => {
       expect(metrics.stateTransportClients).toBeGreaterThanOrEqual(0);
     } finally {
       if (client) await closeClient(client);
+      server.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("broadcasts ephemeral speech with authoritative identity, voice, epoch, and limits", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "gurgur-speech-"));
+    const server = await createGurgurServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      databasePath: join(directory, "world.sqlite"),
+    });
+    const clients: TestClient[] = [];
+    let unjoined: WebSocket | null = null;
+    try {
+      const url = `ws://127.0.0.1:${server.port}/game`;
+      const first = await connectClient(url);
+      const second = await connectClient(url);
+      clients.push(first, second);
+
+      const firstSpeech = waitForJson(first.socket, "speech") as Promise<SpeechMessage>;
+      const secondSpeech = waitForJson(second.socket, "speech") as Promise<SpeechMessage>;
+      first.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: first.welcome.worldEpoch,
+          requestId: 31,
+          text: "  Hello there.  ",
+        }),
+      );
+      const [senderCopy, peerCopy] = await Promise.all([firstSpeech, secondSpeech]);
+      expect(senderCopy).toEqual(peerCopy);
+      expect(senderCopy).toEqual({
+        type: "speech",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: first.welcome.worldEpoch,
+        requestId: 31,
+        speakerId: first.welcome.playerId,
+        voice: speechVoiceForSessionToken(first.welcome.sessionToken),
+        text: "Hello there.",
+      });
+
+      unjoined = new WebSocket(url);
+      await new Promise<void>((resolve, reject) => {
+        unjoined!.addEventListener("open", () => resolve(), { once: true });
+        unjoined!.addEventListener("error", () => reject(new Error("unjoined socket failed")), {
+          once: true,
+        });
+      });
+      let leakedToUnjoined = false;
+      unjoined.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") return;
+        if ((JSON.parse(event.data) as { type?: unknown }).type === "speech")
+          leakedToUnjoined = true;
+      });
+      const nextForFirst = waitForJson(
+        first.socket,
+        "speech",
+        (message) => message.requestId === 32,
+      );
+      const nextForSecond = waitForJson(
+        second.socket,
+        "speech",
+        (message) => message.requestId === 32,
+      );
+      first.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: first.welcome.worldEpoch,
+          requestId: 32,
+          text: "Second utterance.",
+        }),
+      );
+      await Promise.all([nextForFirst, nextForSecond]);
+      await Bun.sleep(25);
+      expect(leakedToUnjoined).toBeFalse();
+
+      const limited = waitForJson(
+        first.socket,
+        "speech-rejected",
+        (message) => message.requestId === 33,
+      ) as Promise<SpeechRejectedMessage>;
+      first.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: first.welcome.worldEpoch,
+          requestId: 33,
+          text: "Too soon.",
+        }),
+      );
+      expect(await limited).toMatchObject({
+        reason: "rate-limited",
+        requestId: 33,
+        worldEpoch: first.welcome.worldEpoch,
+      });
+
+      const wrongEpoch = waitForJson(
+        first.socket,
+        "speech-rejected",
+        (message) => message.requestId === 34,
+      ) as Promise<SpeechRejectedMessage>;
+      first.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: first.welcome.worldEpoch + 1,
+          requestId: 34,
+          text: "Wrong world.",
+        }),
+      );
+      expect(await wrongEpoch).toEqual({
+        type: "speech-rejected",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: first.welcome.worldEpoch,
+        requestId: 34,
+        reason: "world-changed",
+        retryAfterMs: 0,
+      });
+
+      const later = await connectClient(url);
+      clients.push(later);
+      expect(
+        later.controlMessages.some(
+          (message) =>
+            typeof message === "object" &&
+            message !== null &&
+            (message as { type?: unknown }).type === "speech",
+        ),
+      ).toBeFalse();
+    } finally {
+      unjoined?.close();
+      await Promise.all(clients.map(closeClient));
       server.stop();
       await rm(directory, { recursive: true, force: true });
     }
@@ -265,6 +430,21 @@ describe("authoritative server", () => {
       const url = `ws://127.0.0.1:${server.port}/game`;
       const firstConnection = await connectClient(url);
       first = firstConnection;
+      const initialSpeech = waitForJson(
+        firstConnection.socket,
+        "speech",
+        (message) => message.requestId === 1,
+      ) as Promise<SpeechMessage>;
+      firstConnection.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: firstConnection.welcome.worldEpoch,
+          requestId: 1,
+          text: "Before reconnect.",
+        }),
+      );
+      const initialVoice = (await initialSpeech).voice;
       const replaced = new Promise<CloseEvent>((resolve) =>
         firstConnection.socket.addEventListener("close", resolve, { once: true }),
       );
@@ -282,6 +462,21 @@ describe("authoritative server", () => {
       expect(
         secondConnection.world.runtimeEntities.filter((entity) => entity.kind === "player").length,
       ).toBe(1);
+      const resumedSpeech = waitForJson(
+        secondConnection.socket,
+        "speech",
+        (message) => message.requestId === 2,
+      ) as Promise<SpeechMessage>;
+      secondConnection.socket.send(
+        JSON.stringify({
+          type: "speak",
+          protocolVersion: PROTOCOL_VERSION,
+          worldEpoch: secondConnection.welcome.worldEpoch,
+          requestId: 2,
+          text: "After reconnect.",
+        }),
+      );
+      expect((await resumedSpeech).voice).toBe(initialVoice);
 
       const stale = new WebSocket(url);
       const closed = new Promise<CloseEvent>((resolve) =>
@@ -444,6 +639,7 @@ type TestClient = {
   welcome: WelcomeMessage;
   world: WorldManifestMessage;
   snapshot: Snapshot;
+  controlMessages: unknown[];
 };
 
 function emptyClientTrace(captureId: string): GurgurClientTrace {
@@ -485,7 +681,7 @@ function connectClient(
     const peer = new RTCPeerConnection({
       iceAdditionalHostAddresses: ["127.0.0.1"],
     });
-    const inputChannel = peer.createDataChannel("gurgur-input-v2", {
+    const inputChannel = peer.createDataChannel("gurgur-input-v3", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -495,6 +691,7 @@ function connectClient(
     let snapshot: Snapshot | null = null;
     let stateReady = false;
     let answerStarted = false;
+    const controlMessages: unknown[] = [];
     const done = (): void => {
       if (!welcome || !world || !snapshot || !stateReady || !stateChannel) return;
       clearTimeout(timeout);
@@ -506,11 +703,12 @@ function connectClient(
         welcome,
         world,
         snapshot,
+        controlMessages,
       });
     };
     const timeout = setTimeout(() => reject(new Error("timed out connecting test client")), 5_000);
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v2" || stateChannel) {
+      if (channel.label !== "gurgur-state-v3" || stateChannel) {
         channel.close();
         return;
       }
@@ -572,6 +770,7 @@ function connectClient(
             description: { type: "offer"; sdp: string };
             iceServers: RTCIceServer[];
           };
+      controlMessages.push(message);
       if (message.type === "welcome") welcome = message;
       if (message.type === "world") world = message;
       if (message.type === "rtc-offer") void acceptOffer(message.description);

@@ -6,6 +6,9 @@ import type {
   PongMessage,
   RtcAnswerMessage,
   RtcOfferMessage,
+  SpeakMessage,
+  SpeechMessage,
+  SpeechRejectedMessage,
   WelcomeMessage,
 } from "./types";
 import type { RuntimeEntityRef, WorldManifestMessage } from "./world";
@@ -28,6 +31,7 @@ export function decodeClientControl(text: string): ClientControlMessage {
   if (value.type === "hello") return hello(value);
   if (value.type === "ping") return ping(value);
   if (value.type === "rtc-answer") return rtcAnswer(value);
+  if (value.type === "speak") return speak(value);
   throw new Error("unknown control packet type");
 }
 
@@ -35,7 +39,9 @@ export type ServerTextMessage =
   | WelcomeMessage
   | PongMessage
   | RtcOfferMessage
-  | WorldManifestMessage;
+  | WorldManifestMessage
+  | SpeechMessage
+  | SpeechRejectedMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
   const value = parseControl(text);
@@ -43,6 +49,8 @@ export function decodeServerControl(text: string): ServerTextMessage {
   if (value.type === "world") return world(value);
   if (value.type === "pong") return pong(value);
   if (value.type === "rtc-offer") return rtcOffer(value);
+  if (value.type === "speech") return speech(value);
+  if (value.type === "speech-rejected") return speechRejected(value);
   throw new Error("unknown control packet type");
 }
 
@@ -154,6 +162,54 @@ function ping(value: RecordValue): PingMessage {
   return value as PingMessage;
 }
 
+function speak(value: RecordValue): SpeakMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "text"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !speechText(value.text)
+  ) {
+    throw new Error("speak fields are invalid");
+  }
+  return value as SpeakMessage;
+}
+
+function speech(value: RecordValue): SpeechMessage {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "requestId",
+    "speakerId",
+    "voice",
+    "text",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.speakerId) ||
+    !safeInteger(value.voice, 0) ||
+    value.voice > 4 ||
+    !speechText(value.text)
+  ) {
+    throw new Error("speech fields are invalid");
+  }
+  return value as SpeechMessage;
+}
+
+function speechRejected(value: RecordValue): SpeechRejectedMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "reason", "retryAfterMs"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !["rate-limited", "world-changed"].includes(value.reason as string) ||
+    !safeInteger(value.retryAfterMs, 0)
+  ) {
+    throw new Error("speech rejection fields are invalid");
+  }
+  return value as SpeechRejectedMessage;
+}
+
 function rtcOffer(value: RecordValue): RtcOfferMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "description", "iceServers"]);
   if (
@@ -240,6 +296,21 @@ function safeInteger(value: unknown, minimum: number): value is number {
 
 function string(value: unknown, maximum: number, minimum = 0): value is string {
   return typeof value === "string" && value.length >= minimum && value.length <= maximum;
+}
+
+export function validSpeechText(value: unknown): boolean {
+  return speechText(value);
+}
+
+function speechText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 120 &&
+    value.trim().length > 0 &&
+    !value.includes("[[") &&
+    /^[\x20-\x7e]+$/.test(value)
+  );
 }
 
 function nullableString(value: unknown, maximum: number): value is string | null {

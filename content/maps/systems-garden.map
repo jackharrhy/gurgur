@@ -1595,7 +1595,7 @@
 "origin" "-456 -128 224"
 "color" "0.44 0.52 0.48"
 "intensity" "0.75"
-"volumeDensity" "0.07"
+"volumeDensity" "0.18"
 }
 // entity 80
 {
@@ -1619,5 +1619,13 @@
 "angle" "34"
 "penumbra" "1"
 "castShadow" "1"
-"volumetric" "0"
+"volumetric" "1"
+}
+// entity 82
+{
+"classname" "light_spot"
+"origin" "-916 380 236"
+"angle" "32.000000"
+"direction" "0 0 -1"
+"color" "135 156 255"
 }

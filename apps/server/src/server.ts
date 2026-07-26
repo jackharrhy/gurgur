@@ -21,6 +21,8 @@ import {
   type RuntimeId,
   type LifecycleMessage,
   type Snapshot,
+  type SpeechMessage,
+  type SpeechRejectedMessage,
   type Vec3,
   type WelcomeMessage,
   type ClientControlMessage,
@@ -39,6 +41,7 @@ import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
 import { NetworkTraceCapture, TraceConflictError, TraceNotFoundError } from "./network-trace";
 import { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 import { createDevMcpListener } from "./dev-mcp";
+import { SpeechRateLimiter, speechVoiceForSessionToken } from "./speech";
 
 export { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 
@@ -60,6 +63,9 @@ type SessionRecord = {
   disconnectTimer: Timer | null;
 };
 let sourcePredictionWorker: Promise<Blob> | null = null;
+let sourceSpeechWorker: Promise<Blob> | null = null;
+const LINTALKER_SCRIPT_SHA256 = "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c";
+const LINTALKER_WASM_SHA256 = "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b";
 
 export type GurgurServer = {
   port: number;
@@ -135,6 +141,26 @@ export async function createGurgurServer(
   const predictionWorker = (await adjacentPredictionWorker.exists())
     ? adjacentPredictionWorker
     : await buildSourcePredictionWorker();
+  const adjacentSpeechWorker = Bun.file(new URL("../../web/src/speech-worker.js", import.meta.url));
+  const speechWorker = (await adjacentSpeechWorker.exists())
+    ? adjacentSpeechWorker
+    : await buildSourceSpeechWorker();
+  const lintalkerScript = Bun.file(
+    new URL("../../../third_party/lintalker/wintalker.js", import.meta.url),
+  );
+  const lintalkerWasm = Bun.file(
+    new URL("../../../third_party/lintalker/wintalker.wasm", import.meta.url),
+  );
+  if (!(await lintalkerScript.exists()) || !(await lintalkerWasm.exists()))
+    throw new Error("missing pinned LinTalker browser artifacts");
+  const lintalkerScriptHash = await fileHash(lintalkerScript);
+  const lintalkerWasmHash = await fileHash(lintalkerWasm);
+  if (
+    lintalkerScriptHash !== LINTALKER_SCRIPT_SHA256 ||
+    lintalkerWasmHash !== LINTALKER_WASM_SHA256
+  ) {
+    throw new Error("pinned LinTalker browser artifact hash mismatch");
+  }
   const playerBillboard = Bun.file(
     new URL("../../../content/generated/player-billboard/player-billboard.png", import.meta.url),
   );
@@ -148,6 +174,7 @@ export async function createGurgurServer(
   );
   const clients = new Set<Bun.ServerWebSocket<ClientData>>();
   const sessions = new Map<string, SessionRecord>();
+  const speechRateLimiter = new SpeechRateLimiter();
   const networkTraceEnabled =
     Bun.env.NODE_ENV !== "production" && options.networkTraceEnabled !== false;
   const devClientEnabled = Bun.env.NODE_ENV !== "production" && options.devClientEnabled !== false;
@@ -398,7 +425,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v2", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v3", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -426,7 +453,7 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-input-v2" && !socket.data.inputChannel) {
+      if (channel.label === "gurgur-input-v3" && !socket.data.inputChannel) {
         socket.data.inputChannel = channel;
         channel.onMessage.subscribe((packet) => {
           if (typeof packet === "string" || !acceptInputPacket(socket, packet, "webrtc"))
@@ -498,6 +525,43 @@ export async function createGurgurServer(
       "/prediction-worker.js": new Response(predictionWorker, {
         headers: { "content-type": "text/javascript" },
       }),
+      "/speech-worker.js": new Response(speechWorker, {
+        headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
+      }),
+      "/lintalker.js": {
+        GET(request: Request) {
+          const url = new URL(request.url);
+          if (url.searchParams.get("v") !== lintalkerScriptHash) {
+            url.search = "";
+            url.searchParams.set("v", lintalkerScriptHash);
+            return Response.redirect(url, 307);
+          }
+          return new Response(lintalkerScript, {
+            headers: {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "text/javascript",
+              etag: `"${lintalkerScriptHash}"`,
+            },
+          });
+        },
+      },
+      "/lintalker.wasm": {
+        GET(request: Request) {
+          const url = new URL(request.url);
+          if (url.searchParams.get("v") !== lintalkerWasmHash) {
+            url.search = "";
+            url.searchParams.set("v", lintalkerWasmHash);
+            return Response.redirect(url, 307);
+          }
+          return new Response(lintalkerWasm, {
+            headers: {
+              "cache-control": "public, max-age=31536000, immutable",
+              "content-type": "application/wasm",
+              etag: `"${lintalkerWasmHash}"`,
+            },
+          });
+        },
+      },
       "/player-billboard.png": new Response(playerBillboard, {
         headers: {
           "content-type": "image/png",
@@ -507,12 +571,17 @@ export async function createGurgurServer(
       "/assets.json": {
         async GET(request: Request) {
           const manifest = await loadAssetManifest(materialTextureRoot, spriteRoot, audioRoot);
+          const etag = `"${createHash("sha256")
+            .update(manifest.etag)
+            .update(lintalkerScriptHash)
+            .update(lintalkerWasmHash)
+            .digest("hex")}"`;
           const headers = {
             "cache-control": "no-cache",
             "content-type": "application/json",
-            etag: manifest.etag,
+            etag,
           };
-          if (request.headers.get("if-none-match") === manifest.etag) {
+          if (request.headers.get("if-none-match") === etag) {
             return new Response(null, { status: 304, headers });
           }
           return Response.json(
@@ -520,6 +589,11 @@ export async function createGurgurServer(
               materials: manifest.materials,
               sprites: manifest.sprites,
               audio: manifest.audio,
+              speech: {
+                workerUrl: "/speech-worker.js",
+                scriptUrl: `/lintalker.js?v=${lintalkerScriptHash}`,
+                wasmUrl: `/lintalker.wasm?v=${lintalkerWasmHash}`,
+              },
             },
             { headers },
           );
@@ -737,6 +811,45 @@ export async function createGurgurServer(
             }
             return;
           }
+          if (control.type === "speak" && socket.data.playerId && socket.data.sessionToken) {
+            if (control.worldEpoch !== game.worldEpoch) {
+              const rejected: SpeechRejectedMessage = {
+                type: "speech-rejected",
+                protocolVersion: PROTOCOL_VERSION,
+                worldEpoch: game.worldEpoch,
+                requestId: control.requestId,
+                reason: "world-changed",
+                retryAfterMs: 0,
+              };
+              socket.send(JSON.stringify(rejected));
+              return;
+            }
+            const limited = speechRateLimiter.accept(socket.data.sessionToken, performance.now());
+            if (!limited.accepted) {
+              const rejected: SpeechRejectedMessage = {
+                type: "speech-rejected",
+                protocolVersion: PROTOCOL_VERSION,
+                worldEpoch: game.worldEpoch,
+                requestId: control.requestId,
+                reason: "rate-limited",
+                retryAfterMs: limited.retryAfterMs,
+              };
+              socket.send(JSON.stringify(rejected));
+              return;
+            }
+            const speech: SpeechMessage = {
+              type: "speech",
+              protocolVersion: PROTOCOL_VERSION,
+              worldEpoch: game.worldEpoch,
+              requestId: control.requestId,
+              speakerId: socket.data.playerId,
+              voice: speechVoiceForSessionToken(socket.data.sessionToken),
+              text: control.text.trim(),
+            };
+            const encoded = JSON.stringify(speech);
+            for (const client of clients) if (client.data.playerId) client.send(encoded);
+            return;
+          }
           if (
             control.type === "ping" &&
             control.protocolVersion === PROTOCOL_VERSION &&
@@ -781,6 +894,7 @@ export async function createGurgurServer(
         if (shuttingDown) return;
         session.disconnectTimer = setTimeout(() => {
           if (session.socket || !sessions.delete(token!)) return;
+          speechRateLimiter.forget(token!);
           if (game.disconnectPlayer(session.playerId))
             broadcastLifecycle({
               type: "lifecycle",
@@ -872,6 +986,26 @@ function buildSourcePredictionWorker(): Promise<Blob> {
     return result.outputs[0];
   });
   return sourcePredictionWorker;
+}
+
+function buildSourceSpeechWorker(): Promise<Blob> {
+  sourceSpeechWorker ??= Bun.build({
+    entrypoints: [new URL("../../web/src/speech-worker.ts", import.meta.url).pathname],
+    target: "browser",
+    format: "iife",
+    minify: true,
+  }).then((result) => {
+    if (!result.success || !result.outputs[0])
+      throw new Error("failed to build browser speech worker");
+    return result.outputs[0];
+  });
+  return sourceSpeechWorker;
+}
+
+async function fileHash(file: Blob): Promise<string> {
+  return createHash("sha256")
+    .update(new Uint8Array(await file.arrayBuffer()))
+    .digest("hex");
 }
 
 function validInputCommand(input: InputCommand): boolean {

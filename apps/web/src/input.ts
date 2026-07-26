@@ -16,6 +16,8 @@ type TouchState = { id: number; x: number; y: number };
 export type PlayerInput = {
   readonly yaw: number;
   readonly pitch: number;
+  setTextEntryActive(active: boolean): void;
+  requestPointerLock(): void;
   setWorld(worldEpoch: number, yaw?: number): void;
   dispose(): void;
 };
@@ -41,6 +43,7 @@ export function createPlayerInput(
   let gamepadCrouch = false;
   let moveTouch: (TouchState & { startX: number; startY: number }) | null = null;
   let lookTouch: TouchState | null = null;
+  let textEntryActive = false;
 
   const clearKeys = (): void => keys.clear();
   const focusCanvas = (): void => {
@@ -67,6 +70,7 @@ export function createPlayerInput(
     }
   };
   const keyDown = (event: KeyboardEvent): void => {
+    if (textEntryActive) return;
     if (MOVEMENT_KEYS.has(event.code)) event.preventDefault();
     if (!event.repeat && event.code === "Space") jumpCounter += 1;
     if (!event.repeat && event.code === "KeyE") interactCounter += 1;
@@ -79,17 +83,20 @@ export function createPlayerInput(
     if (document.hidden) clearKeys();
   };
   const mouseMove = (event: MouseEvent): void => {
+    if (textEntryActive) return;
     if (document.pointerLockElement !== canvas) return;
     yaw -= event.movementX * 0.0022;
     pitch = Math.max(-1.35, Math.min(1.35, pitch - event.movementY * 0.0022));
     onLook(yaw, pitch);
   };
   const mouseDown = (event: MouseEvent): void => {
+    if (textEntryActive) return;
     if (event.button !== 0) return;
     if (document.pointerLockElement === canvas) primaryCounter += 1;
     else if (event.target === canvas) lockPointer();
   };
   const pointerDown = (event: PointerEvent): void => {
+    if (textEntryActive) return;
     if (event.pointerType !== "touch") return;
     event.preventDefault();
     focusCanvas();
@@ -111,6 +118,7 @@ export function createPlayerInput(
     }
   };
   const pointerMove = (event: PointerEvent): void => {
+    if (textEntryActive) return;
     if (moveTouch?.id === event.pointerId) {
       moveTouch.x = event.clientX;
       moveTouch.y = event.clientY;
@@ -129,6 +137,7 @@ export function createPlayerInput(
     if (lookTouch?.id === event.pointerId) lookTouch = null;
   };
   const pollGamepad = (): { x: number; z: number } => {
+    if (textEntryActive) return { x: 0, z: 0 };
     const gamepad = navigator.getGamepads?.().find((candidate) => candidate?.connected) ?? null;
     if (!gamepad) return { x: 0, z: 0 };
     const deadzone = (value: number): number => (Math.abs(value) < 0.16 ? 0 : value);
@@ -167,13 +176,14 @@ export function createPlayerInput(
       moveZ,
       lookYaw: yaw,
       lookPitch: pitch,
-      buttons:
-        Number(keys.has("Space")) |
-        (Number(keys.has("KeyE")) << 1) |
-        (Number(keys.has("ControlLeft") || keys.has("ControlRight") || gamepadCrouch) << 2),
+      buttons: textEntryActive
+        ? 0
+        : Number(keys.has("Space")) |
+          (Number(keys.has("KeyE")) << 1) |
+          (Number(keys.has("ControlLeft") || keys.has("ControlRight") || gamepadCrouch) << 2),
       jumpCounter,
       interactCounter,
-      interactTarget: interactionTarget(),
+      interactTarget: textEntryActive ? null : interactionTarget(),
       primaryCounter,
     });
   };
@@ -220,6 +230,19 @@ export function createPlayerInput(
     get pitch() {
       return pitch;
     },
+    setTextEntryActive(active) {
+      textEntryActive = active;
+      if (active) {
+        clearKeys();
+        moveTouch = null;
+        lookTouch = null;
+        gamepadJump = false;
+        gamepadInteract = false;
+        gamepadPrimary = false;
+        gamepadCrouch = false;
+      }
+    },
+    requestPointerLock: lockPointer,
     setWorld(nextWorldEpoch, nextYaw) {
       if (worldEpoch === nextWorldEpoch) return;
       worldEpoch = nextWorldEpoch;

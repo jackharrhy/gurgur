@@ -162,12 +162,18 @@ const waitForStablePlayerHeight = async (): Promise<number> =>
   );
 const worldBundleRequests: string[] = [];
 const materialTextureRequests: string[] = [];
+let speechRequestsSent = 0;
 page.on("request", (request) => {
   const requestUrl = new URL(request.url());
   if (requestUrl.pathname === "/world.bin") worldBundleRequests.push(requestUrl.href);
   if (requestUrl.pathname.startsWith("/textures/") && requestUrl.pathname.endsWith(".png")) {
     materialTextureRequests.push(requestUrl.href);
   }
+});
+page.on("websocket", (socket) => {
+  socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string" && payload.includes('"type":"speak"')) speechRequestsSent += 1;
+  });
 });
 if (scenario === "grab" || scenario === "gamepad")
   await page.addInitScript(() => {
@@ -350,7 +356,9 @@ try {
     return {
       mainChildren: main?.childElementCount,
       canvasChildren: main?.querySelectorAll(":scope > canvas").length,
-      controls: document.querySelectorAll("button, [role=button], input, .hud").length,
+      controls: [...document.querySelectorAll("button, [role=button], input, .hud")].filter(
+        (element) => element.getClientRects().length > 0,
+      ).length,
       canvasFocused: document.activeElement === canvas,
       canvasBorderWidth: canvasStyle?.borderWidth,
       canvasOutlineStyle: canvasStyle?.outlineStyle,
@@ -1007,6 +1015,204 @@ try {
     await page.evaluate(() => {
       (window as unknown as { __gurgurSmokePad: { axes: number[] } }).__gurgurSmokePad.axes[1] = 0;
     });
+  } else if (scenario === "speech") {
+    const peerPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    const peerErrors: string[] = [];
+    peerPage.on("pageerror", (error) => peerErrors.push(error.message));
+    peerPage.on("console", (message) => {
+      if (message.type() === "error" && !message.text().startsWith("Failed to load resource"))
+        peerErrors.push(message.text());
+    });
+    try {
+      await peerPage.goto(url.href);
+      await peerPage.locator('body[data-input-ready="true"]').waitFor({ timeout: 5_000 });
+      await peerPage.locator('body[data-player-view-ready="true"]').waitFor({ timeout: 5_000 });
+
+      await page.keyboard.press("Shift");
+      await peerPage.keyboard.press("Shift");
+
+      await page.keyboard.down("w");
+      await page.keyboard.press("t");
+      await page.locator('body[data-speech-chat="open"]').waitFor();
+      await page.waitForFunction(
+        () =>
+          document.activeElement === document.querySelector("#speech-text") &&
+          Number(document.body.dataset.inputMoveX) === 0 &&
+          Number(document.body.dataset.inputMoveZ) === 0 &&
+          Number(document.body.dataset.inputButtons) === 0,
+      );
+      await page.keyboard.up("w");
+      const field = page.locator("#speech-text");
+      await field.fill("This should be cancelled.");
+      await field.press("Escape");
+      await page.locator('body[data-speech-chat="closed"]').waitFor();
+      if (await page.evaluate(() => document.body.dataset.lastSpeechRequest !== undefined))
+        throw new Error("Escape submitted a speech request");
+
+      await page.keyboard.press("t");
+      await field.fill("[[rate 900]] no");
+      await field.press("Enter");
+      const invalid = await page.evaluate(() => ({
+        open: document.body.dataset.speechChat,
+        value: (document.querySelector<HTMLInputElement>("#speech-text")?.value ?? "").trim(),
+        status: document.querySelector("#speech-status")?.textContent ?? "",
+        request: document.body.dataset.lastSpeechRequest,
+      }));
+      if (
+        invalid.open !== "open" ||
+        invalid.value !== "[[rate 900]] no" ||
+        !invalid.status.includes("not allowed") ||
+        invalid.request !== undefined
+      )
+        throw new Error(`invalid speech was not retained for editing: ${JSON.stringify(invalid)}`);
+
+      const phrase =
+        "Hello from the positional speech test. The renderer should keep moving while both workers synthesize this sentence.";
+      const startedTick = Number(await page.evaluate(() => document.body.dataset.serverTick));
+      await field.fill(phrase);
+      await field.press("Enter");
+      await page.locator('body[data-speech-chat="closed"]').waitFor();
+      await page.waitForFunction(
+        (expected) =>
+          document.body.dataset.lastSpeechText === expected &&
+          document.body.dataset.lastSpeechRequest === "0",
+        phrase,
+      );
+      await peerPage.waitForFunction(
+        (expected) => document.body.dataset.lastSpeechText === expected,
+        phrase,
+      );
+      await Promise.all([
+        page.waitForFunction(
+          () =>
+            document.body.dataset.lastSpeechPlayed === "true" &&
+            Number(document.body.dataset.lastSpeechSampleCount) > 0 &&
+            Number(document.body.dataset.speechActive) > 0,
+          null,
+          { timeout: 20_000 },
+        ),
+        peerPage.waitForFunction(
+          () =>
+            document.body.dataset.lastSpeechPlayed === "true" &&
+            Number(document.body.dataset.lastSpeechSampleCount) > 0 &&
+            Number(document.body.dataset.speechActive) > 0,
+          null,
+          { timeout: 20_000 },
+        ),
+      ]);
+      await page.waitForTimeout(120);
+      const speechState = await Promise.all(
+        [page, peerPage].map((speechPage) =>
+          speechPage.evaluate(() => {
+            const diagnostics = (
+              window as unknown as {
+                __gurgurDiagnostics: {
+                  speech(): {
+                    listenerAttached: boolean;
+                    contextState: string;
+                    wetGain: number | null;
+                    impulseSeconds: number | null;
+                    active: Array<{
+                      speaker: string;
+                      parent: string | null;
+                      distanceModel: string;
+                      refDistance: number;
+                      maxDistance: number;
+                      rolloffFactor: number;
+                      volume: number;
+                    }>;
+                  };
+                };
+              }
+            ).__gurgurDiagnostics.speech();
+            return {
+              diagnostics,
+              speaker: document.body.dataset.lastSpeechSpeaker,
+              sampleCount: Number(document.body.dataset.lastSpeechSampleCount),
+              tick: Number(document.body.dataset.serverTick),
+            };
+          }),
+        ),
+      );
+      for (const state of speechState) {
+        const active = state.diagnostics.active[0];
+        if (
+          !state.diagnostics.listenerAttached ||
+          state.diagnostics.contextState !== "running" ||
+          Math.abs((state.diagnostics.wetGain ?? 0) - 0.12) > 1e-6 ||
+          Math.abs((state.diagnostics.impulseSeconds ?? 0) - 0.35) > 1e-6 ||
+          !active ||
+          active.speaker !== state.speaker ||
+          active.parent !== state.speaker ||
+          active.distanceModel !== "linear" ||
+          active.refDistance !== 2 ||
+          active.maxDistance !== 24 ||
+          active.rolloffFactor !== 1 ||
+          Math.abs(active.volume - 0.75) > 0.01 ||
+          state.sampleCount <= 0 ||
+          state.sampleCount > 22_050 * 15 ||
+          state.tick <= startedTick
+        )
+          throw new Error(`positional speech graph is incorrect: ${JSON.stringify(state)}`);
+      }
+      const durationCap = await page.evaluate(async () => {
+        const manifest = (await (await fetch("/assets.json")).json()) as {
+          speech: { workerUrl: string; scriptUrl: string; wasmUrl: string };
+        };
+        const worker = new Worker(manifest.speech.workerUrl, { name: "speech-duration-probe" });
+        try {
+          return await new Promise<{ type: string; message?: string }>((resolve, reject) => {
+            const timeout = window.setTimeout(
+              () => reject(new Error("speech duration probe timed out")),
+              20_000,
+            );
+            worker.addEventListener(
+              "message",
+              (event: MessageEvent<{ type: string; message?: string }>) => {
+                clearTimeout(timeout);
+                resolve(event.data);
+              },
+              { once: true },
+            );
+            worker.addEventListener(
+              "error",
+              () => {
+                clearTimeout(timeout);
+                reject(new Error("speech duration probe worker failed"));
+              },
+              { once: true },
+            );
+            worker.postMessage({
+              type: "synthesize",
+              generation: 0,
+              jobId: 0,
+              voice: 0,
+              text: "W ".repeat(60).trim(),
+              scriptUrl: manifest.speech.scriptUrl,
+              wasmUrl: manifest.speech.wasmUrl,
+            });
+          });
+        } finally {
+          worker.terminate();
+        }
+      });
+      if (durationCap.type !== "error" || durationCap.message !== "speech exceeds 15 seconds")
+        throw new Error(`speech duration cap failed: ${JSON.stringify(durationCap)}`);
+      if (
+        speechState[0]!.speaker !== speechState[1]!.speaker ||
+        speechRequestsSent !== 1 ||
+        peerErrors.length > 0
+      )
+        throw new Error(
+          `speech clients disagreed: ${JSON.stringify({
+            speechState,
+            speechRequestsSent,
+            peerErrors,
+          })}`,
+        );
+    } finally {
+      await peerPage.close();
+    }
   } else {
     await waitForStablePlayerHeight();
     if (process.env.SMOKE_DENY_POINTER_LOCK === "1") {

@@ -8,6 +8,23 @@ await import("../tools/compile-map/src/index");
 const materialTextureRoot = new URL("../content/textures/", import.meta.url);
 const spriteRoot = new URL("../content/sprites/", import.meta.url);
 const audioRoot = new URL("../content/audio/", import.meta.url);
+const lintalkerArtifacts = [
+  {
+    path: "third_party/lintalker/wintalker.js",
+    sha256: "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c",
+  },
+  {
+    path: "third_party/lintalker/wintalker.wasm",
+    sha256: "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b",
+  },
+] as const;
+for (const artifact of lintalkerArtifacts) {
+  const hash = new Bun.CryptoHasher("sha256")
+    .update(new Uint8Array(await Bun.file(artifact.path).arrayBuffer()))
+    .digest("hex");
+  if (hash !== artifact.sha256)
+    throw new Error(`pinned LinTalker artifact hash mismatch: ${artifact.path}`);
+}
 const assetManifest = await loadAssetManifest(materialTextureRoot, spriteRoot, audioRoot);
 const compiledWorld = (await Bun.file("content/generated/systems-garden.json").json()) as {
   brushes: Array<{ triangleMaterials: string[] }>;
@@ -59,9 +76,24 @@ if (!workerResult.success) {
   process.exit(1);
 }
 
+const speechWorkerResult = await Bun.build({
+  entrypoints: ["apps/web/src/speech-worker.ts"],
+  outdir: "dist",
+  root: ".",
+  target: "browser",
+  format: "iife",
+  minify: true,
+  sourcemap: "linked",
+});
+if (!speechWorkerResult.success) {
+  for (const log of speechWorkerResult.logs) console.error(log);
+  process.exit(1);
+}
+
 await mkdir("dist/apps/server/src", { recursive: true });
 await mkdir("dist/content/generated", { recursive: true });
 await mkdir("dist/content/generated/player-billboard", { recursive: true });
+await mkdir("dist/third_party/lintalker", { recursive: true });
 let materialTextureCount = 0;
 for await (const path of new Bun.Glob("**/*.png").scan({
   cwd: "content/textures",
@@ -104,6 +136,14 @@ await Bun.write(
   "dist/content/generated/player-billboard/player-billboard.png",
   Bun.file("content/generated/player-billboard/player-billboard.png"),
 );
+await Bun.write(
+  "dist/third_party/lintalker/wintalker.js",
+  Bun.file("third_party/lintalker/wintalker.js"),
+);
+await Bun.write(
+  "dist/third_party/lintalker/wintalker.wasm",
+  Bun.file("third_party/lintalker/wintalker.wasm"),
+);
 console.log(
-  `built ${result.outputs.length + workerResult.outputs.length} files, box3d.wasm, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
+  `built ${result.outputs.length + workerResult.outputs.length + speechWorkerResult.outputs.length} files, box3d.wasm, LinTalker, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
 );

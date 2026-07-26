@@ -82,7 +82,7 @@ export type PlayerStateSnapshot = {
 
 export type WelcomeMessage = {
   type: "welcome";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   playerId: RuntimeId;
   mapRevision: string;
@@ -94,7 +94,7 @@ export type WelcomeMessage = {
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion: 2;
+  protocolVersion: 3;
   mapRevision: string | null;
   worldEpoch: number | null;
   sessionToken: string | null;
@@ -103,7 +103,7 @@ export type HelloMessage = {
 
 export type PingMessage = {
   type: "ping";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -111,7 +111,7 @@ export type PingMessage = {
 
 export type PongMessage = {
   type: "pong";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -120,7 +120,7 @@ export type PongMessage = {
 
 export type RtcOfferMessage = {
   type: "rtc-offer";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
   iceServers: Array<{ urls: string; username?: string; credential?: string }>;
@@ -128,17 +128,51 @@ export type RtcOfferMessage = {
 
 export type RtcAnswerMessage = {
   type: "rtc-answer";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   description: { type: "answer"; sdp: string };
 };
 
-export type ClientControlMessage = HelloMessage | PingMessage | RtcAnswerMessage;
-export type ServerControlMessage = WelcomeMessage | PongMessage | RtcOfferMessage;
+export type SpeechVoice = 0 | 1 | 2 | 3 | 4;
+
+export type SpeakMessage = {
+  type: "speak";
+  protocolVersion: 3;
+  worldEpoch: number;
+  requestId: number;
+  text: string;
+};
+
+export type SpeechMessage = {
+  type: "speech";
+  protocolVersion: 3;
+  worldEpoch: number;
+  requestId: number;
+  speakerId: RuntimeId;
+  voice: SpeechVoice;
+  text: string;
+};
+
+export type SpeechRejectedMessage = {
+  type: "speech-rejected";
+  protocolVersion: 3;
+  worldEpoch: number;
+  requestId: number;
+  reason: "rate-limited" | "world-changed";
+  retryAfterMs: number;
+};
+
+export type ClientControlMessage = HelloMessage | PingMessage | RtcAnswerMessage | SpeakMessage;
+export type ServerControlMessage =
+  | WelcomeMessage
+  | PongMessage
+  | RtcOfferMessage
+  | SpeechMessage
+  | SpeechRejectedMessage;
 
 export type InputCommand = {
   type: "input";
-  protocolVersion: 2;
+  protocolVersion: 3;
   worldEpoch: number;
   sequence: number;
   clientTick: number;

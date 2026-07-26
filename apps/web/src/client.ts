@@ -8,6 +8,8 @@ import { WorldAudio } from "./audio";
 import { installNetworkTraceControls, type ClientNetworkTraceRecorder } from "./network-trace";
 import type { PhysicsDebugFrame, RuntimeId } from "@gurgur/engine";
 import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
+import { installSpeechChat, type SpeechChat } from "./speech-chat";
+import { SpeechSynthesizer } from "./speech-synthesis";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
@@ -120,6 +122,25 @@ const audioAssetUrls = Object.fromEntries(
     return [name, url];
   }),
 );
+const speechAssets = assetManifest.speech;
+if (
+  !speechAssets ||
+  typeof speechAssets !== "object" ||
+  Array.isArray(speechAssets) ||
+  typeof (speechAssets as { workerUrl?: unknown }).workerUrl !== "string" ||
+  !(speechAssets as { workerUrl: string }).workerUrl.startsWith("/speech-worker.js") ||
+  typeof (speechAssets as { scriptUrl?: unknown }).scriptUrl !== "string" ||
+  !(speechAssets as { scriptUrl: string }).scriptUrl.startsWith("/lintalker.js?v=") ||
+  typeof (speechAssets as { wasmUrl?: unknown }).wasmUrl !== "string" ||
+  !(speechAssets as { wasmUrl: string }).wasmUrl.startsWith("/lintalker.wasm?v=")
+) {
+  throw new Error("speech asset metadata is invalid");
+}
+const speechAssetUrls = speechAssets as {
+  workerUrl: string;
+  scriptUrl: string;
+  wasmUrl: string;
+};
 const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
   document.body.dataset.audioState = state.state;
   document.body.dataset.audioAsset = state.asset ?? "";
@@ -159,6 +180,7 @@ if (testEnabled) {
           ...structuredClone(body),
         })),
       camera: () => renderer.cameraDiagnostics(),
+      speech: () => renderer.speechDiagnostics(),
     }),
   });
 }
@@ -184,6 +206,15 @@ const renderer = new WorldRenderer(
   spriteAssetUrls,
   debugEnabled,
 );
+const speechSynthesizer = new SpeechSynthesizer({
+  ...speechAssetUrls,
+  onSpeech(speech) {
+    document.body.dataset.lastSpeechSampleCount = String(speech.samples.length);
+    document.body.dataset.lastSpeechPlayed = String(
+      renderer.playSpeech(speech.speakerId, speech.sampleRate, speech.samples),
+    );
+  },
+});
 if (followCamera) {
   renderer.setViewAngles(followCamera.yaw, followCamera.pitch);
   renderer.setFollowCamera(followCamera.target, (body) => {
@@ -224,6 +255,7 @@ const predictor = createPredictionClient(
 );
 let localPlayerKey: string | null = null;
 let session: GameSession;
+let speechChat: SpeechChat | null = null;
 let predictionWorldEpoch: number | null = null;
 let snapshotEpochAfterTransport: number | null = null;
 let stateTransportReady = false;
@@ -265,6 +297,7 @@ session = new GameSession(
       traceRecorder?.recordMarker({ kind: "connection", value: status });
       document.body.dataset.connection = status;
       document.body.dataset.ready = status === "connected" ? "true" : "false";
+      speechChat?.setEnabled(status === "connected");
       if (close) {
         document.body.dataset.closeCode = String(close.code);
         document.body.dataset.closeReason = close.reason;
@@ -302,6 +335,7 @@ session = new GameSession(
         value: `${message.bundle.mapRevision}@${message.worldEpoch}`,
       });
       document.body.dataset.playerViewReady = "false";
+      speechSynthesizer.reset();
       renderer.setWorld(message);
       worldAudio.setWorld(message.bundle);
       document.body.dataset.inputReady = "false";
@@ -397,11 +431,30 @@ session = new GameSession(
       snapshotEpochAfterTransport = null;
       if (!stateTransportReady) document.body.dataset.inputReady = "false";
     },
+    speech(message) {
+      document.body.dataset.lastSpeechText = message.text;
+      document.body.dataset.lastSpeechSpeaker = `${message.speakerId.index}:${message.speakerId.generation}`;
+      speechSynthesizer.enqueue(message);
+    },
+    speechRejected(message) {
+      speechChat?.rejected(message.retryAfterMs, message.reason === "world-changed");
+    },
   },
   {
     simulatedLatencyMs: Number(searchParams.get("simulatedLatencyMs") ?? 0),
   },
 );
+const speechForm = document.querySelector<HTMLFormElement>("#speech-chat");
+const speechField = document.querySelector<HTMLInputElement>("#speech-text");
+const speechStatus = document.querySelector<HTMLOutputElement>("#speech-status");
+if (!speechForm || !speechField || !speechStatus) throw new Error("speech chat UI is missing");
+speechChat = installSpeechChat({
+  form: speechForm,
+  field: speechField,
+  status: speechStatus,
+  input,
+  submit: (requestId, text) => session.speak(requestId, text),
+});
 
 let debugPoll: number | null = null;
 let debugRequest: AbortController | null = null;
@@ -451,6 +504,7 @@ renderer.start();
 session.connect();
 const unlockAudio = (): void => {
   void worldAudio.unlock();
+  void renderer.unlockSpeechAudio();
 };
 addEventListener("pointerdown", unlockAudio, { passive: true, capture: true });
 addEventListener("keydown", unlockAudio, { capture: true });
@@ -458,6 +512,8 @@ addEventListener("pagehide", () => {
   if (debugPoll !== null) clearInterval(debugPoll);
   debugRequest?.abort();
   session.close();
+  speechChat?.dispose();
+  speechSynthesizer.dispose();
   input.dispose();
   predictor.dispose();
   removeEventListener("pointerdown", unlockAudio, { capture: true });

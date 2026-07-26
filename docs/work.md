@@ -11,7 +11,7 @@ slice:
 
 - one Bun process owns the persistent 60 Hz Box3D world, serves HTTP and reliable
   WebSocket control, and terminates per-client WebRTC gameplay channels;
-- protocol v2 sends redundant 60 Hz newest-wins intent with selective state
+- protocol v3 sends redundant 60 Hz newest-wins intent with selective state
   receipt acknowledgement and 30 Hz self-contained quantized state datagrams;
   current state is dropped under backpressure rather than queued behind obsolete
   state;
@@ -45,6 +45,12 @@ slice:
   `ambient_audio` nodes by compiled entity index, with listener-local overlap
   priority, crossfades, logical MP3 assets, and no new transport or persistence
   state;
+- `T` now opens an input-only speech field. The reliable v3 control channel
+  carries bounded ephemeral text with authoritative identity, stable
+  server-assigned voice, epoch checks, and per-session/global limits. Every
+  browser synthesizes the pinned LinTalker build in a bounded worker and plays
+  it at the replicated player's head through a four-speaker positional wet/dry
+  graph; no caption, history, persistence, or replay remains;
 - hard reloads now preserve the per-tab socket-generation sequence alongside
   the resumable session token, preventing progressively slower stale-generation
   reconnect loops;
@@ -131,7 +137,8 @@ final second. Receiver-stall recovery was 0.535 m and 74.4 ms. Connected reset
 ended on the new epoch at 0.256 m and 68.0 ms, with no stale input, tracks, or
 handles.
 
-The 2026-07-25 protocol-v2 prediction/scheduling replacement passed
+The 2026-07-25 prediction/scheduling replacement, originally introduced in
+protocol v2 and retained by v3, passed
 `bun run check`, the real browser grab smoke, the 16-client mixed profile, and
 the 2/8/16/32-peer quick matrix including outage, receiver stall, and connected
 reset. The 16-client mixed run had zero correctness errors, state drops, queued

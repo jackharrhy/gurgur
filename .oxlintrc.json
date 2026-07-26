@@ -16,6 +16,7 @@
     "dist/**",
     "node_modules/**",
     "**/node_modules/**",
-    "reports/**"
+    "reports/**",
+    "third_party/**"
   ]
 }

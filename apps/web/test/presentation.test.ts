@@ -6,6 +6,7 @@ import {
   createBillboardGeometry,
   normalizeMaterialUv,
   renderableBrushTriangleIndices,
+  speechReverbImpulse,
 } from "../src/renderer";
 import {
   createInteractionOutlineMaterial,
@@ -105,6 +106,17 @@ test("billboard geometry preserves the authored origin inside a lit plane", () =
   expect(geometry.boundingBox?.min.y).toBeCloseTo(-1);
   expect(geometry.boundingBox?.max.y).toBeCloseTo(3);
   geometry.dispose();
+});
+
+test("speech reverb uses a deterministic 350ms decaying impulse", () => {
+  const first = speechReverbImpulse(22_050);
+  const second = speechReverbImpulse(22_050);
+  expect(first).toEqual(second);
+  expect(first).toHaveLength(Math.round(22_050 * 0.35));
+  expect(first.every(Number.isFinite)).toBeTrue();
+  const earlyEnergy = first.slice(0, 1_000).reduce((sum, sample) => sum + sample * sample, 0);
+  const lateEnergy = first.slice(-1_000).reduce((sum, sample) => sum + sample * sample, 0);
+  expect(earlyEnergy).toBeGreaterThan(lateEnergy * 100);
 });
 
 describe("predicted server-phase presentation", () => {

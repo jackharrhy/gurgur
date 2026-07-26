@@ -11,6 +11,19 @@
     <main>
       <canvas id="world" tabindex="0" aria-label="Gurgur game world"></canvas>
     </main>
+    <form id="speech-chat" hidden>
+      <label for="speech-text">Say</label>
+      <input
+        id="speech-text"
+        name="speech"
+        type="text"
+        maxlength="120"
+        autocomplete="off"
+        spellcheck="true"
+        aria-describedby="speech-status"
+      />
+    </form>
+    <output id="speech-status" aria-live="polite" hidden></output>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

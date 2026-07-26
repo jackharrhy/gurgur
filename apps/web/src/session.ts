@@ -14,6 +14,8 @@ import {
   type RtcOfferMessage,
   type Snapshot,
   type StateAcknowledgement,
+  type SpeechMessage,
+  type SpeechRejectedMessage,
   type WelcomeMessage,
   type WorldManifestMessage,
 } from "@gurgur/engine";
@@ -32,6 +34,8 @@ export type SessionCallbacks = {
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
   transport?(state: "negotiating" | "webrtc" | "disconnected"): void;
+  speech?(message: SpeechMessage): void;
+  speechRejected?(message: SpeechRejectedMessage): void;
 };
 
 export class GameSession {
@@ -162,6 +166,10 @@ export class GameSession {
         this.#callbacks.network?.(this.#rttMs, this.#jitterMs);
       } else if (message.type === "rtc-offer") {
         void this.#acceptRtcOffer(socket, message);
+      } else if (message.type === "speech") {
+        if (message.worldEpoch === this.#worldEpoch) this.#callbacks.speech?.(message);
+      } else if (message.type === "speech-rejected") {
+        this.#callbacks.speechRejected?.(message);
       }
       return;
     }
@@ -200,6 +208,27 @@ export class GameSession {
     this.#socket?.close(1000, "page closed");
   }
 
+  speak(requestId: number, text: string): boolean {
+    const socket = this.#socket;
+    if (
+      socket?.readyState !== WebSocket.OPEN ||
+      this.#worldEpoch === null ||
+      !Number.isSafeInteger(requestId) ||
+      requestId < 0
+    )
+      return false;
+    socket.send(
+      JSON.stringify({
+        type: "speak",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: this.#worldEpoch,
+        requestId,
+        text,
+      }),
+    );
+    return true;
+  }
+
   sendInput(command: InputCommand): void {
     const socket = this.#socket;
     this.#inputHistory.push(command);
@@ -223,7 +252,7 @@ export class GameSession {
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: message.iceServers });
     let receivedState = false;
-    const input = peer.createDataChannel("gurgur-input-v2", {
+    const input = peer.createDataChannel("gurgur-input-v3", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -231,7 +260,7 @@ export class GameSession {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v2" ||
+        state.label !== "gurgur-state-v3" ||
         this.#stateChannel
       ) {
         state.close();
