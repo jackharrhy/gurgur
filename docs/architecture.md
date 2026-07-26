@@ -5,8 +5,7 @@
 One Bun process imports and serves the browser HTML application, accepts native
 Bun WebSockets, terminates WebRTC gameplay data channels, runs the authoritative
 game state and Box3D world, and persists snapshots through `bun:sqlite`. Browser
-clients use vanilla TypeScript and direct Three.js, with local-player prediction
-in a module worker.
+clients use vanilla TypeScript and direct Three.js.
 
 In development, that same process also owns an optional MCP control plane on a
 second listener bound strictly to `127.0.0.1`. It reads the live authoritative
@@ -19,7 +18,7 @@ The selected runtime stack is:
   bundler, and `bun:sqlite`;
 - TypeScript for application, compiler, and protocol code;
 - Three.js over a required WebGPU backend for browser rendering;
-- `box3d.js@0.0.2`, single-threaded separate-Wasm build, in Bun and the browser;
+- `box3d.js@0.0.2`, single-threaded separate-Wasm build, in Bun;
 - `werift@0.23.0` for server-side ICE, DTLS, SCTP, and WebRTC data channels;
 - direct application registries rather than BitECS or a general game engine.
 
@@ -38,14 +37,14 @@ depend on small structural capability interfaces rather than concrete classes.
 Pure transforms and short-lived registries use functions and plain data.
 `GameSimulation` owns players, controller policy, interactions, mechanisms,
 signals, and gameplay serialization. The server host composes world loading,
-runtime-body construction, fixed stepping, replication, and tick-boundary
-persistence transactions; it does not reimplement gameplay policy.
+runtime-body construction, fixed stepping, current-state publication, and
+tick-boundary persistence transactions; it does not reimplement gameplay policy.
 
 ## Source boundaries
 
 ```text
 apps/
-  web/             HTML, vanilla TS, Three.js, input, prediction worker
+  web/             HTML, vanilla TS, Three.js, input, latest-state rendering
   server/          authoritative host, HTTP/WebSocket/WebRTC, persistence, metrics
 packages/
   engine/          math, protocol, Valve parsing, generic capabilities, Box3D adapter
@@ -53,7 +52,6 @@ packages/
 tools/
   generate-fgd/
   compile-map/
-  network-harness/  deterministic clients, link shaping, metrics, reports
 content/
   maps/ textures/ sprites/ models/ generated/
 ```
@@ -62,8 +60,7 @@ Browser, DOM, and Three.js code stay out of both packages. SQLite, filesystem,
 administration, and server sockets stay in the server app. The engine never
 knows mapper classnames or gameplay union members. Game code sees the host only
 through `GameEngine`; that capability omits stepping, disposal, debug extraction,
-and arbitrary body creation. The network harness is production-adjacent tooling:
-it imports the real codecs and drives the real server and client boundaries.
+and arbitrary body creation.
 
 ## State ownership
 
@@ -72,8 +69,7 @@ it imports the real codecs and drives the real server and client boundaries.
 | Authored geometry and defaults | compiled world bundle | one `mapRevision`       |
 | Live bodies and constraints    | server Box3D world    | one `worldEpoch`        |
 | Gameplay and entity state      | game simulation       | one `worldEpoch`        |
-| Replicated view                | each client           | disposable              |
-| Local-player prediction        | client worker         | until correction/reset  |
+| Latest received view           | each client           | disposable              |
 | Durable application state      | SQLite                | across process restarts |
 
 Box3D handles, Wasm pointers, and registry slots are process-local. They are
@@ -119,8 +115,7 @@ from persistence and discarded on reset or shutdown.
 A reset stops input consumption, increments `worldEpoch`, discards durable body
 state, recreates the Box3D world from the compiled bundle, respawns connected
 players, writes the reset snapshot, publishes a full snapshot, and resumes input.
-Clients clear prediction and interpolation state associated with the previous
-epoch.
+Clients discard received state associated with the previous epoch.
 
 ## Deployment
 

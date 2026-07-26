@@ -9,25 +9,18 @@ import {
   type WorldMessage,
 } from "@gurgur/game";
 import {
-  FAR_BODY_SNAPSHOT_STRIDE,
-  FULL_RATE_BODY_RADIUS_METRES,
   MAX_CATCH_UP_TICKS,
   PHYSICS_DT,
   PHYSICS_HZ,
   PHYSICS_SUBSTEPS,
   PROTOCOL_VERSION,
   SNAPSHOT_INTERVAL_TICKS,
-  SNAPSHOT_FLAG_CREATED,
   SNAPSHOT_FLAG_GRABBED,
-  SNAPSHOT_FLAG_SLEEP,
-  SNAPSHOT_FLAG_TELEPORT,
-  SNAPSHOT_FLAG_WAKE,
   type InputCommand,
   type PhysicsDebugFrame,
   type Quat,
   type RuntimeId,
   type Snapshot,
-  type TraceServerFrame,
   type Vec3,
 } from "@gurgur/engine";
 import {
@@ -40,8 +33,6 @@ import type { PersistedWorld, WorldStore } from "./store";
 import { WORLD_BUNDLE } from "./world";
 
 const SAVE_INTERVAL_TICKS = 5 / PHYSICS_DT;
-const TERMINAL_BODY_REPEAT_TICKS = PHYSICS_HZ;
-const DISCONTINUITY_REPEAT_TICKS = PHYSICS_HZ;
 const MAX_DEV_PLAYERS = 16;
 const MAX_DEV_PROPS = 64;
 const DEV_PLAYER_PREFIX = "dev.mcp.player.";
@@ -82,12 +73,7 @@ export class AuthoritativeGame {
   #runtimeBodies: RuntimeBody[] = [];
   #simulation!: GameSimulation;
   #saveRequested = false;
-  readonly #replicationState = new Map<string, { position: Vec3; awake: boolean }>();
-  readonly #dirtyBodies = new Set<string>();
-  readonly #terminalBodyRepeatUntilTick = new Map<string, number>();
-  readonly #discontinuityRepeatUntilTick = new Map<string, number>();
   readonly #tickDurationsMs: number[] = [];
-  #traceSink: ((frame: Omit<TraceServerFrame, "serverAtMs">) => void) | null = null;
   #discardedOverloadSeconds = 0;
   #worldEpoch: number;
   #serverTick: number;
@@ -150,7 +136,6 @@ export class AuthoritativeGame {
       restored,
       game.#extraDynamicBodyCount,
     );
-    for (const body of game.#runtimeBodies) game.#dirtyBodies.add(key(body.handle));
     game.#simulation = game.#createGameSimulation(restored);
     return game;
   }
@@ -203,10 +188,7 @@ export class AuthoritativeGame {
   }
 
   disconnectPlayer(id: RuntimeId): boolean {
-    if (!this.#simulation.players.disconnect(id)) return false;
-    this.#replicationState.delete(key(id));
-    this.#discontinuityRepeatUntilTick.delete(key(id));
-    return true;
+    return this.#simulation.players.disconnect(id);
   }
 
   acceptInput(id: RuntimeId, command: InputCommand): boolean {
@@ -311,7 +293,6 @@ export class AuthoritativeGame {
     );
     this.#runtimeBodies.push(body);
     this.#devBodyKeys.add(key(body.id));
-    this.#dirtyBodies.add(key(body.id));
     return body;
   }
 
@@ -323,10 +304,6 @@ export class AuthoritativeGame {
     if (!body) return false;
     this.#physics.destroy(body.handle);
     this.#runtimeBodies.splice(index, 1);
-    this.#dirtyBodies.delete(identity);
-    this.#replicationState.delete(identity);
-    this.#terminalBodyRepeatUntilTick.delete(identity);
-    this.#discontinuityRepeatUntilTick.delete(identity);
     return true;
   }
 
@@ -422,8 +399,6 @@ export class AuthoritativeGame {
     if (!player) return null;
     this.#devPlayers.delete(controllerId);
     if (!this.#simulation.players.disconnect(player.id, { persist: false })) return null;
-    this.#replicationState.delete(key(player.id));
-    this.#discontinuityRepeatUntilTick.delete(key(player.id));
     return { ...player.id };
   }
 
@@ -441,10 +416,6 @@ export class AuthoritativeGame {
           fraction: hit.fraction,
         }
       : null;
-  }
-
-  setTraceSink(sink: ((frame: Omit<TraceServerFrame, "serverAtMs">) => void) | null): void {
-    this.#traceSink = sink;
   }
 
   start(): void {
@@ -470,11 +441,9 @@ export class AuthoritativeGame {
       const events = this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       this.#processPostPhysics(events);
       this.#serverTick += 1;
-      if (this.#traceSink) this.#traceSink(this.#traceFrame());
       this.#accumulator -= PHYSICS_DT;
       steps += 1;
-      if (this.#serverTick % SNAPSHOT_INTERVAL_TICKS === 0)
-        this.#onSnapshot(this.snapshot({ full: false }));
+      if (this.#serverTick % SNAPSHOT_INTERVAL_TICKS === 0) this.#onSnapshot(this.snapshot());
       if (this.#saveRequested) {
         this.#saveRequested = false;
         this.save();
@@ -485,44 +454,18 @@ export class AuthoritativeGame {
     }
   }
 
-  snapshot(options: { full?: boolean; discontinuity?: boolean } = { full: true }): Snapshot {
-    const full = options.full !== false;
-    const discontinuity = options.discontinuity === true;
+  snapshot(): Snapshot {
     const players = this.#simulation.players.views();
-    const snapshotIndex = Math.floor(this.#serverTick / SNAPSHOT_INTERVAL_TICKS);
-    const bodies = this.#runtimeBodies.flatMap(({ handle }) => {
+    const bodies = this.#runtimeBodies.map(({ handle }) => {
       const identity = key(handle);
       const grabbed = players.some(
         (player) => player.grabTarget && key(player.grabTarget) === identity,
       );
-      const { awake, ...state } = this.#physics.state(handle);
-      const predictionRelevant = players.some(
-        (player) => distance(player.position, state.position) <= FULL_RATE_BODY_RADIUS_METRES,
-      );
-      const repeatUntil = this.#terminalBodyRepeatUntilTick.get(identity) ?? -1;
-      const repeatTerminalState = repeatUntil >= this.#serverTick;
-      if (repeatUntil >= 0 && !repeatTerminalState)
-        this.#terminalBodyRepeatUntilTick.delete(identity);
-      const remoteBodyDue = (snapshotIndex + handle.index) % FAR_BODY_SNAPSHOT_STRIDE === 0;
-      if (
-        !full &&
-        !predictionRelevant &&
-        !repeatTerminalState &&
-        (!this.#dirtyBodies.has(identity) || !remoteBodyDue)
-      )
-        return [];
-      if (!full) this.#dirtyBodies.delete(identity);
-      return [
-        {
-          ...state,
-          flags:
-            (discontinuity
-              ? SNAPSHOT_FLAG_TELEPORT
-              : this.#snapshotFlags(handle, state.position, awake)) |
-            (!awake ? SNAPSHOT_FLAG_SLEEP : 0) |
-            (grabbed ? SNAPSHOT_FLAG_GRABBED : 0),
-        },
-      ];
+      const { awake: _awake, ...state } = this.#physics.state(handle);
+      return {
+        ...state,
+        flags: grabbed ? SNAPSHOT_FLAG_GRABBED : 0,
+      };
     });
     return {
       worldEpoch: this.#worldEpoch,
@@ -534,9 +477,7 @@ export class AuthoritativeGame {
           rotation: yawRotation(player.yaw),
           linearVelocity: { x: 0, y: player.verticalVelocity, z: 0 },
           angularVelocity: { x: 0, y: 0, z: 0 },
-          flags: discontinuity
-            ? SNAPSHOT_FLAG_TELEPORT
-            : this.#snapshotFlags(player.id, player.position, true),
+          flags: 0,
         })),
       ),
       players: players.map((player) => ({
@@ -579,10 +520,6 @@ export class AuthoritativeGame {
     });
     this.#runtimeBodies = [];
     this.#saveRequested = false;
-    this.#replicationState.clear();
-    this.#dirtyBodies.clear();
-    this.#terminalBodyRepeatUntilTick.clear();
-    this.#discontinuityRepeatUntilTick.clear();
     this.#devBodyKeys.clear();
     this.#worldEpoch += 1;
     this.#serverTick = 0;
@@ -593,7 +530,6 @@ export class AuthoritativeGame {
       null,
       this.#extraDynamicBodyCount,
     );
-    for (const body of this.#runtimeBodies) this.#dirtyBodies.add(key(body.handle));
     this.#simulation.reset();
     this.save();
     this.#onWorld(this.worldMessage());
@@ -625,26 +561,6 @@ export class AuthoritativeGame {
     this.#clearDevPlayers();
     this.save();
     this.#physics.dispose();
-  }
-
-  #traceFrame(): Omit<TraceServerFrame, "serverAtMs"> {
-    return {
-      worldEpoch: this.#worldEpoch,
-      serverTick: this.#serverTick,
-      bodies: this.#runtimeBodies.map(({ handle }) => this.#physics.state(handle)),
-      players: this.#simulation.players.views().map((player) => ({
-        id: { ...player.id },
-        position: { ...player.position },
-        yaw: player.yaw,
-        verticalVelocity: player.verticalVelocity,
-        grounded: player.grounded,
-        lastProcessedInputSequence: player.lastProcessedInputSequence,
-        lastJumpCounter: player.lastJumpCounter,
-        stepCooldown: player.stepCooldown,
-        crouched: player.crouched,
-        grabTarget: player.grabTarget ? { ...player.grabTarget } : null,
-      })),
-    };
   }
 
   #createGameSimulation(restored: PersistedWorld | null): GameSimulation {
@@ -707,15 +623,6 @@ export class AuthoritativeGame {
   }
 
   #processPostPhysics(events: PhysicsStepEvents): void {
-    for (const event of events.moved) {
-      const identity = key(event.body);
-      this.#dirtyBodies.add(identity);
-      if (event.fellAsleep)
-        this.#terminalBodyRepeatUntilTick.set(
-          identity,
-          this.#serverTick + TERMINAL_BODY_REPEAT_TICKS,
-        );
-    }
     this.#simulation.processSensorEvents(events.sensorBegin, events.sensorEnd);
   }
 
@@ -750,34 +657,6 @@ export class AuthoritativeGame {
   #clearDevPlayers(): void {
     for (const controllerId of this.#devPlayers.keys()) this.removeDevPlayer(controllerId);
   }
-
-  #snapshotFlags(id: RuntimeId, position: Vec3, awake: boolean): number {
-    const identity = key(id);
-    const previous = this.#replicationState.get(identity);
-    let flags = previous ? 0 : SNAPSHOT_FLAG_CREATED;
-    if (previous) {
-      if (!previous.awake && awake) flags |= SNAPSHOT_FLAG_WAKE;
-      if (previous.awake && !awake) flags |= SNAPSHOT_FLAG_SLEEP;
-      if (
-        Math.hypot(
-          position.x - previous.position.x,
-          position.y - previous.position.y,
-          position.z - previous.position.z,
-        ) >= 2
-      ) {
-        flags |= SNAPSHOT_FLAG_TELEPORT;
-        this.#discontinuityRepeatUntilTick.set(
-          identity,
-          this.#serverTick + DISCONTINUITY_REPEAT_TICKS,
-        );
-      }
-    }
-    const repeatUntil = this.#discontinuityRepeatUntilTick.get(identity) ?? -1;
-    if (repeatUntil >= this.#serverTick) flags |= SNAPSHOT_FLAG_TELEPORT;
-    else if (repeatUntil >= 0) this.#discontinuityRepeatUntilTick.delete(identity);
-    this.#replicationState.set(identity, { position: { ...position }, awake });
-    return flags;
-  }
 }
 
 function yawRotation(yaw: number): Quat {
@@ -800,8 +679,4 @@ function nextCounter(value: number): number {
 
 function key(id: RuntimeId): string {
   return `${id.index}:${id.generation}`;
-}
-
-function distance(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }

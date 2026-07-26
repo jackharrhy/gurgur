@@ -1,7 +1,6 @@
 import * as THREE from "three/webgpu";
 import {
   SNAPSHOT_FLAG_GRABBED,
-  SNAPSHOT_FLAG_LOCAL_GRAB,
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
@@ -10,17 +9,10 @@ import {
   type PhysicsDebugPrimitive,
   type RuntimeEntityRef,
   type RuntimeId,
-  type TracePresentationFrame,
-  type TracePresentedBody,
+  type Snapshot,
   type Vec3,
 } from "@gurgur/engine";
 import { PLAYER_GRAB_REACH, type WorldMessage } from "@gurgur/game";
-import type { SnapshotTimeline } from "./interpolation";
-import {
-  createPredictedPoseTimeline,
-  mergeBodySamples,
-  type PredictedPoseTimeline,
-} from "./presentation";
 import {
   createInteractionOutlineMaterial,
   createInteractionOutlineMaskMaterial,
@@ -232,7 +224,7 @@ export class WorldRenderer {
   readonly #scene = new THREE.Scene();
   readonly #realityScene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
-  readonly #history: SnapshotTimeline;
+  #latestSnapshot: Snapshot | null = null;
   readonly #meshes = new Map<string, THREE.Object3D>();
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
@@ -240,7 +232,6 @@ export class WorldRenderer {
   readonly #spriteAssetUrls: Readonly<Record<string, string>>;
   readonly #outlineMaskMaterial = createInteractionOutlineMaskMaterial();
   readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
-  readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
   readonly #cameraCollisionMaterial = new THREE.MeshBasicNodeMaterial({
     side: THREE.DoubleSide,
   });
@@ -255,14 +246,10 @@ export class WorldRenderer {
   readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
-  #heldTarget: THREE.Object3D | null = null;
   #outlinedTarget: THREE.Object3D | null = null;
   #pickupPlayerPosition: THREE.Vector3 | null = null;
-  readonly #predictedLocal = createPredictedPoseTimeline();
-  readonly #predictedBodies = new Map<string, PredictedPoseTimeline>();
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
   readonly #onBodyPresentation: (body: BodySnapshot) => void;
-  #traceSink: ((frame: TracePresentationFrame) => void) | null = null;
   #viewYaw = 0;
   #viewPitch = -0.18;
   #followTarget: RuntimeId | null = null;
@@ -279,14 +266,12 @@ export class WorldRenderer {
 
   constructor(
     canvas: HTMLCanvasElement,
-    history: SnapshotTimeline,
     onLocalPresentation: (body: BodySnapshot) => void = () => {},
     onBodyPresentation: (body: BodySnapshot) => void = () => {},
     materialTextures: Readonly<Record<string, MaterialTextureInfo>> = {},
     spriteAssetUrls: Readonly<Record<string, string>> = {},
     debug = false,
   ) {
-    this.#history = history;
     this.#onLocalPresentation = onLocalPresentation;
     this.#onBodyPresentation = onBodyPresentation;
     this.#materialTextures = materialTextures;
@@ -344,9 +329,8 @@ export class WorldRenderer {
     this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
     this.#cameraCollisionBodies.clear();
-    this.#predictedBodies.clear();
+    this.#latestSnapshot = null;
     this.#interactionCandidate = null;
-    this.#heldTarget = null;
     this.#outlinedTarget = null;
     this.#pickupPlayerPosition = null;
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
@@ -437,7 +421,6 @@ export class WorldRenderer {
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         this.#meshes.delete(identity);
-        this.#predictedBodies.delete(identity);
         this.#worldRoot.remove(mesh);
         mesh.traverse(disposeOwnedResources);
       }
@@ -500,27 +483,16 @@ export class WorldRenderer {
     return true;
   }
 
-  setPredictedPlayer(body: BodySnapshot | null, predictionTick: number | null): void {
-    if (body && predictionTick !== null) this.#predictedLocal.push(body, predictionTick);
-    else this.#predictedLocal.clear();
-  }
-
-  setPredictedBodies(bodies: BodySnapshot[], predictionTick: number | null): void {
-    if (predictionTick === null) {
-      this.#predictedBodies.clear();
+  applySnapshot(snapshot: Snapshot): void {
+    const current = this.#latestSnapshot;
+    if (
+      current &&
+      (current.worldEpoch > snapshot.worldEpoch ||
+        (current.worldEpoch === snapshot.worldEpoch && current.serverTick > snapshot.serverTick))
+    )
       return;
-    }
-    const retained = new Set<string>();
-    for (const body of bodies) {
-      const identity = idKey(body.id);
-      retained.add(identity);
-      const timeline = this.#predictedBodies.get(identity) ?? createPredictedPoseTimeline();
-      timeline.push(body, predictionTick);
-      this.#predictedBodies.set(identity, timeline);
-    }
-    for (const identity of this.#predictedBodies.keys()) {
-      if (!retained.has(identity)) this.#predictedBodies.delete(identity);
-    }
+    this.#latestSnapshot = snapshot;
+    this.applyAuthoritativeInteractionState(snapshot.bodies);
   }
 
   applyAuthoritativeInteractionState(bodies: BodySnapshot[]): void {
@@ -528,11 +500,6 @@ export class WorldRenderer {
       const mesh = this.#meshes.get(idKey(body.id));
       if (!mesh) continue;
       mesh.userData.snapshotFlags = body.flags ?? 0;
-      if ((body.flags ?? 0) & SNAPSHOT_FLAG_LOCAL_GRAB) {
-        this.#heldTarget = mesh;
-      } else if (this.#heldTarget === mesh) {
-        this.#heldTarget = null;
-      }
     }
     this.#updateInteractionOutline();
   }
@@ -550,10 +517,6 @@ export class WorldRenderer {
     this.#onFollowPresentation = onPresentation;
     this.#cameraFollowing = false;
     this.#cameraFrameTime = null;
-  }
-
-  setTraceSink(sink: ((frame: TracePresentationFrame) => void) | null): void {
-    this.#traceSink = sink;
   }
 
   interactionTarget(): RuntimeId | null {
@@ -605,8 +568,7 @@ export class WorldRenderer {
     return null;
   }
 
-  interactionOutlineState(): "available" | "held" | "none" {
-    if (this.#heldTarget) return "held";
+  interactionOutlineState(): "available" | "none" {
     return this.#interactionCandidate ? "available" : "none";
   }
 
@@ -703,37 +665,15 @@ export class WorldRenderer {
   start(): void {
     const render = (): void => {
       if (document.hidden) return;
-      const latest = this.#history.latestTick;
-      if (latest !== null) {
+      const snapshot = this.#latestSnapshot;
+      if (snapshot) {
         const now = performance.now();
-        const estimatedServerTick = this.#history.serverTickAt(now);
-        const presentationTargetTick = estimatedServerTick - this.#history.interpolationDelayTicks;
-        const authoritativeSample = this.#history.sampleWithMetadata(presentationTargetTick);
-        const currentSample = this.#history.sampleWithMetadata(estimatedServerTick);
-        const authoritative = authoritativeSample.bodies;
-        const current = currentSample.bodies;
-        const predictedLocal = this.#predictedLocal.sample(estimatedServerTick);
-        const predictedBodies = [...this.#predictedBodies.values()].flatMap((timeline) => {
-          const body = timeline.sample(estimatedServerTick);
-          return body ? [body] : [];
-        });
-        const renderedBodies = mergeBodySamples(authoritative, predictedBodies);
-        this.#apply(renderedBodies);
-        let localFallback: BodySnapshot | null = null;
-        let localPresentation: BodySnapshot | null = null;
-        if (predictedLocal) {
-          this.#apply([predictedLocal]);
-          localPresentation = predictedLocal;
-          this.#onLocalPresentation(predictedLocal);
-        } else if (this.#localPlayer) {
-          const local = current.find((body) => idKey(body.id) === idKey(this.#localPlayer!));
-          if (local) {
-            localFallback = local;
-            localPresentation = local;
-            this.#apply([local]);
-          }
-        }
+        this.#apply(snapshot.bodies);
+        const localPresentation = this.#localPlayer
+          ? (snapshot.bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!)) ?? null)
+          : null;
         if (localPresentation) {
+          this.#onLocalPresentation(localPresentation);
           this.#pickupPlayerPosition ??= new THREE.Vector3();
           this.#pickupPlayerPosition.set(
             localPresentation.position.x,
@@ -746,7 +686,7 @@ export class WorldRenderer {
           const followed =
             localPresentation && idKey(localPresentation.id) === targetKey
               ? localPresentation
-              : renderedBodies.find((body) => idKey(body.id) === targetKey);
+              : snapshot.bodies.find((body) => idKey(body.id) === targetKey);
           if (followed) {
             this.#pickupPlayerPosition ??= new THREE.Vector3();
             this.#pickupPlayerPosition.set(
@@ -759,45 +699,6 @@ export class WorldRenderer {
           }
         } else if (localPresentation) {
           this.#follow(localPresentation, now);
-        }
-        if (this.#traceSink) {
-          const presented = new Map<string, TracePresentedBody>();
-          for (const body of authoritative)
-            presented.set(idKey(body.id), {
-              body: structuredClone(body),
-              source: "interpolated",
-              comparisonServerTick: presentationTargetTick,
-            });
-          for (const body of predictedBodies)
-            presented.set(idKey(body.id), {
-              body: structuredClone(body),
-              source: "predicted-proxy",
-              comparisonServerTick: estimatedServerTick,
-            });
-          if (predictedLocal)
-            presented.set(idKey(predictedLocal.id), {
-              body: structuredClone(predictedLocal),
-              source: "predicted-local",
-              comparisonServerTick: estimatedServerTick,
-            });
-          else if (localFallback)
-            presented.set(idKey(localFallback.id), {
-              body: structuredClone(localFallback),
-              source: "current-local-fallback",
-              comparisonServerTick: estimatedServerTick,
-            });
-          this.#traceSink({
-            clientAtMs: now,
-            latestSnapshotTick: latest,
-            estimatedServerTick,
-            interpolationDelayTicks: this.#history.interpolationDelayTicks,
-            presentationTargetTick,
-            extrapolatedBodyIds: [
-              ...authoritativeSample.extrapolatedBodyIds,
-              ...currentSample.extrapolatedBodyIds,
-            ],
-            bodies: [...presented.values()],
-          });
         }
       }
       this.#orientBillboards();
@@ -824,7 +725,6 @@ export class WorldRenderer {
     for (const texture of this.#textures.values()) texture.dispose();
     this.#outlineMaskMaterial.dispose();
     this.#availableOutlineMaterial.dispose();
-    this.#heldOutlineMaterial.dispose();
     this.#cameraCollisionMaterial.dispose();
     if (this.#pickupDebug) {
       this.#pickupDebug.geometry.dispose();
@@ -1246,15 +1146,15 @@ export class WorldRenderer {
   }
 
   #updateInteractionOutline(): void {
-    const target = this.#heldTarget ?? this.#interactionCandidate;
+    const target = this.#interactionCandidate;
     if (this.#outlinedTarget !== target) {
-      this.#setInteractionOutline(this.#outlinedTarget, false, false);
+      this.#setInteractionOutline(this.#outlinedTarget, false);
       this.#outlinedTarget = target;
     }
-    this.#setInteractionOutline(target, true, target === this.#heldTarget);
+    this.#setInteractionOutline(target, true);
   }
 
-  #setInteractionOutline(target: THREE.Object3D | null, visible: boolean, held: boolean): void {
+  #setInteractionOutline(target: THREE.Object3D | null, visible: boolean): void {
     target?.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
       if (object.userData.interactionOutlineMask) {
@@ -1263,7 +1163,7 @@ export class WorldRenderer {
       }
       if (!object.userData.interactionOutline) return;
       object.visible = visible;
-      object.material = held ? this.#heldOutlineMaterial : this.#availableOutlineMaterial;
+      object.material = this.#availableOutlineMaterial;
     });
   }
 

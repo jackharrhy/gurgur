@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 
-const [command, subcommand, ...args] = process.argv.slice(2);
+const [command, subcommand] = process.argv.slice(2);
 
 async function run(
   argv: string[],
@@ -46,54 +46,12 @@ async function content(action = "compile"): Promise<void> {
   throw new Error("content requires compile, setup, render-player, or setup-player-harness");
 }
 
-const browserScenarios = {
-  movement: {},
-  latency: { SMOKE_LATENCY_MS: "150" },
-  dynamic: { SMOKE_SCENARIO: "dynamic-landing" },
-  push: { SMOKE_SCENARIO: "dynamic-push", SMOKE_LATENCY_MS: "75" },
-  grab: { SMOKE_SCENARIO: "grab" },
-  touch: { SMOKE_SCENARIO: "touch" },
-  gamepad: { SMOKE_SCENARIO: "gamepad" },
-  reconnect: { SMOKE_SCENARIO: "stale-session" },
-  drift: { SMOKE_SCENARIO: "prediction-drift", SMOKE_DRIFT_DURATION_MS: "6500" },
-  lighting: { SMOKE_SCENARIO: "lighting" },
-  follow: { SMOKE_SCENARIO: "follow-camera" },
-  speech: { SMOKE_SCENARIO: "speech" },
-  unsupported: { SMOKE_SCENARIO: "webgpu-unsupported" },
-} as const;
-
-async function testBrowser(action = "movement"): Promise<void> {
-  if (action === "all") {
-    for (const scenario of Object.keys(browserScenarios)) await testBrowser(scenario);
-    return;
-  }
-  const environment = browserScenarios[action as keyof typeof browserScenarios];
-  if (!environment)
-    throw new Error(
-      "test:browser requires movement, latency, dynamic, push, grab, touch, gamepad, reconnect, drift, lighting, follow, speech, unsupported, or all",
-    );
-  await run(["bun", "scripts/smoke-browser.ts"], {
-    env: { ...environment, GURGUR_TEST_MODE: "1" },
-  });
+function testBrowser(): never {
+  throw new Error("browser networking smoke tests are stubbed during the netcode reset");
 }
 
-async function testNetwork(action = "single"): Promise<void> {
-  const quick = args.includes("--quick");
-  if (action === "single") {
-    if (quick)
-      await run(["bun", "tools/network-harness/src/run.ts"], {
-        env: { HARNESS_CLIENTS: "2", HARNESS_DURATION_MS: "700" },
-      });
-    else await run(["bun", "tools/network-harness/src/run.ts"]);
-    return;
-  }
-  if (action === "matrix") {
-    await run(["bun", "tools/network-harness/src/matrix.ts"], {
-      env: quick ? { HARNESS_QUICK: "1" } : {},
-    });
-    return;
-  }
-  throw new Error("test:network requires single or matrix [--quick]");
+function testNetwork(): never {
+  throw new Error("network harness is stubbed during the netcode reset");
 }
 
 async function soak(action: string | undefined): Promise<void> {
@@ -168,8 +126,8 @@ async function dev(): Promise<void> {
 }
 
 if (command === "content") await content(subcommand);
-else if (command === "test-browser") await testBrowser(subcommand);
-else if (command === "test-network") await testNetwork(subcommand);
+else if (command === "test-browser") testBrowser();
+else if (command === "test-network") testNetwork();
 else if (command === "soak") await soak(subcommand);
 else if (command === "dev") await dev();
 else throw new Error("unknown repository command");

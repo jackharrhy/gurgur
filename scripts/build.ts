@@ -63,19 +63,6 @@ if (!result.success) {
   process.exit(1);
 }
 
-const workerResult = await Bun.build({
-  entrypoints: ["apps/web/src/prediction-worker.ts"],
-  outdir: "dist",
-  root: ".",
-  target: "browser",
-  minify: true,
-  sourcemap: "linked",
-});
-if (!workerResult.success) {
-  for (const log of workerResult.logs) console.error(log);
-  process.exit(1);
-}
-
 const speechWorkerResult = await Bun.build({
   entrypoints: ["apps/web/src/speech-worker.ts"],
   outdir: "dist",
@@ -145,5 +132,5 @@ await Bun.write(
   Bun.file("third_party/lintalker/wintalker.wasm"),
 );
 console.log(
-  `built ${result.outputs.length + workerResult.outputs.length + speechWorkerResult.outputs.length} files, box3d.wasm, LinTalker, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
+  `built ${result.outputs.length + speechWorkerResult.outputs.length} files, box3d.wasm, LinTalker, ${materialTextureCount} authored textures, ${spriteCount} sprites, and ${audioCount} audio assets`,
 );

@@ -201,27 +201,7 @@ export function createPlayerInput(
   canvas.addEventListener("pointermove", pointerMove);
   canvas.addEventListener("pointerup", pointerUp);
   canvas.addEventListener("pointercancel", pointerUp);
-  const intervalMs = 1_000 / PHYSICS_HZ;
-  let nextFlushAtMs = performance.now() + intervalMs;
-  let timer = 0;
-  const schedule = (): void => {
-    timer = window.setTimeout(run, Math.max(0, Math.ceil(nextFlushAtMs - performance.now())));
-  };
-  const run = (): void => {
-    const now = performance.now();
-    if (now + 0.1 < nextFlushAtMs) {
-      schedule();
-      return;
-    }
-    flush();
-    nextFlushAtMs += intervalMs;
-    if (nextFlushAtMs <= now) {
-      const skipped = Math.floor((now - nextFlushAtMs) / intervalMs) + 1;
-      nextFlushAtMs += skipped * intervalMs;
-    }
-    schedule();
-  };
-  schedule();
+  const timer = window.setInterval(flush, 1_000 / PHYSICS_HZ);
 
   return {
     get yaw() {
@@ -251,7 +231,7 @@ export function createPlayerInput(
       if (nextYaw !== undefined) yaw = nextYaw;
     },
     dispose() {
-      clearTimeout(timer);
+      clearInterval(timer);
       removeEventListener("keydown", keyDown);
       removeEventListener("keyup", keyUp);
       removeEventListener("blur", clearKeys);

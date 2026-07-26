@@ -1,16 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { PLAYER_HALF_HEIGHT, compileWorld, type WorldBundle } from "@gurgur/game";
 import {
-  FAR_BODY_SNAPSHOT_STRIDE,
-  FULL_RATE_BODY_RADIUS_METRES,
   INPUT_INTENT_TIMEOUT_TICKS,
   PHYSICS_DT,
-  PHYSICS_HZ,
   PROTOCOL_VERSION,
-  SNAPSHOT_FLAG_SLEEP,
   SNAPSHOT_FLAG_GRABBED,
-  SNAPSHOT_FLAG_TELEPORT,
-  SNAPSHOT_INTERVAL_TICKS,
   type InputCommand,
   type RuntimeId,
   type Snapshot,
@@ -268,76 +262,11 @@ describe("authoritative network physics", () => {
         snapshot.bodies.filter((candidate) => same(candidate.id, player)),
       );
       expect(samples.length).toBeGreaterThan(30);
-      const firstTeleport = samples.findIndex(
-        ({ flags }) => ((flags ?? 0) & SNAPSHOT_FLAG_TELEPORT) !== 0,
-      );
-      expect(firstTeleport).toBeGreaterThanOrEqual(0);
-      expect(
-        samples
-          .slice(firstTeleport, firstTeleport + 5)
-          .every(({ flags }) => ((flags ?? 0) & SNAPSHOT_FLAG_TELEPORT) !== 0),
-      ).toBe(true);
       expect(
         samples.every(({ position }) =>
           [position.x, position.y, position.z].every(Number.isFinite),
         ),
       ).toBe(true);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
-  test("sends nearby awake props at 30 Hz and staggered remote props at 5 Hz", async () => {
-    const bundle = await fixture("network-domino-field");
-    const withoutPlayer = await cadence(bundle, false);
-    const withPlayer = await cadence(bundle, true);
-    const runtimeCount = bundle.entities.filter((entity) => entity.kind === "physics-prop").length;
-    expect(withoutPlayer).toHaveLength(FAR_BODY_SNAPSHOT_STRIDE);
-    expect(withoutPlayer.reduce((sum, snapshot) => sum + snapshot.bodies.length, 0)).toBe(
-      runtimeCount,
-    );
-    expect(withPlayer).toHaveLength(FAR_BODY_SNAPSHOT_STRIDE);
-    expect(withPlayer.every((snapshot) => snapshot.bodies.length === runtimeCount + 1)).toBe(true);
-    expect(FULL_RATE_BODY_RADIUS_METRES).toBeGreaterThan(0);
-  });
-
-  test("repeats terminal sleep state for loss recovery and then leaves dormant props silent", async () => {
-    const bundle = await fixture("network-stack-tower");
-    const emitted: Snapshot[] = [];
-    const store = new WorldStore(":memory:");
-    const game = await AuthoritativeGame.create(
-      store,
-      (snapshot) => emitted.push(snapshot),
-      () => {},
-      { worldBundle: bundle },
-    );
-    try {
-      for (let tick = 0; tick < 1_200; tick += 1) game.advance(PHYSICS_DT);
-      const connectionSnapshot = game.snapshot({ full: true });
-      for (const runtime of game.worldMessage().runtimeEntities) {
-        const appearances = emitted.flatMap((snapshot) =>
-          snapshot.bodies
-            .filter((candidate) => same(candidate.id, runtime.id))
-            .map((candidate) => ({ tick: snapshot.serverTick, flags: candidate.flags ?? 0 })),
-        );
-        const slept = appearances.find(
-          (appearance) => (appearance.flags & SNAPSHOT_FLAG_SLEEP) !== 0,
-        );
-        expect(slept).toBeDefined();
-        expect(
-          appearances.filter((appearance) => appearance.tick > slept!.tick).length,
-        ).toBeGreaterThan(2);
-        expect(
-          appearances.every(
-            (appearance) => appearance.tick <= slept!.tick + PHYSICS_HZ + SNAPSHOT_INTERVAL_TICKS,
-          ),
-        ).toBe(true);
-        expect(
-          connectionSnapshot.bodies.find((candidate) => same(candidate.id, runtime.id))!.flags! &
-            SNAPSHOT_FLAG_SLEEP,
-        ).toBe(SNAPSHOT_FLAG_SLEEP);
-      }
     } finally {
       game.stop();
       store.close();
@@ -382,26 +311,6 @@ describe("authoritative network physics", () => {
     }
   });
 });
-
-async function cadence(bundle: WorldBundle, connectPlayer: boolean): Promise<Snapshot[]> {
-  const emitted: Snapshot[] = [];
-  const store = new WorldStore(":memory:");
-  const game = await AuthoritativeGame.create(
-    store,
-    (snapshot) => emitted.push(snapshot),
-    () => {},
-    { worldBundle: bundle },
-  );
-  try {
-    if (connectPlayer) game.connectPlayer("cadence");
-    for (let tick = 0; tick < SNAPSHOT_INTERVAL_TICKS * FAR_BODY_SNAPSHOT_STRIDE; tick += 1)
-      game.advance(PHYSICS_DT);
-    return emitted;
-  } finally {
-    game.stop();
-    store.close();
-  }
-}
 
 function command(
   game: AuthoritativeGame,

@@ -4,7 +4,6 @@ Route work through the authoritative document for the subsystem:
 
 - Product behavior and scope: [`docs/product.md`](docs/product.md)
 - Runtime boundaries, identity, and persistence: [`docs/architecture.md`](docs/architecture.md)
-- Tick, protocol, prediction, and transport: [`docs/networking.md`](docs/networking.md)
 - Box3D integration, geometry, and controller: [`docs/physics.md`](docs/physics.md)
 - Valve 220 compiler and entity schema: [`docs/maps.md`](docs/maps.md)
 - Browser shell, Three.js, assets, and deployment: [`docs/web.md`](docs/web.md)

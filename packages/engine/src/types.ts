@@ -51,11 +51,6 @@ export type Snapshot = {
   players: PlayerStateSnapshot[];
 };
 
-export type StateAcknowledgement = {
-  latestServerTick: number;
-  receivedMask: number;
-};
-
 export type PhysicsDebugPrimitive =
   | { kind: "bounds"; lower: Vec3; upper: Vec3; color: number }
   | { kind: "segment"; from: Vec3; to: Vec3; color: number }
@@ -82,7 +77,7 @@ export type PlayerStateSnapshot = {
 
 export type WelcomeMessage = {
   type: "welcome";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   playerId: RuntimeId;
   mapRevision: string;
@@ -94,7 +89,7 @@ export type WelcomeMessage = {
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion: 3;
+  protocolVersion: 4;
   mapRevision: string | null;
   worldEpoch: number | null;
   sessionToken: string | null;
@@ -103,7 +98,7 @@ export type HelloMessage = {
 
 export type PingMessage = {
   type: "ping";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -111,7 +106,7 @@ export type PingMessage = {
 
 export type PongMessage = {
   type: "pong";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -120,7 +115,7 @@ export type PongMessage = {
 
 export type RtcOfferMessage = {
   type: "rtc-offer";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
   iceServers: Array<{ urls: string; username?: string; credential?: string }>;
@@ -128,7 +123,7 @@ export type RtcOfferMessage = {
 
 export type RtcAnswerMessage = {
   type: "rtc-answer";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   description: { type: "answer"; sdp: string };
 };
@@ -137,7 +132,7 @@ export type SpeechVoice = 0 | 1 | 2 | 3 | 4;
 
 export type SpeakMessage = {
   type: "speak";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   requestId: number;
   text: string;
@@ -145,7 +140,7 @@ export type SpeakMessage = {
 
 export type SpeechMessage = {
   type: "speech";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   requestId: number;
   speakerId: RuntimeId;
@@ -155,7 +150,7 @@ export type SpeechMessage = {
 
 export type SpeechRejectedMessage = {
   type: "speech-rejected";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   requestId: number;
   reason: "rate-limited" | "world-changed";
@@ -172,7 +167,7 @@ export type ServerControlMessage =
 
 export type InputCommand = {
   type: "input";
-  protocolVersion: 3;
+  protocolVersion: 4;
   worldEpoch: number;
   sequence: number;
   clientTick: number;

@@ -25,7 +25,7 @@ transport specification explicitly calls for localhost binding for local
 servers. A separate stdio sidecar was rejected because it could only observe a
 copied or newly invented state interface rather than the live Box3D owner.
 Driving a browser client through synthetic network packets was rejected because
-it would entangle diagnostic control with prediction and transport timing.
+it would entangle diagnostic control with gameplay transport timing.
 
 ## Evidence
 

@@ -2,20 +2,19 @@
 
 ## Engine and binding
 
-Gurgur uses Erin Catto's Box3D 0.1.0 through `box3d.js@0.0.2`. Both the Bun
-authority and browser prediction worker load the package's single-threaded
-separate-Wasm artifact. The inline artifact is retained for diagnostics only.
-Native Box3D, multithreaded Wasm, Box2D, Crashcat, Rapier, and Jolt are not
-runtime dependencies.
+Gurgur uses Erin Catto's Box3D 0.1.0 through `box3d.js@0.0.2`. The Bun authority
+loads the package's single-threaded separate-Wasm artifact. The inline artifact
+is retained for diagnostics only. Native Box3D, multithreaded Wasm, Box2D,
+Crashcat, Rapier, and Jolt are not runtime dependencies.
 
 The dependency is pinned as a pair:
 
 - `box3d.js` commit `72491a34adcf6fc1cf562199d51b3766d5210e9d`;
 - vendored Box3D commit `8441b4a06d6d09dcfb0b0f704df4d847d1437b92`.
 
-Host and prediction code import Gurgur's physics adapter from `packages/engine`.
-Raw Embind objects and Wasm views do not cross that boundary. Gameplay simulation
-instead receives the narrower `GameEngine` capability: body lookup/state,
+Host code imports Gurgur's physics adapter from `packages/engine`. Raw Embind
+objects and Wasm views do not cross that boundary. Gameplay simulation instead
+receives the narrower `GameEngine` capability: body lookup/state,
 kinematic targets, filtered raycasts, player proxies, bounded dynamic-body target
 drives, and save requests.
 It cannot step or dispose the world, construct arbitrary bodies, or extract
@@ -51,37 +50,9 @@ impulses, kinematic targets, controller input, and mechanism commands are applie
 before the step. Contacts, sensors, moved bodies, sleep transitions, and deferred
 destruction are processed afterward.
 
-The host loop executes at most four catch-up ticks per turn. Box3D movement events
-mark bodies dirty for replication. A terminal sleep state repeats for one second
-so datagram loss cannot strand a moving presentation, then the body is omitted
-until another movement or wake event. Persistence captures application state
-only at a completed tick boundary.
-
-Box3D's cross-platform determinism reduces prediction error but is not a lockstep
-contract. The server remains authoritative and clients always reconcile.
-
-The prediction worker keeps authored moving-body geometry available as kinematic
-collision proxies. It never promotes a prop to a client-owned dynamic body. An
-authoritative sample sets a proxy's transform and velocity; pending predicted
-server ticks advance the proxy from that state for at most 100 ms, then freeze
-its motion. Replay is indexed by server tick rather than input acknowledgement:
-each saved effective intent runs exactly once for its predicted tick. Replay is
-instantaneous and does not spend the separate freshness lifetime. An awake proxy
-leaves both collision and current-time contact presentation after 100 ms of
-actual client time without a received sample. A terminal-sleep sample stays as a
-stationary proxy. The four nearest fresh prop proxies may drive current-time
-contact presentation so the predicted player does not visibly overlap a prop
-buffered in the past. They cannot receive local impulses. Only the local
-geometric player controller is restored and replayed. This keeps moving support
-and collision queries available without assuming that two independent
-rigid-body worlds can replay stacks, contacts, other players, and constraints
-identically.
-
-The browser still loads Box3D because its controller and collision proxies use
-the production geometry and queries. This is not rigid-body lockstep. Prop
-presentation always originates in authoritative state: buffered tracks for
-ordinary rendering, or a bounded authoritative-velocity proxy for the immediate
-contact set.
+The host loop executes at most four catch-up ticks per turn. Persistence captures
+application state only at a completed tick boundary. The browser does not run
+Box3D or a second controller simulation.
 
 ## Coordinates and scale
 
@@ -116,8 +87,7 @@ The player uses Box3D's geometric capsule mover, not a dynamic rigid body.
 Player lifecycle, intent policy, interaction state, controller rules, collider
 dimensions, and tuning live in `packages/game`; the engine retains only generic
 capsule/query primitives. The standing capsule is 1.8 m tall with a 0.35 m
-radius. Server and client run the same controller code from fixed input
-commands.
+radius. The server runs the controller from fixed input commands.
 
 Each controller tick:
 
@@ -129,15 +99,14 @@ Each controller tick:
 6. clips velocity and applies bounded reaction impulses to contacted dynamic bodies.
 
 A fixed-tick controller result must be finite and move no more than one metre.
-The server and predictor both reject a larger Box3D depenetration result, retain
-the prior pose, consume the yaw/jump edge, and zero vertical velocity. This is a
-safety invariant for pathological overlapping contact piles, not ordinary speed
+The server rejects a larger Box3D depenetration result, retains the prior pose,
+consumes the yaw/jump edge, and zeroes vertical velocity. This is a safety
+invariant for pathological overlapping contact piles, not ordinary speed
 clamping.
 
 The authority respawns a player at `info_player_start` after it falls ten metres
 below the map's lowest static collision vertex. Respawn clears held movement and
-grabs, recreates the query proxy, and replicates as a teleport for one second so
-the discontinuity survives state loss. A disconnected player therefore cannot
+grabs and recreates the query proxy. A disconnected player therefore cannot
 accumulate unbounded free-fall state beneath the map.
 
 Ground is walkable through 50 degrees. The controller steps up at most 0.30 m and
@@ -148,7 +117,7 @@ before movement and retained through the tick.
 A kinematic proxy capsule follows the geometric mover after resolution. The proxy
 exists for sensors, raycasts, projectiles, and contact identity; it does not drive
 player movement. Teleport, respawn, crouch-size change, and epoch reset update the
-mover and proxy atomically and clear prediction/interpolation history.
+mover and proxy atomically.
 Sensor shapes remain visible to proxy overlap events but are excluded from
 geometric mover, capsule-fit, sweep, and ordinary controller-ray queries.
 

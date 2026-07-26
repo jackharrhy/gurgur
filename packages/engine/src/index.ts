@@ -2,7 +2,6 @@ export * from "./config";
 export * from "./control-codec";
 export * from "./map-format";
 export * from "./materials";
-export * from "./network-trace";
 export * from "./physics";
 export * from "./protocol";
 export type * from "./packets";

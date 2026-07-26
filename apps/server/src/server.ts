@@ -6,17 +6,12 @@ import {
   PHYSICS_HZ,
   PROTOCOL_VERSION,
   SNAPSHOT_HZ,
-  STATE_DATAGRAM_TARGET_BYTES,
+  STATE_BACKPRESSURE_BYTES,
   STATE_MAX_RETRANSMITS,
-  decodeInputPacket,
+  decodeInput,
   decodeClientControl,
-  decodeSnapshot,
   encodeLifecycle,
   encodeSnapshot,
-  GURGUR_TRACE_MAX_UPLOAD_BYTES,
-  gurgurTraceCapabilities,
-  validateGurgurTraceStartRequest,
-  validateGurgurTraceStopRequest,
   type InputCommand,
   type RuntimeId,
   type LifecycleMessage,
@@ -38,12 +33,8 @@ import {
 } from "./material-textures";
 import { WorldStore } from "./store";
 import { guardIceUdpSockets, prepareMdnsIceDescription } from "./rtc";
-import { NetworkTraceCapture, TraceConflictError, TraceNotFoundError } from "./network-trace";
-import { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 import { createDevMcpListener } from "./dev-mcp";
 import { SpeechRateLimiter, speechVoiceForSessionToken } from "./speech";
-
-export { ClientSnapshotScheduler, snapshotForPlayer } from "./snapshot-scheduler";
 
 type ClientData = {
   playerId: RuntimeId | null;
@@ -54,7 +45,6 @@ type ClientData = {
   stateChannel: RTCDataChannel | null;
   droppedStatePackets: number;
   rtcNegotiating: boolean;
-  snapshotScheduler: ClientSnapshotScheduler;
 };
 type SessionRecord = {
   playerId: RuntimeId;
@@ -62,7 +52,6 @@ type SessionRecord = {
   socketGeneration: number;
   disconnectTimer: Timer | null;
 };
-let sourcePredictionWorker: Promise<Blob> | null = null;
 let sourceSpeechWorker: Promise<Blob> | null = null;
 const LINTALKER_SCRIPT_SHA256 = "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c";
 const LINTALKER_WASM_SHA256 = "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b";
@@ -85,7 +74,7 @@ export type ServerMetrics = ReturnType<AuthoritativeGame["metrics"]> & {
   droppedStatePackets: number;
 };
 
-const MAX_STATE_BUFFERED_BYTES = STATE_DATAGRAM_TARGET_BYTES * 2;
+const MAX_STATE_BUFFERED_BYTES = STATE_BACKPRESSURE_BYTES;
 export async function createGurgurServer(
   options: {
     port?: number;
@@ -99,7 +88,6 @@ export async function createGurgurServer(
     rtcPortRange?: [number, number];
     rtcIceServers?: RTCIceServer[];
     worldBundle?: WorldBundle;
-    networkTraceEnabled?: boolean;
     devClientEnabled?: boolean;
     devMcpPort?: number;
   } = {},
@@ -135,12 +123,6 @@ export async function createGurgurServer(
     new URL("../../../node_modules/box3d.js/dist/box3d.wasm", import.meta.url),
   );
   const box3dWasm = (await adjacentWasm.exists()) ? adjacentWasm : sourceWasm;
-  const adjacentPredictionWorker = Bun.file(
-    new URL("../../web/src/prediction-worker.js", import.meta.url),
-  );
-  const predictionWorker = (await adjacentPredictionWorker.exists())
-    ? adjacentPredictionWorker
-    : await buildSourcePredictionWorker();
   const adjacentSpeechWorker = Bun.file(new URL("../../web/src/speech-worker.js", import.meta.url));
   const speechWorker = (await adjacentSpeechWorker.exists())
     ? adjacentSpeechWorker
@@ -175,10 +157,7 @@ export async function createGurgurServer(
   const clients = new Set<Bun.ServerWebSocket<ClientData>>();
   const sessions = new Map<string, SessionRecord>();
   const speechRateLimiter = new SpeechRateLimiter();
-  const networkTraceEnabled =
-    Bun.env.NODE_ENV !== "production" && options.networkTraceEnabled !== false;
   const devClientEnabled = Bun.env.NODE_ENV !== "production" && options.devClientEnabled !== false;
-  const networkTrace = new NetworkTraceCapture();
   let shuttingDown = false;
   const metrics = (): ServerMetrics => {
     const active = [...clients].filter((socket) => socket.data.playerId);
@@ -203,66 +182,18 @@ export async function createGurgurServer(
   };
 
   const broadcast = (snapshot: Snapshot): void => {
+    const packet = encodeSnapshot(snapshot);
     for (const socket of clients) {
-      const playerId = socket.data.playerId;
-      if (!playerId) continue;
+      if (!socket.data.playerId) continue;
       const channel = socket.data.stateChannel;
-      const tracingPlayer = sameId(networkTrace.activePlayerId, playerId);
-      if (channel?.readyState !== "open") {
-        if (tracingPlayer)
-          networkTrace.recordOutbound(playerId, {
-            serverTick: snapshot.serverTick,
-            status: "transport-unavailable",
-            bufferedAmount: channel?.bufferedAmount ?? 0,
-            packetBytes: null,
-            selected: null,
-            wire: null,
-          });
-        continue;
-      }
+      if (channel?.readyState !== "open") continue;
       if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
         socket.data.droppedStatePackets += 1;
-        if (tracingPlayer)
-          networkTrace.recordOutbound(playerId, {
-            serverTick: snapshot.serverTick,
-            status: "dropped-backpressure",
-            bufferedAmount: channel.bufferedAmount,
-            packetBytes: null,
-            selected: null,
-            wire: null,
-          });
         continue;
       }
-      const selected = snapshotForPlayer(
-        snapshot,
-        game.playerPosition(playerId),
-        playerId,
-        game.grabbedTarget(playerId),
-        socket.data.snapshotScheduler,
-      );
-      const packet = encodeSnapshot(selected);
       try {
         channel.send(Buffer.from(packet));
-        socket.data.snapshotScheduler.sent(selected);
-        if (tracingPlayer)
-          networkTrace.recordOutbound(playerId, {
-            serverTick: snapshot.serverTick,
-            status: "sent",
-            bufferedAmount: channel.bufferedAmount,
-            packetBytes: packet.byteLength,
-            selected,
-            wire: decodeSnapshot(packet),
-          });
       } catch {
-        if (tracingPlayer)
-          networkTrace.recordOutbound(playerId, {
-            serverTick: snapshot.serverTick,
-            status: "send-failed",
-            bufferedAmount: channel.bufferedAmount,
-            packetBytes: packet.byteLength,
-            selected,
-            wire: null,
-          });
         socket.close(1013, "state transport failed");
       }
     }
@@ -273,10 +204,8 @@ export async function createGurgurServer(
     except?: Bun.ServerWebSocket<ClientData>,
   ): void => {
     const packet = encodeLifecycle(message);
-    for (const socket of clients) {
-      for (const id of message.removed) socket.data.snapshotScheduler.remove(id);
+    for (const socket of clients)
       if (socket !== except && socket.data.playerId) socket.send(packet);
-    }
   };
 
   const broadcastWorld = (world: WorldMessage): void => {
@@ -308,7 +237,7 @@ export async function createGurgurServer(
       },
     });
   };
-  const traceUnavailable = (): Response => new Response("not found", { status: 404 });
+  const devUnavailable = (): Response => new Response("not found", { status: 404 });
   const devClientCapabilityResponse = (): Response =>
     devClientEnabled
       ? Response.json(
@@ -317,87 +246,19 @@ export async function createGurgurServer(
             headers: { "cache-control": "no-store" },
           },
         )
-      : traceUnavailable();
-  const traceCapabilityResponse = (): Response =>
-    networkTraceEnabled
-      ? Response.json(gurgurTraceCapabilities(), {
-          headers: { "cache-control": "no-store" },
-        })
-      : traceUnavailable();
-  const traceStartResponse = async (request: Request): Promise<Response> => {
-    if (!networkTraceEnabled) return traceUnavailable();
-    if (!sameOrigin(request)) return new Response("origin forbidden", { status: 403 });
-    try {
-      const start = validateGurgurTraceStartRequest(await boundedRequestJson(request));
-      if (start.worldEpoch !== game.worldEpoch || start.mapRevision !== game.mapRevision)
-        return new Response("trace world does not match server", { status: 409 });
-      const connected = [...clients].some(
-        (socket) => socket.data.playerId && sameId(socket.data.playerId, start.playerId),
-      );
-      if (!connected) return new Response("trace player is not connected", { status: 409 });
-      const response = networkTrace.start(
-        start,
-        game.serverTick,
-        process.env.BUILD_REVISION ?? "working-tree",
-      );
-      game.setTraceSink((frame) => {
-        if (!networkTrace.recordFrame(frame)) game.setTraceSink(null);
-      });
-      return Response.json(response, { headers: { "cache-control": "no-store" } });
-    } catch (error) {
-      if (error instanceof TraceConflictError) return new Response(error.message, { status: 409 });
-      return traceRequestError(error);
-    }
-  };
-  const traceStopResponse = async (request: Request): Promise<Response> => {
-    if (!networkTraceEnabled) return traceUnavailable();
-    if (!sameOrigin(request)) return new Response("origin forbidden", { status: 403 });
-    try {
-      const stop = validateGurgurTraceStopRequest(await boundedRequestJson(request));
-      const trace = networkTrace.stop(stop.captureId, stop.client);
-      game.setTraceSink(null);
-      return new Response(JSON.stringify(trace), {
-        headers: {
-          "cache-control": "no-store",
-          "content-disposition": `attachment; filename="${trace.capture.id}.gurgur-trace.json"`,
-          "content-type": "application/json",
-        },
-      });
-    } catch (error) {
-      if (error instanceof TraceNotFoundError)
-        return new Response("network trace not found", { status: 404 });
-      return traceRequestError(error);
-    }
-  };
+      : devUnavailable();
   const acceptInputPacket = (
     socket: Bun.ServerWebSocket<ClientData>,
     packet: ArrayBuffer | ArrayBufferView,
-    transport: "websocket" | "webrtc",
   ): boolean => {
-    let commands: InputCommand[];
+    let command: InputCommand;
     try {
-      const decoded = decodeInputPacket(packet);
-      commands = decoded.commands;
-      if (decoded.acknowledgement)
-        socket.data.snapshotScheduler.acknowledge(decoded.acknowledgement);
+      command = decodeInput(packet);
     } catch {
       return false;
     }
     if (!socket.data.playerId) return false;
-    for (const command of commands) {
-      const valid = validInputCommand(command);
-      const accepted = valid && game.acceptInput(socket.data.playerId, command);
-      if (valid)
-        networkTrace.recordInput(
-          socket.data.playerId,
-          game.serverTick,
-          transport,
-          command,
-          accepted,
-        );
-      if (!accepted) return false;
-    }
-    return true;
+    return validInputCommand(command) && game.acceptInput(socket.data.playerId, command);
   };
   const closeRtc = (socket: Bun.ServerWebSocket<ClientData>): void => {
     socket.data.inputChannel?.close();
@@ -425,7 +286,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v3", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v4", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -434,15 +295,7 @@ export async function createGurgurServer(
       if (state !== "open" || socket.data.stateChannel !== stateChannel) return;
       const playerId = socket.data.playerId;
       if (!playerId) return;
-      const selected = snapshotForPlayer(
-        game.snapshot({ full: true }),
-        game.playerPosition(playerId),
-        playerId,
-        game.grabbedTarget(playerId),
-        socket.data.snapshotScheduler,
-      );
-      stateChannel.send(Buffer.from(encodeSnapshot(selected)));
-      socket.data.snapshotScheduler.sent(selected);
+      stateChannel.send(Buffer.from(encodeSnapshot(game.snapshot())));
     });
     peer.connectionStateChange.subscribe((state) => {
       if (socket.data.peerConnection === peer && state === "failed")
@@ -453,10 +306,10 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-input-v3" && !socket.data.inputChannel) {
+      if (channel.label === "gurgur-input-v4" && !socket.data.inputChannel) {
         socket.data.inputChannel = channel;
         channel.onMessage.subscribe((packet) => {
-          if (typeof packet === "string" || !acceptInputPacket(socket, packet, "webrtc"))
+          if (typeof packet === "string" || !acceptInputPacket(socket, packet))
             socket.close(1007, "invalid input datagram");
         });
         return;
@@ -516,14 +369,8 @@ export async function createGurgurServer(
       "/metrics": { GET: () => Response.json(metrics()) },
       "/debug/physics": { GET: physicsDebugResponse },
       "/debug/client-capabilities": { GET: devClientCapabilityResponse },
-      "/debug/network-trace": { GET: traceCapabilityResponse },
-      "/debug/network-trace/start": { POST: traceStartResponse },
-      "/debug/network-trace/stop": { POST: traceStopResponse },
       "/box3d.wasm": new Response(box3dWasm, {
         headers: { "content-type": "application/wasm" },
-      }),
-      "/prediction-worker.js": new Response(predictionWorker, {
-        headers: { "content-type": "text/javascript" },
       }),
       "/speech-worker.js": new Response(speechWorker, {
         headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
@@ -694,7 +541,6 @@ export async function createGurgurServer(
               stateChannel: null,
               droppedStatePackets: 0,
               rtcNegotiating: false,
-              snapshotScheduler: new ClientSnapshotScheduler(),
             },
           })
         )
@@ -787,7 +633,6 @@ export async function createGurgurServer(
             };
             socket.send(JSON.stringify(welcome));
             socket.send(JSON.stringify(toManifest(game.worldMessage())));
-            socket.send(encodeSnapshot(game.snapshot()));
             void startRtcOffer(socket);
             if (createdPlayer) {
               const created = game
@@ -880,9 +725,7 @@ export async function createGurgurServer(
           socket.close(1007, "invalid control packet");
           return;
         }
-        if (!acceptInputPacket(socket, message, "websocket")) {
-          socket.close(1007, "invalid input packet");
-        }
+        socket.close(1003, "binary WebSocket gameplay packets are unsupported");
       },
       close(socket) {
         clients.delete(socket);
@@ -954,8 +797,6 @@ export async function createGurgurServer(
         closeRtc(socket);
         socket.close(1001, "server stopping");
       }
-      game.setTraceSink(null);
-      networkTrace.cancel();
       devMcp?.stop();
       game.stop();
       store.close();
@@ -973,19 +814,6 @@ function toManifest(world: WorldMessage): WorldManifestMessage {
     bundleUrl: `/world.bin?revision=${encodeURIComponent(world.bundle.mapRevision)}`,
     runtimeEntities: world.runtimeEntities,
   };
-}
-
-function buildSourcePredictionWorker(): Promise<Blob> {
-  sourcePredictionWorker ??= Bun.build({
-    entrypoints: [new URL("../../web/src/prediction-worker.ts", import.meta.url).pathname],
-    target: "browser",
-    minify: true,
-  }).then((result) => {
-    if (!result.success || !result.outputs[0])
-      throw new Error("failed to build browser prediction worker");
-    return result.outputs[0];
-  });
-  return sourcePredictionWorker;
 }
 
 function buildSourceSpeechWorker(): Promise<Blob> {
@@ -1029,39 +857,6 @@ function validInputCommand(input: InputCommand): boolean {
   )
     return false;
   return true;
-}
-
-class TraceRequestTooLargeError extends Error {}
-
-async function boundedRequestJson(request: Request): Promise<unknown> {
-  const declared = Number(request.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declared) && declared > GURGUR_TRACE_MAX_UPLOAD_BYTES)
-    throw new TraceRequestTooLargeError();
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > GURGUR_TRACE_MAX_UPLOAD_BYTES) throw new TraceRequestTooLargeError();
-  return JSON.parse(new TextDecoder().decode(bytes));
-}
-
-function traceRequestError(error: unknown): Response {
-  if (error instanceof TraceRequestTooLargeError)
-    return new Response("network trace upload is too large", { status: 413 });
-  return new Response(error instanceof Error ? error.message : "invalid network trace request", {
-    status: 400,
-  });
-}
-
-function sameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  return origin === null || origin === new URL(request.url).origin;
-}
-
-function sameId(left: RuntimeId | null, right: RuntimeId | null): boolean {
-  return (
-    left !== null &&
-    right !== null &&
-    left.index === right.index &&
-    left.generation === right.generation
-  );
 }
 
 function persistentIdForToken(token: string): string {

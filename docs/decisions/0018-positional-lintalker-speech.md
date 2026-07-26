@@ -36,5 +36,5 @@ Production evidence:
 - [`../../apps/web/src/speech-worker.ts`](../../apps/web/src/speech-worker.ts)
 - [`../../apps/web/src/speech-synthesis.ts`](../../apps/web/src/speech-synthesis.ts)
 - [`../../apps/web/src/renderer.ts`](../../apps/web/src/renderer.ts)
-- [`../../apps/server/test/server.integration.test.ts`](../../apps/server/test/server.integration.test.ts)
-- [`../../scripts/smoke-browser.ts`](../../scripts/smoke-browser.ts)
+- [`../../apps/server/test/speech.test.ts`](../../apps/server/test/speech.test.ts)
+- [`../../apps/web/test/speech-synthesis.test.ts`](../../apps/web/test/speech-synthesis.test.ts)

@@ -1,12 +1,8 @@
-import { createSnapshotTimeline } from "./interpolation";
 import { WorldRenderer } from "./renderer";
 import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
-import { createPredictionClient } from "./prediction-client";
-import { nextPredictionTargetTick } from "./prediction-clock";
 import { WorldAudio } from "./audio";
-import { installNetworkTraceControls, type ClientNetworkTraceRecorder } from "./network-trace";
-import type { PhysicsDebugFrame, RuntimeId } from "@gurgur/engine";
+import type { PhysicsDebugFrame } from "@gurgur/engine";
 import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
 import { installSpeechChat, type SpeechChat } from "./speech-chat";
 import { SpeechSynthesizer } from "./speech-synthesis";
@@ -23,31 +19,14 @@ if (searchParams.has("follow")) {
   document.body.dataset.followCamera = requestedFollowCamera ? "checking" : "invalid";
   if (requestedFollowCamera) {
     try {
-      const responses = await Promise.all([
-        fetch("/debug/client-capabilities", { cache: "no-store" }),
-        fetch("/debug/network-trace", { cache: "no-store" }),
-      ]);
-      const [clientCapabilities, traceCapabilities] = await Promise.all(
-        responses.map(async (response) => {
-          if (!response.ok) return null;
-          try {
-            return (await response.json()) as unknown;
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const response = await fetch("/debug/client-capabilities", { cache: "no-store" });
+      const clientCapabilities = response.ok ? ((await response.json()) as unknown) : null;
       const clientFollowEnabled =
         clientCapabilities !== null &&
         typeof clientCapabilities === "object" &&
         !Array.isArray(clientCapabilities) &&
         (clientCapabilities as { followCamera?: unknown }).followCamera === true;
-      const legacyDevEnabled =
-        traceCapabilities !== null &&
-        typeof traceCapabilities === "object" &&
-        !Array.isArray(traceCapabilities) &&
-        (traceCapabilities as { enabled?: unknown }).enabled === true;
-      if (clientFollowEnabled || legacyDevEnabled) {
+      if (clientFollowEnabled) {
         followCamera = requestedFollowCamera;
         document.body.dataset.followCamera = "waiting";
         document.body.dataset.followTarget = `${followCamera.target.index}:${followCamera.target.generation}`;
@@ -146,20 +125,12 @@ const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
   document.body.dataset.audioAsset = state.asset ?? "";
 });
 
-const history = createSnapshotTimeline();
-let traceRecorder: ClientNetworkTraceRecorder | null = null;
-let traceSession: { playerId: RuntimeId; worldEpoch: number; mapRevision: string } | null = null;
-let latestOneWayDelayMs = 0;
 const diagnosticBodies = new Map<
   string,
   {
     entityIndex: number;
     localTop: number;
     authoritative?: {
-      position: { x: number; y: number; z: number };
-      rotation: { x: number; y: number; z: number; w: number };
-    };
-    predicted?: {
       position: { x: number; y: number; z: number };
       rotation: { x: number; y: number; z: number; w: number };
     };
@@ -186,7 +157,6 @@ if (testEnabled) {
 }
 const renderer = new WorldRenderer(
   canvas,
-  history,
   (body) => {
     document.body.dataset.renderedX = String(body.position.x);
     document.body.dataset.renderedY = String(body.position.y);
@@ -225,61 +195,26 @@ if (followCamera) {
     document.body.dataset.playerViewReady = "true";
   });
 }
-const predictor = createPredictionClient(
-  (body, bodies, correctionMagnitude, diagnostics) => {
-    renderer.setPredictedPlayer(body, diagnostics.predictionTick);
-    if (!body && !followCamera) document.body.dataset.playerViewReady = "false";
-    if (body) worldAudio.update(body.position);
-    renderer.setPredictedBodies(bodies, diagnostics.predictionTick);
-    if (testEnabled)
-      for (const predicted of bodies) {
-        const diagnostic = diagnosticBodies.get(`${predicted.id.index}:${predicted.id.generation}`);
-        if (diagnostic)
-          diagnostic.predicted = {
-            position: { ...predicted.position },
-            rotation: { ...predicted.rotation },
-          };
-      }
-    document.body.dataset.predictedBodyCount = String(bodies.length);
-    document.body.dataset.predictionTick = String(diagnostics.predictionTick ?? "");
-    document.body.dataset.pendingPredictionTicks = String(diagnostics.pendingTickCount);
-    document.body.dataset.predictionReady = body ? "true" : "false";
-    if (body) {
-      document.body.dataset.predictedX = String(body.position.x);
-      document.body.dataset.predictedY = String(body.position.y);
-      document.body.dataset.predictedZ = String(body.position.z);
-    }
-    document.body.dataset.predictionCorrection = String(correctionMagnitude);
-  },
-  (event) => traceRecorder?.recordPrediction(event),
-);
 let localPlayerKey: string | null = null;
 let session: GameSession;
 let speechChat: SpeechChat | null = null;
-let predictionWorldEpoch: number | null = null;
-let snapshotEpochAfterTransport: number | null = null;
+let loadedWorldEpoch: number | null = null;
 let stateTransportReady = false;
 const enableInputIfReady = (): void => {
-  if (
-    stateTransportReady &&
-    predictionWorldEpoch !== null &&
-    snapshotEpochAfterTransport === predictionWorldEpoch
-  ) {
-    input.setWorld(predictionWorldEpoch);
+  if (stateTransportReady && loadedWorldEpoch !== null) {
+    input.setWorld(loadedWorldEpoch);
     document.body.dataset.inputReady = "true";
   }
 };
 const input = createPlayerInput(
   canvas,
   (command) => {
-    traceRecorder?.recordInput(command);
     document.body.dataset.inputMoveX = String(command.moveX);
     document.body.dataset.inputMoveZ = String(command.moveZ);
     document.body.dataset.inputJumpCounter = String(command.jumpCounter);
     document.body.dataset.inputButtons = String(command.buttons);
     document.body.dataset.inputSequence = String(command.sequence);
     session.sendInput(command);
-    predictor.pushInput(command, nextPredictionTargetTick(history.serverTickAt(performance.now())));
   },
   (yaw, pitch) => {
     if (!followCamera) renderer.setViewAngles(yaw, pitch);
@@ -294,7 +229,6 @@ const input = createPlayerInput(
 session = new GameSession(
   {
     status(status, close) {
-      traceRecorder?.recordMarker({ kind: "connection", value: status });
       document.body.dataset.connection = status;
       document.body.dataset.ready = status === "connected" ? "true" : "false";
       speechChat?.setEnabled(status === "connected");
@@ -305,46 +239,19 @@ session = new GameSession(
         delete document.body.dataset.closeCode;
         delete document.body.dataset.closeReason;
       }
-      if (status === "disconnected") {
-        traceSession = null;
-        traceRecorder?.setSession(null);
-      }
     },
     welcome(message) {
       localPlayerKey = `${message.playerId.index}:${message.playerId.generation}`;
-      traceSession = {
-        playerId: { ...message.playerId },
-        worldEpoch: message.worldEpoch,
-        mapRevision: message.mapRevision,
-      };
-      traceRecorder?.setSession(traceSession);
       renderer.setLocalPlayer(message.playerId);
-      predictor.setLocalPlayer(message.playerId);
     },
     world(message) {
-      if (traceSession) {
-        traceSession = {
-          ...traceSession,
-          worldEpoch: message.worldEpoch,
-          mapRevision: message.bundle.mapRevision,
-        };
-        traceRecorder?.setSession(traceSession);
-      }
-      traceRecorder?.recordMarker({
-        kind: "world",
-        value: `${message.bundle.mapRevision}@${message.worldEpoch}`,
-      });
       document.body.dataset.playerViewReady = "false";
       speechSynthesizer.reset();
       renderer.setWorld(message);
       worldAudio.setWorld(message.bundle);
       document.body.dataset.inputReady = "false";
-      predictionWorldEpoch = null;
-      snapshotEpochAfterTransport = null;
-      void predictor.setWorld(message).then(() => {
-        predictionWorldEpoch = message.worldEpoch;
-        enableInputIfReady();
-      });
+      loadedWorldEpoch = message.worldEpoch;
+      enableInputIfReady();
       diagnosticBodies.clear();
       if (testEnabled)
         for (const runtime of message.runtimeEntities) {
@@ -362,32 +269,10 @@ session = new GameSession(
       document.body.dataset.worldReady = "true";
     },
     lifecycle(message) {
-      traceRecorder?.recordLifecycle(message);
       renderer.applyLifecycle(message);
     },
-    snapshotReceived(message, receivedAtMs) {
-      traceRecorder?.recordClock({
-        clientAtMs: receivedAtMs,
-        source: "snapshot",
-        serverTick: message.serverTick,
-        oneWayDelayMs: latestOneWayDelayMs,
-      });
-      traceRecorder?.recordSnapshotReceived(
-        message,
-        history.serverTickAt(receivedAtMs),
-        receivedAtMs,
-      );
-    },
-    snapshot(message, latestInFrame, receivedAtMs) {
-      renderer.applyAuthoritativeInteractionState(message.bodies);
-      history.push(message, receivedAtMs, latestOneWayDelayMs);
-      traceRecorder?.recordSnapshotProcessed(message, latestInFrame, performance.now());
-      predictor.reconcile(message, latestInFrame, receivedAtMs);
-      if (!latestInFrame) return;
-      if (stateTransportReady) {
-        snapshotEpochAfterTransport = message.worldEpoch;
-        enableInputIfReady();
-      }
+    snapshot(message) {
+      renderer.applySnapshot(message);
       document.body.dataset.worldEpoch = String(message.worldEpoch);
       document.body.dataset.serverTick = String(message.serverTick);
       const player = message.bodies.find(
@@ -398,6 +283,7 @@ session = new GameSession(
         document.body.dataset.playerX = String(player.position.x);
         document.body.dataset.playerY = String(player.position.y);
         document.body.dataset.playerZ = String(player.position.z);
+        worldAudio.update(player.position);
       }
       if (testEnabled)
         for (const body of message.bodies) {
@@ -409,27 +295,15 @@ session = new GameSession(
             };
         }
     },
-    clock(serverTick, receivedAtMs, oneWayDelayMs) {
-      latestOneWayDelayMs = oneWayDelayMs;
-      history.observeServerTick(serverTick, receivedAtMs, oneWayDelayMs);
-      traceRecorder?.recordClock({
-        clientAtMs: receivedAtMs,
-        source: "pong",
-        serverTick,
-        oneWayDelayMs,
-      });
-    },
     network(rttMs, jitterMs) {
-      traceRecorder?.recordNetwork({ rttMs, jitterMs });
       document.body.dataset.rttMs = rttMs.toFixed(1);
       document.body.dataset.jitterMs = jitterMs.toFixed(1);
     },
     transport(state) {
-      traceRecorder?.recordMarker({ kind: "transport", value: state });
       document.body.dataset.transport = state;
       stateTransportReady = state === "webrtc";
-      snapshotEpochAfterTransport = null;
-      if (!stateTransportReady) document.body.dataset.inputReady = "false";
+      if (stateTransportReady) enableInputIfReady();
+      else document.body.dataset.inputReady = "false";
     },
     speech(message) {
       document.body.dataset.lastSpeechText = message.text;
@@ -490,16 +364,6 @@ if (debugEnabled) {
   debugPoll = window.setInterval(() => void pollPhysics(), 100);
 }
 
-if (debugEnabled) {
-  traceRecorder = await installNetworkTraceControls({
-    onTraceEnabled(enabled) {
-      renderer.setTraceSink(enabled ? (frame) => traceRecorder?.recordPresentation(frame) : null);
-      return predictor.setTraceEnabled(enabled);
-    },
-  });
-  if (traceRecorder && traceSession) traceRecorder.setSession(traceSession);
-}
-
 renderer.start();
 session.connect();
 const unlockAudio = (): void => {
@@ -515,7 +379,6 @@ addEventListener("pagehide", () => {
   speechChat?.dispose();
   speechSynthesizer.dispose();
   input.dispose();
-  predictor.dispose();
   removeEventListener("pointerdown", unlockAudio, { capture: true });
   removeEventListener("keydown", unlockAudio, { capture: true });
   worldAudio.dispose();

@@ -26,26 +26,19 @@ apps/web/
   client.ts             gameplay client composition after WebGPU succeeds
   style.css
   session.ts            WebSocket control, WebRTC signaling, datagram dispatch
-  prediction-worker.ts  Box3D worker entrypoint
-  prediction-client.ts  worker ownership and message bridge
-  prediction-clock.ts   server-phase target selection
-  prediction.ts         replay and reconciliation implementation
-  presentation.ts       tick-labelled predicted-pose sampling
   renderer.ts           Three.js scene, camera, objects, render loop
-  interpolation.ts      remote snapshot histories and visual sampling
   input.ts              keyboard, pointer lock, gamepad, touch intent
   speech-chat.ts        transient T-to-talk form and input capture
   speech-synthesis.ts   bounded synthesis queue and worker bridge
   speech-worker.ts      synchronous LinTalker JS/Wasm execution
-  network-trace.ts      bounded development recorder and download control
 ```
 
 `main.ts` requests a WebGPU adapter before importing the gameplay client. When
 that capability is absent, it replaces the canvas with an accessible unsupported
 message and does not request world content, assets, or a network session.
-`client.ts` composes the modules but owns no simulation state. The prediction
-worker owns predicted physics. `session.ts` owns network state. `renderer.ts`
-owns Three.js objects and `requestAnimationFrame`. The shipped play page contains
+`client.ts` composes the modules but owns no simulation state. `session.ts` owns
+network state. `renderer.ts` owns Three.js objects and `requestAnimationFrame`.
+The shipped play page contains
 only the world canvas during ordinary play: no HUD, reticle, visible cursor,
 caption, or persistent control overlay. The transient `T` speech field is hidden
 outside text entry and leaves no caption or history. `?test` enables a generic
@@ -54,8 +47,8 @@ automation; ordinary play does not expose entity-specific instrumentation.
 On non-production servers,
 `?follow=<runtime-index>:<generation>&yaw=<radians>&pitch=<radians>` binds only
 the presentation camera and pickup preview to a replicated runtime body. The
-local network player, prediction worker, and authoritative input ownership do
-not change. The browser accepts the follow request only after the server's
+local network player and authoritative input ownership do not change. The browser
+accepts the follow request only after the server's
 development capability route confirms it, reports acquisition through generic
 body data attributes, and otherwise falls back to the ordinary local view.
 
@@ -63,23 +56,19 @@ body data attributes, and otherwise falls back to the ordinary local view.
 
 There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
-objects are keyed by generation-bearing network identity. Each frame samples
-interpolated visual transforms from client state and applies them directly to
-Three.js objects. Buffered remote state samples an adaptive delayed tick.
-Predicted local-player and contact-proxy state instead samples between completed
-prediction ticks at the current fractional server-clock phase.
+objects are keyed by generation-bearing runtime identity. Each frame applies the
+newest received authoritative state directly to Three.js objects.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
-pauses presentation and input transmission without advancing local physics by
-elapsed wall time. Leaving the page closes the WebSocket, RTCPeerConnection,
-data channels, prediction and speech workers, active speech sources, geometries,
+pauses presentation and input transmission. Leaving the page closes the
+WebSocket, RTCPeerConnection, data channels, speech worker, active speech sources, geometries,
 materials, and renderer resources.
 The canvas remains hidden against a black page until the renderer has followed a
-finite predicted local-player pose in the current frame. Loading a new world
+finite authoritative local-player pose in the current frame. Loading a new world
 closes that gate again, preventing a default-camera world frame from flashing
 before the player view is known.
-The third-person camera is a collision-tested boom anchored at the predicted
-player pose's head offset. A nine-ray, 0.18-metre-radius probe travels opposite
+The third-person camera is a collision-tested boom anchored at the latest
+authoritative player pose's head offset. A nine-ray, 0.18-metre-radius probe travels opposite
 the player-controlled view toward the preferred 4.2-metre distance using a
 dedicated double-sided collision mesh. Static collision includes invisible
 `GURGUR/SKIP` faces; kinematic doors and platforms contribute their complete
@@ -159,9 +148,9 @@ Ambient lights set the medium density; directional and ambient lights affect
 surfaces but do not contribute volumetric scattering. Glow sprites remain a
 deliberate unlit presentation exception.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
-low-resolution scene pass: mint means locally available, while amber is driven by
-the server-authoritative local-grab flag. This avoids a separate full-scene
-outline compositor.
+low-resolution scene pass. Mint means locally available. The reset baseline
+replicates only global grab ownership, so holder-specific amber feedback is
+currently absent.
 Exact, colorless silhouettes first accumulate stencil coverage without testing
 or changing world depth. The expanded hull then ignores world depth but draws
 only where coverage remains zero, and player billboards render afterward against
@@ -174,11 +163,6 @@ interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls the current authoritative Box3D debug frame at 10 Hz and draws
 broad-phase bounds, joints, and contact points above the scene. The overlay is
 diagnostic only and does not replace authoritative server interaction validation.
-On non-production servers the same debug view includes a Record/Stop network
-trace control. It appears only after the server capability route confirms
-capture support, stops automatically after 15 seconds, joins client streams with
-the server recording, and downloads one `.gurgur-trace.json`. Production trace
-routes return 404, so adding `?debug` to a deployed URL cannot enable recording.
 Sprite presentation consumes only `PresentationSpec` and the hashed logical
 sprite manifest; it never compares mapper classnames. The player billboard source
 is a committed Blender scene sized to the authoritative
@@ -202,7 +186,7 @@ interaction rays, map geometry, and network transforms remain full precision.
 
 Per-listener area music consumes typed `play`/`stop` outputs from compiled
 `trigger` entities targeting `ambient-audio` entity indices, without mapper
-classname checks. The client tests its predicted player center against each
+classname checks. The client tests its latest authoritative player center against each
 authored convex trigger brush, retains overlapping claims, and selects competing
 music by priority and bundle order.
 Playback uses Web Audio after the first player gesture, with authored crossfades
@@ -263,9 +247,8 @@ The server exposes a deliberately small surface:
 | `/metrics`                                  | simulation and send-queue metrics      |
 | `/debug/physics`                            | bounded current Box3D debug frame      |
 | `/debug/client-capabilities`                | development client presentation gates  |
-| `/debug/network-trace`, `/start`, `/stop`   | development-only bounded trace capture |
 | `/world.bin`                                | immutable compiled map bundle          |
-| `/box3d.wasm` and `/prediction-worker.js`   | prediction runtime assets              |
+| `/box3d.wasm`                               | Box3D diagnostic/runtime artifact      |
 | `/player-billboard.png`                     | generated directional player atlas     |
 | `/assets.json`, `/textures/*`, `/sprites/*` | hashed authored material/sprite assets |
 | `/admin/reset`                              | authenticated world reset request      |

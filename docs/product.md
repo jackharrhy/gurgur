@@ -13,8 +13,7 @@ authenticated administrator can reset the entire world to its authored state.
 
 - One continuously running world, not matches, rooms, or server zones.
 - The server owns players, bodies, constraints, mechanisms, persistence, and reset.
-- The client owns input sampling, local-player prediction, and rendering of
-  authoritative shared state.
+- The client owns input sampling and rendering of authoritative shared state.
 - TrenchBroom Valve 220 maps are the primary level-authoring format.
 - Authored defaults and persisted runtime state remain distinct.
 - A reset is global, explicit, authenticated, and visible to every client.

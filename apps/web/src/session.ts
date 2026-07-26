@@ -1,19 +1,15 @@
 import {
-  INPUT_REDUNDANCY,
   PROTOCOL_VERSION,
-  SNAPSHOT_HISTORY_PACKETS,
-  acknowledgeState,
   decodeSnapshot,
   decodeLifecycle,
   decodeServerControl,
   LIFECYCLE_TAG,
-  encodeInputBundle,
+  encodeInput,
   type InputCommand,
   type HelloMessage,
   type LifecycleMessage,
   type RtcOfferMessage,
   type Snapshot,
-  type StateAcknowledgement,
   type SpeechMessage,
   type SpeechRejectedMessage,
   type WelcomeMessage,
@@ -29,8 +25,7 @@ export type SessionCallbacks = {
   welcome(message: WelcomeMessage): void;
   world(message: WorldMessage): void;
   lifecycle(message: LifecycleMessage): void;
-  snapshotReceived?(snapshot: Snapshot, receivedAtMs: number): void;
-  snapshot(snapshot: Snapshot, latestInFrame: boolean, receivedAtMs: number): void;
+  snapshot(snapshot: Snapshot): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
   transport?(state: "negotiating" | "webrtc" | "disconnected"): void;
@@ -56,15 +51,12 @@ export class GameSession {
   #socketGeneration = readSocketGeneration();
   #worldLoadGeneration = 0;
   #loadedWorldEpoch: number | null = null;
-  #snapshotQueue: Snapshot[] = [];
-  readonly #snapshotReceivedAt = new Map<string, number>();
-  #stateAcknowledgement: StateAcknowledgement | null = null;
+  #pendingSnapshot: Snapshot | null = null;
   #pendingLifecycles: LifecycleMessage[] = [];
   #snapshotFrame: number | null = null;
   #peerConnection: RTCPeerConnection | null = null;
   #inputChannel: RTCDataChannel | null = null;
   #stateChannel: RTCDataChannel | null = null;
-  #inputHistory: InputCommand[] = [];
 
   constructor(callbacks: SessionCallbacks, options: { simulatedLatencyMs?: number } = {}) {
     this.#callbacks = callbacks;
@@ -145,13 +137,10 @@ export class GameSession {
         )
           return;
         this.#worldEpoch = message.worldEpoch;
-        this.#inputHistory = [];
-        this.#stateAcknowledgement = null;
         this.#loadedWorldEpoch = null;
         if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
         this.#snapshotFrame = null;
-        this.#snapshotQueue = [];
-        this.#snapshotReceivedAt.clear();
+        this.#pendingSnapshot = null;
         this.#pendingLifecycles = [];
         void this.#loadWorld(message, socket);
       } else if (message.type === "pong") {
@@ -183,16 +172,8 @@ export class GameSession {
       else if (message.worldEpoch === this.#worldEpoch) this.#pendingLifecycles.push(message);
     } else {
       const snapshot = decodeSnapshot(data);
-      this.#stateAcknowledgement = acknowledgeState(
-        this.#stateAcknowledgement,
-        snapshot.serverTick,
-      );
-      const receivedAtMs = performance.now();
-      this.#snapshotReceivedAt.set(snapshotKey(snapshot), receivedAtMs);
-      this.#callbacks.snapshotReceived?.(snapshot, receivedAtMs);
       if (snapshot.worldEpoch === this.#loadedWorldEpoch) this.#queueSnapshot(snapshot);
-      else if (snapshot.worldEpoch === this.#worldEpoch)
-        retainSnapshot(this.#snapshotQueue, snapshot);
+      else if (snapshot.worldEpoch === this.#worldEpoch) this.#retainSnapshot(snapshot);
     }
   }
 
@@ -203,7 +184,6 @@ export class GameSession {
     for (const timer of this.#timers) clearTimeout(timer);
     this.#timers.clear();
     if (this.#snapshotFrame !== null) cancelAnimationFrame(this.#snapshotFrame);
-    this.#snapshotReceivedAt.clear();
     this.#closeRtc();
     this.#socket?.close(1000, "page closed");
   }
@@ -231,17 +211,11 @@ export class GameSession {
 
   sendInput(command: InputCommand): void {
     const socket = this.#socket;
-    this.#inputHistory.push(command);
-    if (this.#inputHistory.length > INPUT_REDUNDANCY) this.#inputHistory.shift();
-    const packet = encodeInputBundle(this.#inputHistory, this.#stateAcknowledgement);
+    const packet = encodeInput(command);
     this.#defer(() => {
       if (this.#socket !== socket || socket?.readyState !== WebSocket.OPEN) return;
       const channel = this.#inputChannel;
-      if (channel?.readyState === "open") {
-        if (channel.bufferedAmount < 16_384) channel.send(packet);
-      } else {
-        socket.send(packet);
-      }
+      if (channel?.readyState === "open" && channel.bufferedAmount < 16_384) channel.send(packet);
     });
   }
 
@@ -252,7 +226,7 @@ export class GameSession {
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: message.iceServers });
     let receivedState = false;
-    const input = peer.createDataChannel("gurgur-input-v3", {
+    const input = peer.createDataChannel("gurgur-input-v4", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -260,7 +234,7 @@ export class GameSession {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v3" ||
+        state.label !== "gurgur-state-v4" ||
         this.#stateChannel
       ) {
         state.close();
@@ -386,50 +360,30 @@ export class GameSession {
   }
 
   #queueSnapshot(snapshot: Snapshot): void {
-    retainSnapshot(this.#snapshotQueue, snapshot);
+    this.#retainSnapshot(snapshot);
     this.#scheduleSnapshotFrame();
   }
 
   #scheduleSnapshotFrame(): void {
-    if (this.#snapshotFrame !== null || this.#snapshotQueue.length === 0) return;
+    if (this.#snapshotFrame !== null || !this.#pendingSnapshot) return;
     this.#snapshotFrame = requestAnimationFrame(() => {
       this.#snapshotFrame = null;
-      const queued = this.#snapshotQueue;
-      this.#snapshotQueue = [];
-      for (const [index, state] of queued.entries()) {
-        if (state.worldEpoch === this.#loadedWorldEpoch) {
-          const identity = snapshotKey(state);
-          const receivedAtMs = this.#snapshotReceivedAt.get(identity) ?? performance.now();
-          this.#snapshotReceivedAt.delete(identity);
-          this.#callbacks.snapshot(state, index === queued.length - 1, receivedAtMs);
-        }
-      }
-      this.#snapshotReceivedAt.clear();
+      const snapshot = this.#pendingSnapshot;
+      this.#pendingSnapshot = null;
+      if (snapshot?.worldEpoch === this.#loadedWorldEpoch) this.#callbacks.snapshot(snapshot);
     });
   }
-}
 
-function snapshotKey(snapshot: Pick<Snapshot, "worldEpoch" | "serverTick">): string {
-  return `${snapshot.worldEpoch}:${snapshot.serverTick}`;
-}
-
-export function retainSnapshot(queue: Snapshot[], snapshot: Snapshot): void {
-  const existing = queue.findIndex(
-    (candidate) =>
-      candidate.worldEpoch === snapshot.worldEpoch && candidate.serverTick === snapshot.serverTick,
-  );
-  if (existing >= 0) queue[existing] = snapshot;
-  else {
-    const insertion = queue.findIndex(
-      (candidate) =>
-        candidate.worldEpoch > snapshot.worldEpoch ||
-        (candidate.worldEpoch === snapshot.worldEpoch &&
-          candidate.serverTick > snapshot.serverTick),
-    );
-    if (insertion < 0) queue.push(snapshot);
-    else queue.splice(insertion, 0, snapshot);
+  #retainSnapshot(snapshot: Snapshot): void {
+    const current = this.#pendingSnapshot;
+    if (
+      current &&
+      (current.worldEpoch > snapshot.worldEpoch ||
+        (current.worldEpoch === snapshot.worldEpoch && current.serverTick > snapshot.serverTick))
+    )
+      return;
+    this.#pendingSnapshot = snapshot;
   }
-  if (queue.length > SNAPSHOT_HISTORY_PACKETS) queue.shift();
 }
 
 function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
