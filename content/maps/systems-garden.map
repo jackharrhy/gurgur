@@ -1843,6 +1843,7 @@
 // entity 85
 {
 "classname" "func_button"
+"authoredId" "auto.func_button.ed8abbc7-3b46-4e00-ab13-0c4faea5f90f"
 "target" "door_3"
 // brush 0
 {
@@ -1857,7 +1858,7 @@
 // entity 86
 {
 "classname" "func_button"
-"authoredId" "auto.func_button.a16d69be-1e43-4b13-ba9c-f2897104c0ee"
+"authoredId" "auto.func_button.8c608a05-9ce9-4d5b-ac6b-dbf5830b6212"
 "target" "door_3"
 // brush 0
 {
@@ -1872,6 +1873,7 @@
 // entity 87
 {
 "classname" "func_door"
+"authoredId" "auto.func_door.24b04182-1e54-4f19-a9ac-e1cf0cd4437d"
 "targetname" "door_3"
 // brush 0
 {
@@ -1886,6 +1888,7 @@
 // entity 88
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.15baa53a-aee2-46d1-a36e-6e07e890de4d"
 // brush 0
 {
 ( 1424 432 -96 ) ( 1424 433 -96 ) ( 1424 432 -95 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 559.001 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0017089844 ] 180 0.02862254 0.03230148
@@ -1899,6 +1902,7 @@
 // entity 89
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.93588b40-3665-47af-9a7e-de9af7adf618"
 // brush 0
 {
 ( 1424 384 -96 ) ( 1424 385 -96 ) ( 1424 384 -95 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 0 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0014648438 ] 180 0.02862254 0.03230148
@@ -1912,6 +1916,7 @@
 // entity 90
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.7e7d8f13-39b5-4f83-826a-a9749a5afdf8"
 // brush 0
 {
 ( 1424 336 -96 ) ( 1424 337 -96 ) ( 1424 336 -95 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 -559 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0014648438 ] 90 0.02862254 0.03230148
@@ -1925,6 +1930,7 @@
 // entity 91
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.d90c6dc3-53cb-47a9-9ff1-60af86bdd016"
 // brush 0
 {
 ( 1424 408 -48 ) ( 1424 409 -48 ) ( 1424 408 -47 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 -279.5 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0015258789 ] 180 0.02862254 0.03230148
@@ -1938,6 +1944,7 @@
 // entity 92
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.5e28ecfc-6414-4898-8a77-d33a15202164"
 // brush 0
 {
 ( 1424 360 -48 ) ( 1424 361 -48 ) ( 1424 360 -47 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 279.5 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0014038086 ] 0 0.02862254 0.03230148
@@ -1951,6 +1958,7 @@
 // entity 93
 {
 "classname" "func_physics"
+"authoredId" "auto.func_physics.18050fc3-8a74-40bc-bc59-5c3fd2a78fd4"
 // brush 0
 {
 ( 1424 384 0 ) ( 1424 385 0 ) ( 1424 384 1 ) GURGUR/adam [ 0 -0.9999999999999927 1.1920928989217232e-07 0 ] [ 0 -1.1920928989217232e-07 -0.9999999999999927 0.0014648438 ] 270 0.02862254 0.03230148
