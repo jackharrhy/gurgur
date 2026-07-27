@@ -1,5 +1,10 @@
 import type {
   InputCommand,
+  ManipulationChangedMessage,
+  ManipulationDeniedMessage,
+  ManipulationDropMessage,
+  ManipulationRequestMessage,
+  ManipulationStatePacket,
   NetworkObjectState,
   OwnershipChangedPacket,
   OwnershipDeniedMessage,
@@ -21,7 +26,9 @@ export type PhysicsWorkerRequest =
   | { type: "network-states"; states: NetworkObjectState[] }
   | { type: "lifecycle"; message: LifecycleMessage }
   | { type: "ownership-changed"; message: OwnershipChangedPacket }
-  | { type: "ownership-denied"; message: OwnershipDeniedMessage };
+  | { type: "ownership-denied"; message: OwnershipDeniedMessage }
+  | { type: "manipulation-changed"; message: ManipulationChangedMessage }
+  | { type: "manipulation-denied"; message: ManipulationDeniedMessage };
 
 export type PhysicsWorkerResponse =
   | { type: "world-ready"; worldEpoch: number }
@@ -29,6 +36,9 @@ export type PhysicsWorkerResponse =
   | { type: "owner-states"; states: NetworkObjectState[] }
   | { type: "ownership-request"; message: OwnershipRequestMessage }
   | { type: "ownership-drop"; message: OwnershipDropPacket }
+  | { type: "manipulation-request"; message: ManipulationRequestMessage }
+  | { type: "manipulation-state"; message: ManipulationStatePacket }
+  | { type: "manipulation-drop"; message: ManipulationDropMessage }
   | { type: "owner-commit"; states: NetworkObjectState[] }
   | { type: "error"; message: string };
 
@@ -43,6 +53,8 @@ export type OwnershipClient = {
   applyLifecycle(message: LifecycleMessage): void;
   ownershipChanged(message: OwnershipChangedPacket): void;
   ownershipDenied(message: OwnershipDeniedMessage): void;
+  manipulationChanged(message: ManipulationChangedMessage): void;
+  manipulationDenied(message: ManipulationDeniedMessage): void;
   dispose(): void;
 };
 
@@ -51,6 +63,9 @@ export function createOwnershipClient(callbacks: {
   ownerStates(states: NetworkObjectState[]): void;
   ownershipRequest(message: OwnershipRequestMessage): void;
   ownershipDrop(message: OwnershipDropPacket): void;
+  manipulationRequest(message: ManipulationRequestMessage): void;
+  manipulationState(message: ManipulationStatePacket): void;
+  manipulationDrop(message: ManipulationDropMessage): void;
   ownerCommit(states: NetworkObjectState[]): void;
   error(message: string): void;
 }): OwnershipClient {
@@ -73,6 +88,12 @@ export function createOwnershipClient(callbacks: {
       callbacks.ownershipRequest(message.message);
     } else if (message.type === "ownership-drop") {
       callbacks.ownershipDrop(message.message);
+    } else if (message.type === "manipulation-request") {
+      callbacks.manipulationRequest(message.message);
+    } else if (message.type === "manipulation-state") {
+      callbacks.manipulationState(message.message);
+    } else if (message.type === "manipulation-drop") {
+      callbacks.manipulationDrop(message.message);
     } else if (message.type === "owner-commit") {
       callbacks.ownerCommit(message.states);
     } else {
@@ -97,6 +118,8 @@ export function createOwnershipClient(callbacks: {
     applyLifecycle: (message) => post({ type: "lifecycle", message }),
     ownershipChanged: (message) => post({ type: "ownership-changed", message }),
     ownershipDenied: (message) => post({ type: "ownership-denied", message }),
+    manipulationChanged: (message) => post({ type: "manipulation-changed", message }),
+    manipulationDenied: (message) => post({ type: "manipulation-denied", message }),
     dispose() {
       worker.terminate();
       for (const waiters of ready.values()) for (const resolve of waiters) resolve();

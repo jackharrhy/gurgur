@@ -52,6 +52,8 @@ Bun's MCP/host authorities use the same fixed-step policy.
 | Held prop                                   | lease-holding browser | one grab lease              |
 | Unheld prop                                 | Bun host              | until a lease grant         |
 | Mechanism, trigger, mover, diagnostic actor | Bun host              | one `worldEpoch`            |
+| Joint graph                                 | Bun host              | one `worldEpoch`            |
+| Contraption manipulation claim              | Bun coordinator       | one press/claim             |
 | Ownership/lifecycle registry                | Bun coordinator       | one `worldEpoch`            |
 | Nonowned collision proxy                    | each nonowner         | disposable                  |
 | Buffered presentation                       | each browser          | disposable                  |
@@ -60,6 +62,16 @@ Bun's MCP/host authorities use the same fixed-step policy.
 Only the current authority simulates an object dynamically. Other peers keep a
 kinematic or motion-disabled proxy for collision and queries and render from a
 separate interpolation buffer.
+
+Generic body/query/control access and host mechanism construction are separate
+game capabilities. Only Bun receives the capability that creates native joints
+or mutates a mechanism's surface velocity. Browser workers evaluate immutable
+conveyors and gravity fields for their owned player or held prop, but never
+construct a joint graph.
+For direct contraption manipulation, the worker owns only target smoothing and
+publishing. Bun creates a private kinematic control body and native motor joint,
+keeps the complete graph dynamic in one Box3D world, and destroys that temporary
+constraint on release, timeout, disconnect, respawn, or reset.
 
 ## Identity and versioning
 

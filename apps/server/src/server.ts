@@ -9,6 +9,7 @@ import {
   STATE_BACKPRESSURE_BYTES,
   STATE_MAX_RETRANSMITS,
   OWNED_STATE_TAG,
+  MANIPULATION_STATE_TAG,
   OWNERSHIP_DROP_TAG,
   OWNER_COMMIT_TAG,
   STATE_ACK_TAG,
@@ -16,6 +17,7 @@ import {
   binaryPacketTag,
   cloneNetworkState,
   decodeOwnedState,
+  decodeManipulationState,
   decodeOwnershipDrop,
   decodeOwnerCommit,
   decodeStateAck,
@@ -26,6 +28,7 @@ import {
   encodeStateCluster,
   type RuntimeId,
   type LifecycleMessage,
+  type ManipulationChangedMessage,
   type NetworkObjectState,
   type OwnershipChangedPacket,
   type SpeechMessage,
@@ -60,6 +63,7 @@ type ClientData = {
   rtcNegotiating: boolean;
   ownerPacketWindowStartedAt: number;
   ownerStatePacketCount: number;
+  manipulationPacketCount: number;
   ackPacketCount: number;
 };
 type SessionRecord = {
@@ -250,6 +254,11 @@ export async function createGurgurServer(
     }
   };
 
+  const broadcastManipulation = (message: ManipulationChangedMessage): void => {
+    const encoded = JSON.stringify(message);
+    for (const socket of clients) if (socket.data.playerId) socket.send(encoded);
+  };
+
   const broadcastLifecycle = (
     message: LifecycleMessage,
     except?: Bun.ServerWebSocket<ClientData>,
@@ -280,6 +289,7 @@ export async function createGurgurServer(
     playerSpawn: options.playerSpawn,
     extraDynamicBodies: options.extraDynamicBodies,
     worldBundle: options.worldBundle,
+    onManipulationChanged: broadcastManipulation,
   });
   const worldBundleBytes = encodeWorldBundle(game.worldMessage().bundle);
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
@@ -319,6 +329,7 @@ export async function createGurgurServer(
       if (now - socket.data.ownerPacketWindowStartedAt >= 1_000) {
         socket.data.ownerPacketWindowStartedAt = now;
         socket.data.ownerStatePacketCount = 0;
+        socket.data.manipulationPacketCount = 0;
         socket.data.ackPacketCount = 0;
       }
       const tag = binaryPacketTag(packet);
@@ -333,6 +344,14 @@ export async function createGurgurServer(
         ) {
           broadcast(ownerState.states);
         }
+        return true;
+      }
+      if (tag === MANIPULATION_STATE_TAG) {
+        socket.data.manipulationPacketCount += 1;
+        if (socket.data.manipulationPacketCount > 120) return true;
+        const state = decodeManipulationState(packet);
+        if (socket.data.playerId !== null)
+          game.acceptManipulationState(socket.data.playerId, state);
         return true;
       }
       if (tag === STATE_ACK_TAG) {
@@ -639,6 +658,7 @@ export async function createGurgurServer(
               rtcNegotiating: false,
               ownerPacketWindowStartedAt: performance.now(),
               ownerStatePacketCount: 0,
+              manipulationPacketCount: 0,
               ackPacketCount: 0,
             },
           })
@@ -794,6 +814,29 @@ export async function createGurgurServer(
             }
             return;
           }
+          if (control.type === "manipulation-request" && socket.data.playerId) {
+            const result = game.requestManipulation(socket.data.playerId, control);
+            if (typeof result === "string") {
+              socket.send(
+                JSON.stringify({
+                  type: "manipulation-denied",
+                  protocolVersion: PROTOCOL_VERSION,
+                  worldEpoch: game.worldEpoch,
+                  requestId: control.requestId,
+                  target: control.target,
+                  reason: result,
+                }),
+              );
+            } else {
+              broadcastManipulation(result);
+            }
+            return;
+          }
+          if (control.type === "manipulation-drop" && socket.data.playerId) {
+            const changed = game.dropManipulation(socket.data.playerId, control);
+            if (changed) broadcastManipulation(changed);
+            return;
+          }
           if (control.type === "use-request" && socket.data.playerId) {
             if (control.worldEpoch === game.worldEpoch)
               game.useOwnedPlayer(socket.data.playerId, control.target);
@@ -908,6 +951,8 @@ export async function createGurgurServer(
         session.socket = null;
         if (shuttingDown) return;
         for (const changed of game.reclaimOwnedBy(session.playerId)) broadcastOwnership(changed);
+        for (const changed of game.endManipulationsForPlayer(session.playerId))
+          broadcastManipulation(changed);
         session.disconnectTimer = setTimeout(() => {
           if (session.socket || !sessions.delete(token!)) return;
           speechRateLimiter.forget(token!);

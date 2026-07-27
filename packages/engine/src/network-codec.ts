@@ -1,6 +1,7 @@
 import { STATE_CLUSTER_MAX_BYTES } from "./config";
 import type {
   BootstrapStatePacket,
+  ManipulationStatePacket,
   NetworkObjectState,
   OwnedStatePacket,
   OwnerCommitPacket,
@@ -21,6 +22,7 @@ export const BOOTSTRAP_STATE_TAG = 19;
 export const OWNERSHIP_CHANGED_TAG = 20;
 export const OWNERSHIP_DROP_TAG = 21;
 export const OWNER_COMMIT_TAG = 22;
+export const MANIPULATION_STATE_TAG = 23;
 
 export const STATE_FIELD_POSITION = 1 << 0;
 export const STATE_FIELD_ROTATION = 1 << 1;
@@ -414,6 +416,58 @@ export function decodeOwnershipDrop(bytes: ArrayBuffer | ArrayBufferView): Owner
   return { worldEpoch, id, authorityVersion, state };
 }
 
+export function encodeManipulationState(packet: ManipulationStatePacket): ArrayBuffer {
+  if (
+    !Number.isSafeInteger(packet.worldEpoch) ||
+    packet.worldEpoch < 0 ||
+    !Number.isSafeInteger(packet.authorityVersion) ||
+    packet.authorityVersion < 0 ||
+    !Number.isSafeInteger(packet.claimVersion) ||
+    packet.claimVersion < 1 ||
+    !Number.isInteger(packet.stateSequence) ||
+    packet.stateSequence < 0 ||
+    packet.stateSequence > 0xffff ||
+    !finiteVec3(packet.targetPosition) ||
+    !finiteQuat(packet.targetRotation)
+  ) {
+    throw new Error("manipulation state fields are invalid");
+  }
+  const writer = new Writer();
+  writer.u8(MANIPULATION_STATE_TAG);
+  writer.u32(packet.worldEpoch);
+  writeId(writer, packet.target);
+  writer.u32(packet.authorityVersion);
+  writer.u32(packet.claimVersion);
+  writer.u16(packet.stateSequence);
+  writeVec3(writer, packet.targetPosition);
+  writeQuat(writer, packet.targetRotation);
+  return writer.finish();
+}
+
+export function decodeManipulationState(
+  bytes: ArrayBuffer | ArrayBufferView,
+): ManipulationStatePacket {
+  const reader = new Reader(bytes);
+  reader.tag(MANIPULATION_STATE_TAG);
+  const packet = {
+    worldEpoch: reader.u32(),
+    target: readId(reader),
+    authorityVersion: reader.u32(),
+    claimVersion: reader.u32(),
+    stateSequence: reader.u16(),
+    targetPosition: readVec3(reader),
+    targetRotation: readQuat(reader),
+  };
+  reader.done();
+  if (
+    packet.claimVersion < 1 ||
+    !finiteVec3(packet.targetPosition) ||
+    !finiteQuat(packet.targetRotation)
+  )
+    throw new Error("manipulation state fields are invalid");
+  return packet;
+}
+
 export function binaryPacketTag(bytes: ArrayBuffer | ArrayBufferView): number {
   const view = byteView(bytes);
   if (view.byteLength === 0) throw new Error("empty binary packet");
@@ -668,6 +722,14 @@ function sameId(a: RuntimeId, b: RuntimeId): boolean {
 
 function sameVec3(a: Vec3, b: Vec3): boolean {
   return a.x === b.x && a.y === b.y && a.z === b.z;
+}
+
+function finiteVec3(value: Vec3): boolean {
+  return [value.x, value.y, value.z].every(Number.isFinite);
+}
+
+function finiteQuat(value: Quat): boolean {
+  return [value.x, value.y, value.z, value.w].every(Number.isFinite);
 }
 
 function sameQuat(a: Quat, b: Quat): boolean {

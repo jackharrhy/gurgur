@@ -523,6 +523,228 @@ describe("PhysicsWorld", () => {
     }
   });
 
+  test("applies surface velocity to every child of a compound conveyor", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      const conveyor = world.createCompoundHulls({
+        type: "static",
+        position: { x: 0, y: 0, z: 0 },
+        friction: 1,
+        hulls: [
+          {
+            vertices: boxVertices(1).map((vertex) => ({
+              x: vertex.x - 1,
+              y: vertex.y * 0.25,
+              z: vertex.z,
+            })),
+          },
+          {
+            vertices: boxVertices(1).map((vertex) => ({
+              x: vertex.x + 1,
+              y: vertex.y * 0.25,
+              z: vertex.z,
+            })),
+          },
+        ],
+      });
+      world.setSurfaceVelocity(conveyor, { x: 2, y: 0, z: 0 });
+      expect(world.pointVelocity(conveyor, { x: 0, y: 0.25, z: 0 })).toEqual({
+        x: 2,
+        y: 0,
+        z: 0,
+      });
+      const boxes = [-1, 1].map((x) =>
+        world.createBox({
+          type: "dynamic",
+          position: { x, y: 1, z: 0 },
+          halfExtents: { x: 0.25, y: 0.25, z: 0.25 },
+        }),
+      );
+      for (let tick = 0; tick < 120; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      for (const [index, box] of boxes.entries())
+        expect(world.state(box).position.x).toBeGreaterThan((index === 0 ? -1 : 1) + 0.5);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("supports native world-anchored hinge and slider motors with stale handles", async () => {
+    const world = await PhysicsWorld.create({ gravity: { x: 0, y: 0, z: 0 } });
+    try {
+      const hingeBody = world.createBox({
+        type: "dynamic",
+        position: { x: 0, y: 2, z: 0 },
+        halfExtents: { x: 1, y: 0.2, z: 0.2 },
+      });
+      const identity = { x: 0, y: 0, z: 0, w: 1 };
+      const hinge = world.createRevoluteConstraint({
+        bodyA: hingeBody,
+        localFrameA: { position: { x: 0, y: 0, z: 0 }, rotation: identity },
+        localFrameB: { position: { x: 0, y: 2, z: 0 }, rotation: identity },
+        limit: { lowerAngle: -Math.PI, upperAngle: Math.PI },
+        motor: { mode: "target-velocity", targetVelocity: 2, maxTorque: 100 },
+      });
+      const sliderBody = world.createBox({
+        type: "dynamic",
+        position: { x: 0, y: 4, z: 0 },
+        halfExtents: { x: 0.25, y: 0.25, z: 0.25 },
+      });
+      const slider = world.createPrismaticConstraint({
+        bodyA: sliderBody,
+        localFrameA: { position: { x: 0, y: 0, z: 0 }, rotation: identity },
+        localFrameB: { position: { x: 0, y: 4, z: 0 }, rotation: identity },
+        limit: { lowerTranslation: -2, upperTranslation: 2 },
+        motor: { mode: "target-velocity", targetVelocity: 1, maxForce: 100 },
+      });
+      for (let tick = 0; tick < 60; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(Math.abs(world.state(hingeBody).rotation.z)).toBeGreaterThan(0.2);
+      expect(world.state(sliderBody).position.x).toBeWithin(0.3, 0.8);
+      world.setRevoluteMotor(hinge, {
+        mode: "target-angle",
+        targetAngle: 0,
+        hertz: 6,
+        dampingRatio: 1,
+      });
+      world.setPrismaticMotor(slider, {
+        mode: "target-position",
+        targetPosition: 0,
+        hertz: 6,
+        dampingRatio: 1,
+      });
+      for (let tick = 0; tick < 120; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(Math.abs(world.state(sliderBody).position.x)).toBeLessThan(0.1);
+      expect(world.destroy(hingeBody)).toBe(true);
+      expect(() => world.setRevoluteMotor(hinge, { mode: "none" })).toThrow(
+        "stale constraint handle",
+      );
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("solves spherical, weld, rope, rod, and spring constraints natively", async () => {
+    const world = await PhysicsWorld.create({ gravity: { x: 0, y: 0, z: 0 } });
+    try {
+      const identity = { x: 0, y: 0, z: 0, w: 1 };
+      const frame = (position = { x: 0, y: 0, z: 0 }) => ({
+        position,
+        rotation: identity,
+      });
+      const sphericalBody = world.createBox({
+        type: "dynamic",
+        position: { x: 0, y: 0, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const weldBody = world.createBox({
+        type: "dynamic",
+        position: { x: 2, y: 0, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const ropeBody = world.createBox({
+        type: "dynamic",
+        position: { x: 5, y: 0, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const springBody = world.createBox({
+        type: "dynamic",
+        position: { x: 8, y: 0, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const rodBody = world.createBox({
+        type: "dynamic",
+        position: { x: 10, y: 0, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      world.createSphericalConstraint({
+        bodyA: sphericalBody,
+        localFrameA: frame(),
+        localFrameB: frame(),
+      });
+      world.createWeldConstraint({
+        bodyA: weldBody,
+        localFrameA: frame(),
+        localFrameB: frame({ x: 2, y: 0, z: 0 }),
+      });
+      world.createConfigurableDistanceConstraint({
+        bodyA: ropeBody,
+        localFrameA: frame(),
+        localFrameB: frame(),
+        length: 2,
+        mode: "rope",
+      });
+      const spring = world.createConfigurableDistanceConstraint({
+        bodyA: springBody,
+        localFrameA: frame(),
+        localFrameB: frame({ x: 6, y: 0, z: 0 }),
+        length: 2,
+        mode: "spring",
+        hertz: 4,
+        dampingRatio: 0.8,
+        maxForce: 100,
+      });
+      world.createConfigurableDistanceConstraint({
+        bodyA: rodBody,
+        localFrameA: frame(),
+        localFrameB: frame({ x: 8, y: 0, z: 0 }),
+        length: 2,
+        mode: "rod",
+      });
+      for (const body of [sphericalBody, weldBody, ropeBody, springBody, rodBody])
+        world.applyLinearImpulse(body, { x: 0, y: 4, z: 0 });
+      for (let tick = 0; tick < 180; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(Math.hypot(...Object.values(world.state(sphericalBody).position))).toBeLessThan(0.05);
+      expect(world.state(weldBody).position.x).toBeWithin(1.95, 2.05);
+      expect(Math.hypot(...Object.values(world.state(ropeBody).position))).toBeLessThan(2.05);
+      expect(world.state(springBody).position.x).toBeWithin(7.9, 8.1);
+      expect(
+        Math.hypot(world.state(rodBody).position.x - 8, world.state(rodBody).position.y),
+      ).toBeWithin(1.95, 2.05);
+      expect(world.destroyConstraint(spring)).toBe(true);
+      expect(world.destroyConstraint(spring)).toBe(false);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("supports compound sensors and per-body gravity scale", async () => {
+    const world = await PhysicsWorld.create();
+    try {
+      const sensor = world.createSensorHulls({
+        position: { x: 0, y: 1, z: 0 },
+        hulls: [
+          { vertices: boxVertices(1) },
+          {
+            vertices: boxVertices(1).map((vertex) => ({ ...vertex, x: vertex.x + 1 })),
+          },
+        ],
+      });
+      const proxy = world.createPlayerProxy(
+        { x: 0.5, y: 1, z: 0 },
+        { radius: 0.35, halfSegment: 0.2 },
+      );
+      const normal = world.createBox({
+        type: "dynamic",
+        position: { x: -3, y: 5, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      const light = world.createBox({
+        type: "dynamic",
+        position: { x: -4, y: 5, z: 0 },
+        halfExtents: { x: 0.2, y: 0.2, z: 0.2 },
+      });
+      world.setGravityScale(light, 0.25);
+      const events = world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(
+        events.sensorBegin.filter((event) => keyId(event.sensor) === keyId(sensor)),
+      ).toHaveLength(2);
+      expect(events.sensorBegin.every((event) => keyId(event.visitor) === keyId(proxy))).toBe(true);
+      for (let tick = 0; tick < 59; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      expect(world.state(normal).position.y).toBeLessThan(world.state(light).position.y - 2);
+    } finally {
+      world.dispose();
+    }
+  });
+
   test("owns distance constraints and invalidates them with an attached body", async () => {
     const world = await PhysicsWorld.create();
     try {
@@ -554,6 +776,39 @@ describe("PhysicsWorld", () => {
       ).toBeWithin(0.8, 1.2);
       expect(world.destroy(body)).toBe(true);
       expect(world.destroyConstraint(constraint)).toBe(false);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("manipulates a dynamic body through a private native control joint", async () => {
+    const world = await PhysicsWorld.create({ gravity: { x: 0, y: 0, z: 0 } });
+    try {
+      const body = world.createBox({
+        type: "dynamic",
+        position: { x: 0, y: 0, z: 0 },
+        halfExtents: { x: 0.5, y: 0.15, z: 0.15 },
+        density: 2,
+      });
+      const control = world.createControlConstraint({
+        body,
+        localAnchor: { x: 0.45, y: 0, z: 0 },
+        targetPosition: { x: 0.45, y: 0, z: 0 },
+        targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+      });
+      world.setControlTarget(
+        control,
+        { x: 0.45, y: 1.5, z: 0 },
+        { x: 0, y: 0, z: Math.sin(Math.PI / 4), w: Math.cos(Math.PI / 4) },
+      );
+      for (let tick = 0; tick < 120; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      const state = world.state(body);
+      expect(state.position.y).toBeGreaterThan(1);
+      expect(Math.abs(state.rotation.z)).toBeGreaterThan(0.4);
+      expect(world.destroyConstraint(control)).toBe(true);
+      expect(() =>
+        world.setControlTarget(control, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0, w: 1 }),
+      ).toThrow("stale constraint handle");
     } finally {
       world.dispose();
     }

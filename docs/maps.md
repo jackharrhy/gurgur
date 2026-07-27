@@ -112,24 +112,33 @@ bundle decoders.
 
 The base schema contains:
 
-| Class               | Purpose                                         |
-| ------------------- | ----------------------------------------------- |
-| `worldspawn`        | world metadata, gravity, materials, environment |
-| `info_player_start` | player spawn transform                          |
-| `func_physics`      | dynamic convex brush body                       |
-| `func_door`         | kinematic door mechanism                        |
-| `func_platform`     | kinematic moving platform                       |
-| `trigger_once`      | one-shot sensor event                           |
-| `trigger_multiple`  | repeatable sensor event                         |
-| `logic_relay`       | typed mechanism signal relay                    |
-| `func_button`       | physical/use-activated signal source            |
-| `info_world_reset`  | authenticated administrative reset marker       |
-| `env_sprite`        | camera-facing render-only pixel-art prop        |
-| `ambient_audio`     | targeted per-listener music node                |
-| `light_ambient`     | world ambient light and volume density          |
-| `light_directional` | directional light and shadow coverage           |
-| `light_point`       | finite omnidirectional light                    |
-| `light_spot`        | finite cone light                               |
+| Class                   | Purpose                                         |
+| ----------------------- | ----------------------------------------------- |
+| `worldspawn`            | world metadata, gravity, materials, environment |
+| `info_player_start`     | player spawn transform                          |
+| `func_physics`          | dynamic convex brush body                       |
+| `phys_hinge`            | revolute joint, limits, friction, and motors    |
+| `phys_motor`            | world-anchored velocity hinge                   |
+| `phys_slideconstraint`  | prismatic joint, limits, and motors             |
+| `phys_ballsocket`       | spherical joint                                 |
+| `phys_lengthconstraint` | rope or rigid distance joint                    |
+| `phys_spring`           | spring distance joint                           |
+| `phys_constraint`       | rigid weld joint                                |
+| `func_conveyor`         | static multi-brush physical surface motor       |
+| `trigger_gravity`       | prioritized multi-brush gravity-factor volume   |
+| `func_door`             | kinematic door mechanism                        |
+| `func_platform`         | kinematic moving platform                       |
+| `trigger_once`          | one-shot sensor event                           |
+| `trigger_multiple`      | repeatable sensor event                         |
+| `logic_relay`           | typed mechanism signal relay                    |
+| `func_button`           | physical/use-activated signal source            |
+| `info_world_reset`      | authenticated administrative reset marker       |
+| `env_sprite`            | camera-facing render-only pixel-art prop        |
+| `ambient_audio`         | targeted per-listener music node                |
+| `light_ambient`         | world ambient light and volume density          |
+| `light_directional`     | directional light and shadow coverage           |
+| `light_point`           | finite omnidirectional light                    |
+| `light_spot`            | finite cone light                               |
 
 The schema drives compiler validation, FGD generation, and the TrenchBroom game
 configuration. Bun constructs the corresponding runtime registries and
@@ -161,12 +170,42 @@ the source for compiler validation and the generated
 enter the runtime bundle; source identity survives only in compiler diagnostics.
 Triggers compile `onEnterTarget`/`onEnterInput` and optional
 `onExitTarget`/`onExitInput` properties into bundle-index connections. The
-closed input vocabulary is `trigger`, `open`, `close`, `play`, and `stop`;
+closed input vocabulary is `trigger`, `open`, `close`, `play`, `stop`, `enable`,
+`disable`, `toggle`, and `reverse`;
 compilation rejects unsupported receiver/input pairs. Doors and platforms use
 map-space `moveDirection`, map-unit `distance` and `speed`, endpoint `wait`, and
-`startOpen`. Dynamic bodies author density, friction, and restitution. Relays
+`startOpen`. Dynamic bodies author density, friction, restitution, baseline
+`gravityScale`, an optional `targetname`, whether they are `grabbable`, and
+whether a fixed body is `manipulable`. Relays
 retain their simple delayed target forwarding, while triggers use the typed
 connection path.
+
+Physics constraints use required `attach1` and optional `attach2` target
+properties. Each attachment resolves to exactly one non-sensor body; omitted
+`attach2` means the world. The point origin is the primary anchor. Authored
+`angles` orient local Z for revolute joints and local X for prismatic and
+distance joints. Limits are relative to the authored pose. Distance and spring
+entities author an explicit map-unit `length` whose second endpoint lies along
+local X.
+Every constraint also exposes `renderable`, defaulting to true. It compiles to a
+generic constraint presentation style; false compiles to `presentation: none`.
+
+Compilation resolves attachment targetnames to entity indices and precomputes
+local joint frames. It rejects self-attachments, all-static graphs, ambiguous
+targets, and any dynamic attachment that did not explicitly set `grabbable` to
+false. Such bodies default to direct fixed-authority manipulation unless
+`manipulable` is also false. The mapper constraint names compile into one
+`physics-joint` archetype;
+conveyors and gravity volumes compile into `surface-motor` and `gravity-field`.
+Raw mapper properties do not reach runtime physics or networking.
+
+`trigger` aliases `toggle` for controllable physics devices. `reverse` negates a
+conveyor direction or joint target velocity, angle, or position around the
+authored pose. The generated FGD supplies target pickers, angle rotation
+widgets, useful point bounds, and choice dropdowns. The executable authoring
+catalogue is `content/maps/fixtures/physics-contraptions.map`; production maps
+may use the same vocabulary and remain reproducibly compiled from their authored
+Valve 220 sources.
 
 Area music is composed from two typed entities rather than embedded in trigger
 code. A regular `trigger_multiple` sends `play` to an

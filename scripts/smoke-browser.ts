@@ -49,6 +49,7 @@ try {
     await resetWorld();
     await contentionAndRecovery(chrome);
   }
+  if (scenario === "all" || scenario === "contraption") await contraptionInteraction(chrome);
   console.log(`protocol-v5 browser smoke passed (${scenario})`);
 } finally {
   await chrome.close();
@@ -180,6 +181,7 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       },
       { target: targetId, local: localId },
     );
+    await page.waitForFunction(() => document.body.dataset.interactionOutline === "held");
     const startPosition = await position(page, targetId);
     await turnTouch(page, 150);
     await page.waitForFunction(
@@ -207,6 +209,7 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
         );
       return entity?.ownerPlayerId === null;
     }, targetId);
+    await page.waitForFunction(() => document.body.dataset.interactionOutline !== "held");
     const finalOwned = await page.evaluate(
       () =>
         (window as unknown as SmokeWindow).__gurgurDiagnostics.lastOwnershipDrop()?.position ??
@@ -330,7 +333,112 @@ async function contentionAndRecovery(browser: Browser): Promise<void> {
   }
 }
 
-async function openPage(browser: Browser, simulatedLatencyMs: number): Promise<Page> {
+async function contraptionInteraction(browser: Browser): Promise<void> {
+  const fixturePath = "content/maps/fixtures/physics-contraptions.map";
+  const contraptionBundle = compileWorld(await Bun.file(fixturePath).text(), fixturePath);
+  const lever = contraptionBundle.entities.find(
+    (entity) => entity.kind === "physics-prop" && entity.authoredId === "fixture.lever.body",
+  );
+  if (!lever || lever.kind !== "physics-prop")
+    throw new Error("browser contraption fixture is unavailable");
+  const leverBrush = contraptionBundle.brushes[lever.body.brushIndices[1]!]!;
+  const contraptionDirectory = await mkdtemp(join(tmpdir(), "gurgur-browser-contraption-"));
+  const contraptionServer = await createGurgurServer({
+    port: 0,
+    hostname: "127.0.0.1",
+    databasePath: join(contraptionDirectory, "world.sqlite"),
+    worldBundle: contraptionBundle,
+    playerSpawn: {
+      x: leverBrush.center.x,
+      y: PLAYER_HALF_HEIGHT + 0.4064,
+      z: leverBrush.center.z + 1.8,
+    },
+  });
+  const page = await openPage(browser, 0, contraptionServer.port);
+  try {
+    await page.waitForFunction(() => Number(document.body.dataset.constraintVisuals) >= 8);
+    await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget));
+    const targetId = await page.evaluate(() => document.body.dataset.interactionTarget!);
+    const initialRotation = await page.evaluate((target) => {
+      const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
+        .presentation()
+        .find((candidate) => candidate.runtimeId === target);
+      if (!state) throw new Error("lever presentation is unavailable");
+      return state.rotation;
+    }, targetId);
+    await pressPrimary(page);
+    await page.waitForFunction(
+      (target) =>
+        document.body.dataset.manipulationTarget === target &&
+        document.body.dataset.interactionOutline === "held",
+      targetId,
+    );
+    const descriptorOwner = await page.evaluate((target) => {
+      const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
+        .network()
+        .entities.find(
+          (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
+        );
+      if (!entity) throw new Error("manipulated entity descriptor is unavailable");
+      return entity.ownerPlayerId;
+    }, targetId);
+    if (descriptorOwner !== null)
+      throw new Error("fixed contraption manipulation transferred network ownership");
+    await turnTouch(page, 220);
+    try {
+      await page.waitForFunction(
+        ({ target, initial }) => {
+          const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
+            .presentation()
+            .find((candidate) => candidate.runtimeId === target);
+          return (
+            state !== undefined &&
+            Math.hypot(
+              state.rotation.x - initial.x,
+              state.rotation.y - initial.y,
+              state.rotation.z - initial.z,
+              state.rotation.w - initial.w,
+            ) > 0.005
+          );
+        },
+        { target: targetId, initial: initialRotation },
+        { timeout: 5_000 },
+      );
+    } catch {
+      const diagnostics = await page.evaluate(
+        (target) => ({
+          manipulationTarget: document.body.dataset.manipulationTarget,
+          manipulationStateAt: document.body.dataset.manipulationStateAt,
+          manipulationStateCount: document.body.dataset.manipulationStateCount,
+          manipulationStateSent: document.body.dataset.manipulationStateSent,
+          manipulationState: document.body.dataset.manipulationState,
+          outline: document.body.dataset.interactionOutline,
+          state: (window as unknown as SmokeWindow).__gurgurDiagnostics
+            .presentation()
+            .find((candidate) => candidate.runtimeId === target),
+        }),
+        targetId,
+      );
+      throw new Error(`browser contraption did not move: ${JSON.stringify(diagnostics)}`);
+    }
+    await pressPrimary(page);
+    await page.waitForFunction(
+      () =>
+        document.body.dataset.manipulationTarget === "" &&
+        document.body.dataset.interactionOutline !== "held",
+    );
+  } finally {
+    await page.close();
+    contraptionServer.stop();
+    await rm(contraptionDirectory, { recursive: true, force: true });
+  }
+}
+
+async function openPage(
+  browser: Browser,
+  simulatedLatencyMs: number,
+  port = server.port,
+): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -347,7 +455,7 @@ async function openPage(browser: Browser, simulatedLatencyMs: number): Promise<P
     Object.defineProperty(window, "__gurgurSmokePad", { value: pad });
     Object.defineProperty(navigator, "getGamepads", { value: () => [pad] });
   });
-  const url = new URL(`http://127.0.0.1:${server.port}/`);
+  const url = new URL(`http://127.0.0.1:${port}/`);
   url.searchParams.set("test", "1");
   if (simulatedLatencyMs > 0)
     url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
@@ -436,6 +544,7 @@ type SmokeWindow = {
     presentation(): Array<{
       runtimeId: string;
       position: { x: number; y: number; z: number };
+      rotation: { x: number; y: number; z: number; w: number };
     }>;
     network(): {
       worldEpoch: number | null;

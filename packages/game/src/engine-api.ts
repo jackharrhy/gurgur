@@ -1,4 +1,13 @@
-import type { BodyState, Quat, RuntimeId, Vec3 } from "@gurgur/engine";
+import type {
+  BodyState,
+  ConstraintId,
+  JointBodies,
+  PrismaticMotor,
+  Quat,
+  RevoluteMotor,
+  RuntimeId,
+  Vec3,
+} from "@gurgur/engine";
 
 export type CapsuleShape = { radius: number; halfSegment: number };
 export type RuntimeBodyRef = { id: RuntimeId; entityIndex: number };
@@ -37,4 +46,42 @@ export type GameEngine = {
 
   driveBodyToTarget(id: RuntimeId, options: BodyTargetOptions): boolean;
   requestSave(): void;
+};
+
+export type HostMechanismEngine = {
+  createControl(options: {
+    body: RuntimeId;
+    localAnchor: Vec3;
+    targetPosition: Vec3;
+    targetRotation: Quat;
+  }): ConstraintId;
+  setControlTarget(id: ConstraintId, position: Vec3, rotation: Quat): void;
+  destroyConstraint(id: ConstraintId): boolean;
+  createRevolute(
+    options: JointBodies & {
+      limit?: { lowerAngle: number; upperAngle: number };
+      motor?: RevoluteMotor;
+    },
+  ): ConstraintId;
+  setRevoluteMotor(id: ConstraintId, motor: RevoluteMotor): void;
+  createPrismatic(
+    options: JointBodies & {
+      limit?: { lowerTranslation: number; upperTranslation: number };
+      motor?: PrismaticMotor;
+    },
+  ): ConstraintId;
+  setPrismaticMotor(id: ConstraintId, motor: PrismaticMotor): void;
+  createSpherical(options: JointBodies): ConstraintId;
+  createWeld(options: JointBodies): ConstraintId;
+  createDistance(
+    options: JointBodies & {
+      length: number;
+      mode: "rope" | "rod" | "spring";
+      hertz?: number;
+      dampingRatio?: number;
+      maxForce?: number;
+    },
+  ): ConstraintId;
+  setSurfaceVelocity(id: RuntimeId, velocity: Vec3): void;
+  setGravityScale(id: RuntimeId, scale: number): void;
 };

@@ -28,6 +28,12 @@ describe("persisted game state", () => {
           authoredId: "relay",
           fired: false,
         },
+        {
+          kind: "physics-control" as const,
+          authoredId: "conveyor",
+          enabled: true,
+          reversed: true,
+        },
       ],
       delayedSignals: [{ target: "door", dueTick: 20 }],
     };

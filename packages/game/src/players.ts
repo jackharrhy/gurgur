@@ -105,7 +105,11 @@ export type GamePlayersOptions = {
   bundle: WorldBundle;
   restored: PersistedPlayerState[];
   spawnPosition?: Vec3;
-  stepController(state: PlayerControllerState, input: PlayerIntent): PlayerControllerState;
+  stepController(
+    state: PlayerControllerState,
+    input: PlayerIntent,
+    proxy: RuntimeId,
+  ): PlayerControllerState;
   use(target: RuntimeId, origin: Vec3, displacement: Vec3): boolean;
 };
 
@@ -302,7 +306,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         player.input = { ...player.input, moveX: 0, moveZ: 0 };
       }
       const wasCrouched = player.state.crouched;
-      player.state = stepController(player.state, player.input);
+      player.state = stepController(player.state, player.input, player.proxy);
       if (player.state.position.y < voidY) {
         respawn(player);
         continue;

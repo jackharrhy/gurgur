@@ -53,6 +53,19 @@ type ActiveSpeech = {
   disposed: boolean;
 };
 
+type ConstraintEntity = Extract<
+  WorldMessage["bundle"]["entities"][number],
+  { kind: "physics-joint" }
+>;
+
+type ConstraintVisual = {
+  entity: ConstraintEntity;
+  attachmentA: THREE.Object3D;
+  attachmentB: THREE.Object3D | null;
+  object: THREE.Object3D;
+  geometry: THREE.BufferGeometry | null;
+};
+
 export function speechReverbImpulse(sampleRate: number, seconds = 0.35): Float32Array {
   const length = Math.max(1, Math.round(sampleRate * seconds));
   const impulse = new Float32Array(length);
@@ -190,7 +203,14 @@ function debugBoundsCorners(primitive: Extract<PhysicsDebugPrimitive, { kind: "b
 }
 
 function disposeOwnedResources(object: THREE.Object3D): void {
-  if (!(object instanceof THREE.Mesh || object instanceof THREE.Sprite)) return;
+  if (
+    !(
+      object instanceof THREE.Mesh ||
+      object instanceof THREE.Sprite ||
+      object instanceof THREE.LineSegments
+    )
+  )
+    return;
   if (object instanceof THREE.Mesh && !object.userData.sharedGeometry) object.geometry.dispose();
   if (object.userData.ownedMaterial) {
     const materials = Array.isArray(object.material) ? object.material : [object.material];
@@ -219,6 +239,200 @@ export function createBillboardGeometry(
   return geometry;
 }
 
+function createConstraintVisual(
+  entity: ConstraintEntity,
+  attachmentA: THREE.Object3D,
+  attachmentB: THREE.Object3D | null,
+): ConstraintVisual {
+  const color = {
+    hinge: 0x6fb8ed,
+    motor: 0x58a8eb,
+    slider: 0x73d9bf,
+    "ball-socket": 0x96c3ef,
+    rope: 0xd6c46e,
+    rod: 0xe4d99c,
+    spring: 0xed93c1,
+    weld: 0xadade6,
+  }[entity.presentation.kind === "constraint" ? entity.presentation.style : "hinge"];
+  if (entity.presentation.kind === "constraint" && entity.presentation.style === "ball-socket") {
+    const material = new THREE.MeshBasicNodeMaterial({
+      color,
+      depthTest: true,
+      depthWrite: false,
+      fog: true,
+      toneMapped: false,
+    });
+    const object = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 8), material);
+    object.name = `constraint.${entity.authoredId}.ball-socket`;
+    object.userData.ownedMaterial = true;
+    object.userData.interactionOccluder = false;
+    object.raycast = () => {};
+    return { entity, attachmentA, attachmentB, object, geometry: null };
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(256 * 3), 3));
+  geometry.setDrawRange(0, 0);
+  const material = new THREE.LineBasicNodeMaterial({
+    color,
+    depthTest: true,
+    depthWrite: false,
+    fog: true,
+    toneMapped: false,
+  });
+  const object = new THREE.LineSegments(geometry, material);
+  object.name = `constraint.${entity.authoredId}`;
+  object.frustumCulled = false;
+  object.userData.ownedMaterial = true;
+  object.userData.interactionOccluder = false;
+  object.raycast = () => {};
+  return { entity, attachmentA, attachmentB, object, geometry };
+}
+
+function updateConstraintVisual(visual: ConstraintVisual): void {
+  const { entity } = visual;
+  if (entity.presentation.kind !== "constraint") return;
+  const anchorA = constraintAnchor(visual.attachmentA, entity.localFrameA);
+  const anchorB = visual.attachmentB
+    ? constraintAnchor(visual.attachmentB, entity.localFrameB)
+    : new THREE.Vector3(
+        entity.localFrameB.position.x,
+        entity.localFrameB.position.y,
+        entity.localFrameB.position.z,
+      );
+  if (entity.presentation.style === "ball-socket") {
+    visual.object.position.copy(anchorA).add(anchorB).multiplyScalar(0.5);
+    return;
+  }
+  const frameRotation = constraintRotation(visual.attachmentA, entity.localFrameA.rotation);
+  const midpoint = anchorA.clone().add(anchorB).multiplyScalar(0.5);
+  const points: THREE.Vector3[] = [];
+  const segment = (from: THREE.Vector3, to: THREE.Vector3): void => {
+    points.push(from, to);
+  };
+  const style = entity.presentation.style;
+  if (style === "rope" || style === "rod") {
+    const sections = style === "rope" ? 18 : 1;
+    let previous = anchorA;
+    const sag = style === "rope" ? Math.min(0.35, anchorA.distanceTo(anchorB) * 0.08) : 0;
+    for (let index = 1; index <= sections; index += 1) {
+      const amount = index / sections;
+      const next = anchorA
+        .clone()
+        .lerp(anchorB, amount)
+        .add(new THREE.Vector3(0, -Math.sin(Math.PI * amount) * sag, 0));
+      segment(previous, next);
+      previous = next;
+    }
+  } else if (style === "spring") {
+    const axis = anchorB.clone().sub(anchorA);
+    const length = axis.length();
+    if (length > 1e-5) axis.multiplyScalar(1 / length);
+    else axis.set(1, 0, 0);
+    const reference =
+      Math.abs(axis.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    const side = new THREE.Vector3().crossVectors(axis, reference).normalize();
+    const up = new THREE.Vector3().crossVectors(axis, side).normalize();
+    const radius = Math.min(0.11, Math.max(0.045, length * 0.04));
+    let previous = anchorA;
+    for (let index = 1; index <= 48; index += 1) {
+      const amount = index / 48;
+      const phase = amount * Math.PI * 16;
+      const envelope =
+        Math.sin(Math.PI * Math.min(1, amount * 8)) *
+        Math.sin(Math.PI * Math.min(1, (1 - amount) * 8));
+      const next = anchorA
+        .clone()
+        .lerp(anchorB, amount)
+        .addScaledVector(side, Math.cos(phase) * radius * envelope)
+        .addScaledVector(up, Math.sin(phase) * radius * envelope);
+      segment(previous, next);
+      previous = next;
+    }
+  } else if (style === "hinge" || style === "motor") {
+    const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(frameRotation);
+    const radialX = new THREE.Vector3(1, 0, 0).applyQuaternion(frameRotation);
+    const radialY = new THREE.Vector3(0, 1, 0).applyQuaternion(frameRotation);
+    const radius = style === "motor" ? 0.2 : 0.16;
+    let previous = midpoint.clone().addScaledVector(radialX, radius);
+    for (let index = 1; index <= 24; index += 1) {
+      const angle = (index / 24) * Math.PI * 2;
+      const next = midpoint
+        .clone()
+        .addScaledVector(radialX, Math.cos(angle) * radius)
+        .addScaledVector(radialY, Math.sin(angle) * radius);
+      segment(previous, next);
+      previous = next;
+    }
+    segment(
+      midpoint.clone().addScaledVector(axis, -0.24),
+      midpoint.clone().addScaledVector(axis, 0.24),
+    );
+    if (style === "motor") {
+      segment(
+        midpoint.clone().addScaledVector(radialX, -radius),
+        midpoint.clone().addScaledVector(radialX, radius),
+      );
+      segment(
+        midpoint.clone().addScaledVector(radialY, -radius),
+        midpoint.clone().addScaledVector(radialY, radius),
+      );
+    }
+  } else if (style === "slider") {
+    const axis = new THREE.Vector3(1, 0, 0).applyQuaternion(frameRotation);
+    segment(
+      midpoint.clone().addScaledVector(axis, -0.6),
+      midpoint.clone().addScaledVector(axis, 0.6),
+    );
+    segment(anchorA, anchorB);
+    const crossAxis = new THREE.Vector3(0, 1, 0).applyQuaternion(frameRotation);
+    segment(
+      anchorA.clone().addScaledVector(crossAxis, -0.1),
+      anchorA.clone().addScaledVector(crossAxis, 0.1),
+    );
+  } else {
+    segment(anchorA, anchorB);
+    for (const axis of [
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(0, 0, 1),
+    ])
+      segment(
+        midpoint.clone().addScaledVector(axis, -0.12),
+        midpoint.clone().addScaledVector(axis, 0.12),
+      );
+  }
+  setConstraintSegments(visual.geometry!, points);
+}
+
+function constraintAnchor(
+  attachment: THREE.Object3D,
+  frame: ConstraintEntity["localFrameA"],
+): THREE.Vector3 {
+  return new THREE.Vector3(frame.position.x, frame.position.y, frame.position.z)
+    .applyQuaternion(attachment.quaternion)
+    .add(attachment.position);
+}
+
+function constraintRotation(
+  attachment: THREE.Object3D,
+  rotation: ConstraintEntity["localFrameA"]["rotation"],
+): THREE.Quaternion {
+  return attachment.quaternion
+    .clone()
+    .multiply(new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w));
+}
+
+function setConstraintSegments(geometry: THREE.BufferGeometry, points: THREE.Vector3[]): void {
+  const positions = geometry.getAttribute("position");
+  const count = Math.min(points.length, positions.count);
+  for (let index = 0; index < count; index += 1) {
+    const point = points[index]!;
+    positions.setXYZ(index, point.x, point.y, point.z);
+  }
+  positions.needsUpdate = true;
+  geometry.setDrawRange(0, count);
+}
+
 export class WorldRenderer {
   readonly #renderer: THREE.Renderer;
   readonly #pipeline: RetroRenderPipeline;
@@ -227,12 +441,14 @@ export class WorldRenderer {
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
   readonly #presentation = new PresentationBuffer();
   readonly #meshes = new Map<string, THREE.Object3D>();
+  #constraintVisuals: ConstraintVisual[] = [];
   readonly #materials = new Map<string, THREE.Material>();
   readonly #textures = new Map<string, THREE.Texture>();
   readonly #materialTextures: Readonly<Record<string, MaterialTextureInfo>>;
   readonly #spriteAssetUrls: Readonly<Record<string, string>>;
   readonly #outlineMaskMaterial = createInteractionOutlineMaskMaterial();
   readonly #availableOutlineMaterial = createInteractionOutlineMaterial(false);
+  readonly #heldOutlineMaterial = createInteractionOutlineMaterial(true);
   readonly #cameraCollisionMaterial = new THREE.MeshBasicNodeMaterial({
     side: THREE.DoubleSide,
   });
@@ -247,6 +463,7 @@ export class WorldRenderer {
   readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
+  #heldTarget: THREE.Object3D | null = null;
   #outlinedTarget: THREE.Object3D | null = null;
   #pickupPlayerPosition: THREE.Vector3 | null = null;
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
@@ -329,9 +546,11 @@ export class WorldRenderer {
     this.#realityLightRoot.name = `reality-lights-${message.worldEpoch}`;
     this.#cameraCollisionRoot.name = `camera-collision-${message.worldEpoch}`;
     this.#meshes.clear();
+    this.#constraintVisuals = [];
     this.#cameraCollisionBodies.clear();
     this.#presentation.reset([], performance.now());
     this.#interactionCandidate = null;
+    this.#heldTarget = null;
     this.#outlinedTarget = null;
     this.#pickupPlayerPosition = null;
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
@@ -373,6 +592,7 @@ export class WorldRenderer {
       volumeDensity = Math.max(volumeDensity, presentationLight.volumeDensity);
       volumetricLights ||= presentationLight.volumetric;
     }
+    const bodyMeshes = new Map<number, THREE.Object3D>();
     for (const runtime of message.runtimeEntities) {
       if (runtime.kind !== "world-entity") continue;
       const entity = message.bundle.entities[runtime.entityIndex];
@@ -394,13 +614,28 @@ export class WorldRenderer {
         mesh.userData.runtimeId = runtime.id;
         mesh.userData.interactable = entity.interaction !== "none";
         mesh.userData.grabbable = entity.interaction === "grab";
+        mesh.userData.manipulable = entity.interaction === "manipulate";
         mesh.userData.interactionOccluder = true;
-        if (mesh.userData.grabbable) this.#addInteractionOutline(mesh);
+        if (mesh.userData.grabbable || mesh.userData.manipulable) this.#addInteractionOutline(mesh);
         group.add(mesh);
       }
       this.#meshes.set(idKey(runtime.id), group);
+      bodyMeshes.set(runtime.entityIndex, group);
       this.#worldRoot.add(group);
     }
+    for (const entity of message.bundle.entities) {
+      if (entity.kind !== "physics-joint" || entity.presentation.kind !== "constraint") continue;
+      const attachmentA = bodyMeshes.get(entity.attachmentAEntityIndex);
+      const attachmentB =
+        entity.attachmentBEntityIndex === null
+          ? null
+          : bodyMeshes.get(entity.attachmentBEntityIndex);
+      if (!attachmentA || (entity.attachmentBEntityIndex !== null && !attachmentB)) continue;
+      const visual = createConstraintVisual(entity, attachmentA, attachmentB ?? null);
+      this.#constraintVisuals.push(visual);
+      this.#worldRoot.add(visual.object);
+    }
+    document.body.dataset.constraintVisuals = String(this.#constraintVisuals.length);
     for (const player of message.runtimeEntities.filter((entity) => entity.kind === "player"))
       this.#addPlayer(player);
     this.#scene.add(this.#worldRoot);
@@ -422,6 +657,9 @@ export class WorldRenderer {
       this.#presentation.remove(id);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
+        if (this.#heldTarget === mesh) this.#heldTarget = null;
+        if (this.#interactionCandidate === mesh) this.#interactionCandidate = null;
+        if (this.#outlinedTarget === mesh) this.#outlinedTarget = null;
         this.#meshes.delete(identity);
         this.#worldRoot.remove(mesh);
         mesh.traverse(disposeOwnedResources);
@@ -434,6 +672,7 @@ export class WorldRenderer {
       }
     }
     for (const entity of message.created) if (entity.kind === "player") this.#addPlayer(entity);
+    this.#updateInteractionOutline();
   }
 
   setLocalPlayer(id: RuntimeId): void {
@@ -509,7 +748,20 @@ export class WorldRenderer {
     receivedAtMs = performance.now(),
   ): void {
     this.#presentation.replaceReliable(state, receivedAtMs, local);
+    const mesh = this.#meshes.get(idKey(state.id)) ?? null;
+    if (local && state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0) {
+      this.#heldTarget = mesh;
+    } else if (this.#heldTarget === mesh) {
+      this.#heldTarget = null;
+    }
     this.applyNetworkInteractionState([state]);
+  }
+
+  applyManipulationState(target: RuntimeId, local: boolean): void {
+    const mesh = this.#meshes.get(idKey(target)) ?? null;
+    if (local) this.#heldTarget = mesh;
+    else if (this.#heldTarget === mesh) this.#heldTarget = null;
+    this.#updateInteractionOutline();
   }
 
   applyNetworkInteractionState(bodies: readonly BodySnapshot[]): void {
@@ -556,14 +808,21 @@ export class WorldRenderer {
         const target = { ...object.userData.runtimeId } as RuntimeId;
         const runtimeObject = this.#meshes.get(idKey(target)) ?? null;
         const flags = Number(runtimeObject?.userData.snapshotFlags ?? 0);
+        const directlyMovable = object.userData.grabbable || object.userData.manipulable;
         this.#interactionCandidate =
-          object.userData.grabbable && (flags & NETWORK_FLAG_HELD) === 0 ? runtimeObject : null;
+          directlyMovable && (flags & NETWORK_FLAG_HELD) === 0 ? runtimeObject : null;
         this.#updateInteractionOutline();
-        const unavailable = object.userData.grabbable && (flags & NETWORK_FLAG_HELD) !== 0;
+        const unavailable = directlyMovable && (flags & NETWORK_FLAG_HELD) !== 0;
         this.#updatePickupDebug(
           origin,
           hit.point,
-          unavailable ? 0xff405c : object.userData.grabbable ? 0x31ffc0 : 0x6fc7ff,
+          unavailable
+            ? 0xff405c
+            : object.userData.grabbable
+              ? 0x31ffc0
+              : object.userData.manipulable
+                ? 0xffa347
+                : 0x6fc7ff,
         );
         if (unavailable) return null;
         return target;
@@ -585,7 +844,8 @@ export class WorldRenderer {
     return null;
   }
 
-  interactionOutlineState(): "available" | "none" {
+  interactionOutlineState(): "available" | "held" | "none" {
+    if (this.#heldTarget) return "held";
     return this.#interactionCandidate ? "available" : "none";
   }
 
@@ -718,6 +978,7 @@ export class WorldRenderer {
           this.#follow(localPresentation, now);
         }
       }
+      for (const visual of this.#constraintVisuals) updateConstraintVisual(visual);
       this.#orientBillboards();
       this.#pipeline.render();
     };
@@ -742,6 +1003,7 @@ export class WorldRenderer {
     for (const texture of this.#textures.values()) texture.dispose();
     this.#outlineMaskMaterial.dispose();
     this.#availableOutlineMaterial.dispose();
+    this.#heldOutlineMaterial.dispose();
     this.#cameraCollisionMaterial.dispose();
     if (this.#pickupDebug) {
       this.#pickupDebug.geometry.dispose();
@@ -1163,15 +1425,15 @@ export class WorldRenderer {
   }
 
   #updateInteractionOutline(): void {
-    const target = this.#interactionCandidate;
+    const target = this.#heldTarget ?? this.#interactionCandidate;
     if (this.#outlinedTarget !== target) {
-      this.#setInteractionOutline(this.#outlinedTarget, false);
+      this.#setInteractionOutline(this.#outlinedTarget, false, false);
       this.#outlinedTarget = target;
     }
-    this.#setInteractionOutline(target, true);
+    this.#setInteractionOutline(target, true, target === this.#heldTarget);
   }
 
-  #setInteractionOutline(target: THREE.Object3D | null, visible: boolean): void {
+  #setInteractionOutline(target: THREE.Object3D | null, visible: boolean, held: boolean): void {
     target?.traverse((object) => {
       if (!(object instanceof THREE.Mesh)) return;
       if (object.userData.interactionOutlineMask) {
@@ -1180,7 +1442,7 @@ export class WorldRenderer {
       }
       if (!object.userData.interactionOutline) return;
       object.visible = visible;
-      object.material = this.#availableOutlineMaterial;
+      object.material = held ? this.#heldOutlineMaterial : this.#availableOutlineMaterial;
     });
   }
 

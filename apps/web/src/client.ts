@@ -314,6 +314,23 @@ const owner = createOwnershipClient({
     lastOwnershipDrop = structuredClone(message.state);
     session.dropOwnership(message);
   },
+  manipulationRequest(message) {
+    session.requestManipulation(message);
+  },
+  manipulationState(message) {
+    const sent = session.sendManipulationState(message);
+    if (testEnabled) {
+      document.body.dataset.manipulationStateAt = String(performance.now());
+      document.body.dataset.manipulationStateCount = String(
+        Number(document.body.dataset.manipulationStateCount ?? 0) + 1,
+      );
+      document.body.dataset.manipulationStateSent = String(sent);
+      document.body.dataset.manipulationState = JSON.stringify(message);
+    }
+  },
+  manipulationDrop(message) {
+    session.dropManipulation(message);
+  },
   ownerCommit(states) {
     session.commitOwnerStates(states);
   },
@@ -468,6 +485,21 @@ session = new GameSession(
     },
     ownershipDenied(message) {
       owner.ownershipDenied(message);
+    },
+    manipulation(message) {
+      const local =
+        localPlayerId !== null &&
+        message.manipulatorPlayerId !== null &&
+        message.manipulatorPlayerId.index === localPlayerId.index &&
+        message.manipulatorPlayerId.generation === localPlayerId.generation;
+      renderer.applyManipulationState(message.target, local);
+      owner.manipulationChanged(message);
+      document.body.dataset.manipulationTarget = local
+        ? `${message.target.index}:${message.target.generation}`
+        : "";
+    },
+    manipulationDenied(message) {
+      owner.manipulationDenied(message);
     },
     clock(serverTick) {
       document.body.dataset.serverTick = String(serverTick);

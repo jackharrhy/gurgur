@@ -42,6 +42,7 @@ export type DynamicBrushBody = BrushBody & {
   density: number;
   friction: number;
   restitution: number;
+  gravityScale: number;
 };
 
 export type KinematicBrushBody = BrushBody & { kind: "kinematic-brush" };
@@ -50,7 +51,7 @@ export type SensorBrushBody = BrushBody & { kind: "sensor-brush" };
 
 export type BodySpec = DynamicBrushBody | KinematicBrushBody | StaticBrushBody | SensorBrushBody;
 
-export type InteractionSpec = "none" | "use" | "grab";
+export type InteractionSpec = "none" | "use" | "grab" | "manipulate";
 
 export type AmbientLightPresentation = {
   kind: "light";
@@ -101,10 +102,16 @@ export type LightPresentation =
   | PointLightPresentation
   | SpotLightPresentation;
 
+export type ConstraintPresentation = {
+  kind: "constraint";
+  style: "hinge" | "motor" | "slider" | "ball-socket" | "rope" | "rod" | "spring" | "weld";
+};
+
 export type PresentationSpec =
   | { kind: "brush"; transform: "world" | "body" }
   | { kind: "sprite"; asset: SpriteAssetId; height: number; glow: boolean }
   | LightPresentation
+  | ConstraintPresentation
   | { kind: "none" };
 
 export type CompiledEntityCapabilities = {

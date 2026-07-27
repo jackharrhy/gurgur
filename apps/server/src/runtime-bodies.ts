@@ -84,6 +84,7 @@ export function createRuntimeProp(
           })),
           ...material,
         });
+  physics.setGravityScale(handle, entity.body.gravityScale);
   return networkBody(handle, entityIndex, authoredId, "grab-lease");
 }
 
@@ -111,11 +112,11 @@ function createAuthoredBodies(
           }
         : firstBrush.center;
     if (spec.kind === "sensor-brush") {
-      if (spec.brushIndices.length !== 1)
-        throw new Error(`sensor entity ${entityIndex} must use exactly one brush`);
-      const handle = physics.createSensorHull({
+      const handle = physics.createSensorHulls({
         position: { x: 0, y: 0, z: 0 },
-        vertices: firstBrush.worldVertices,
+        hulls: spec.brushIndices.map((index) => ({
+          vertices: bundle.brushes[index]!.worldVertices,
+        })),
       });
       bodies.push(networkBody(handle, entityIndex, authoredId, "fixed"));
       continue;
@@ -133,7 +134,9 @@ function createAuthoredBodies(
             friction: spec.friction,
             restitution: spec.restitution,
           }
-        : {};
+        : entity.kind === "surface-motor"
+          ? { friction: entity.friction }
+          : {};
     const hulls = spec.brushIndices.map((index) => ({
       vertices: bundle.brushes[index]!.worldVertices.map((vertex) => ({
         x: vertex.x - firstBrush.center.x,
@@ -162,6 +165,7 @@ function createAuthoredBodies(
       physics.setBodyVelocity(handle, saved.linearVelocity, saved.angularVelocity);
       physics.setBodyAwake(handle, saved.awake);
     }
+    if (spec.kind === "dynamic-brush") physics.setGravityScale(handle, spec.gravityScale);
     bodies.push(
       networkBody(
         handle,
@@ -216,6 +220,7 @@ function createStressBodies(
           friction: templateEntity.body.friction,
           restitution: templateEntity.body.restitution,
         });
+    physics.setGravityScale(handle, templateEntity.body.gravityScale);
     return networkBody(handle, entityIndex, authoredId, "grab-lease");
   });
 }

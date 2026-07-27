@@ -30,6 +30,10 @@ Keep these invariants:
 - `authorityVersion`, per-object state sequence, `worldEpoch`, `mapRevision`, and
   persistence version are separate.
 - TrenchBroom Valve 220 maps and the TypeScript entity schema are authored truth.
+- Joint-connected bodies are fixed to Bun and cannot receive grab leases.
+- A browser may hold an exclusive manipulation claim on one fixed-authority
+  body. Bun keeps the complete joint graph dynamic and applies the browser's
+  disposable target state through a native control joint; this is not ownership.
 
 Canonical documents state selected behavior. Put TODOs, sequencing, and
 completion status only in `docs/work.md`. Preserve durable rationale in a

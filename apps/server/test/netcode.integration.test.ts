@@ -17,6 +17,7 @@ import {
   decodeOwnershipChanged,
   decodeServerControl,
   decodeStateCluster,
+  encodeManipulationState,
   encodeOwnerCommit,
   encodeOwnedState,
   encodeOwnershipDrop,
@@ -205,6 +206,103 @@ describe("protocol-v5 real server transport", () => {
         ),
     );
     expect(first.receiver.states().every((state) => state.authorityVersion >= 1)).toBe(true);
+  });
+
+  test("keeps a manipulated contraption host-owned across reliable claim and disposable targets", async () => {
+    const path = "content/maps/fixtures/physics-contraptions.map";
+    const bundle = compileWorld(await Bun.file(path).text(), path);
+    const prop = bundle.entities.find(
+      (entity) => entity.kind === "physics-prop" && entity.authoredId === "fixture.lever.body",
+    );
+    if (!prop || prop.kind !== "physics-prop") throw new Error("lever fixture is unavailable");
+    const brush = bundle.brushes[prop.body.brushIndices[0]!]!;
+    const { server } = await launch({
+      worldBundle: bundle,
+      playerSpawn: { ...brush.center },
+    });
+    const first = await connect(server.port);
+    const second = await connect(server.port);
+    cleanup.push(
+      () => close(first),
+      () => close(second),
+    );
+    const target = first.world.runtimeEntities.find(
+      (entity) =>
+        entity.kind === "world-entity" && entity.entityIndex === bundle.entities.indexOf(prop),
+    )!;
+    const initial = first.receiver.state(target.id);
+    if (!initial || initial.kind !== "body") throw new Error("missing lever bootstrap");
+    const request = {
+      type: "manipulation-request" as const,
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: first.world.worldEpoch,
+      requestId: 40,
+      target: target.id,
+      authorityVersion: initial.authorityVersion,
+      localAnchor: { x: 1.5, y: 0, z: 0 },
+      holdDistance: 1.5,
+    };
+    const grantPromise = waitForText(first, "manipulation-changed");
+    const denialPromise = waitForText(second, "manipulation-denied");
+    first.socket.send(JSON.stringify(request));
+    second.socket.send(JSON.stringify({ ...request, requestId: 41 }));
+    const grant = await grantPromise;
+    expect(grant.manipulatorPlayerId).toEqual(first.welcome.playerId);
+    expect(grant.authorityVersion).toBe(initial.authorityVersion);
+    expect((await denialPromise).reason).toBe("busy");
+    const claimVersion = Number(grant.claimVersion);
+    const movedPromise = waitForState(
+      second,
+      (state) =>
+        state.kind === "body" &&
+        same(state.id, target.id) &&
+        (Math.hypot(
+          state.position.x - initial.position.x,
+          state.position.y - initial.position.y,
+          state.position.z - initial.position.z,
+        ) > 0.01 ||
+          Math.hypot(
+            state.rotation.x - initial.rotation.x,
+            state.rotation.y - initial.rotation.y,
+            state.rotation.z - initial.rotation.z,
+            state.rotation.w - initial.rotation.w,
+          ) > 0.01),
+    );
+    for (let sequence = 1; sequence <= 12; sequence += 1) {
+      first.owner.send(
+        Buffer.from(
+          encodeManipulationState({
+            worldEpoch: first.world.worldEpoch,
+            target: target.id,
+            authorityVersion: initial.authorityVersion,
+            claimVersion,
+            stateSequence: sequence,
+            targetPosition: {
+              x: initial.position.x + 1.5,
+              y: initial.position.y + 0.8,
+              z: initial.position.z,
+            },
+            targetRotation: initial.rotation,
+          }),
+        ),
+      );
+      await Bun.sleep(16);
+    }
+    const moved = await movedPromise;
+    expect(moved.authorityVersion).toBe(initial.authorityVersion);
+    expect(target.ownerPlayerId).toBeNull();
+    const droppedPromise = waitForText(second, "manipulation-changed");
+    first.socket.send(
+      JSON.stringify({
+        type: "manipulation-drop",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: first.world.worldEpoch,
+        target: target.id,
+        authorityVersion: initial.authorityVersion,
+        claimVersion,
+      }),
+    );
+    expect((await droppedPromise).manipulatorPlayerId).toBeNull();
   });
 });
 

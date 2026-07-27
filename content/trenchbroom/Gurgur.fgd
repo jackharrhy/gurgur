@@ -20,9 +20,141 @@
 [
   classname(string) : "Entity class" : "func_physics"
   authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional name for constraint attachment"
+  grabbable(choices) : "Allow an unjointed body to receive a grab lease" : 1 = [ 0 : "No" 1 : "Yes" ]
+  manipulable(choices) : "Allow a fixed-authority body to be pulled through a host control joint" : 1 = [ 0 : "No" 1 : "Yes" ]
+  gravityScale(float) : "Baseline gravity multiplier" : "1"
   density(float) : "Mass density" : "1"
   friction(float) : "Surface friction" : "0.6"
   restitution(float) : "Bounciness" : "0"
+]
+
+@PointClass color(111 184 237) size(-12 -12 -12, 12 12 12) = phys_hinge : "Revolute constraint around authored local Z"
+[
+  classname(string) : "Entity class" : "phys_hinge"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render an in-world hinge marker" : 1 = [ 0 : "No" 1 : "Yes" ]
+  limitEnabled(choices) : "Enable authored-pose-relative angular limits" : 0 = [ 0 : "No" 1 : "Yes" ]
+  lowerAngle(float) : "Lower angular limit in degrees" : "-90"
+  upperAngle(float) : "Upper angular limit in degrees" : "90"
+  motorMode(choices) : "Motor behavior" : "none" = [ "none" : "None" "friction" : "Friction brake" "target-angle" : "Target angle" "target-velocity" : "Target velocity" ]
+  frictionTorque(float) : "Maximum friction torque" : "0"
+  targetAngle(float) : "Target angle around the authored pose" : "0"
+  targetVelocity(float) : "Target angular velocity in degrees per second" : "90"
+  maxTorque(float) : "Maximum motor torque" : "100"
+  frequency(float) : "Target-angle spring frequency" : "4"
+  damping(float) : "Target-angle damping ratio" : "0.8"
+  startOn(choices) : "Begin with the configured motor enabled" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(88 168 235) size(-12 -12 -12, 12 12 12) = phys_motor : "World-anchored Source-style velocity hinge"
+[
+  classname(string) : "Entity class" : "phys_motor"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Body driven by the motor"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render an in-world motor marker" : 1 = [ 0 : "No" 1 : "Yes" ]
+  speed(float) : "Angular speed in degrees per second" : "90"
+  maxTorque(float) : "Maximum motor torque" : "200"
+  startOn(choices) : "Begin enabled" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(115 217 191) size(-12 -12 -12, 12 12 12) = phys_slideconstraint : "Prismatic constraint along authored local X"
+[
+  classname(string) : "Entity class" : "phys_slideconstraint"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render an in-world slider rail" : 1 = [ 0 : "No" 1 : "Yes" ]
+  limitEnabled(choices) : "Enable authored-pose-relative travel limits" : 0 = [ 0 : "No" 1 : "Yes" ]
+  lowerLimit(float) : "Lower travel limit in map units" : "-64"
+  upperLimit(float) : "Upper travel limit in map units" : "64"
+  motorMode(choices) : "Motor behavior" : "none" = [ "none" : "None" "target-position" : "Target position" "target-velocity" : "Target velocity" ]
+  targetPosition(float) : "Target offset in map units" : "0"
+  targetVelocity(float) : "Target speed in map units per second" : "64"
+  maxForce(float) : "Maximum motor force" : "200"
+  frequency(float) : "Target-position spring frequency" : "4"
+  damping(float) : "Target-position damping ratio" : "0.8"
+  startOn(choices) : "Begin with the configured motor enabled" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(150 195 239) size(-12 -12 -12, 12 12 12) = phys_ballsocket : "Ball-and-socket constraint"
+[
+  classname(string) : "Entity class" : "phys_ballsocket"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render this constraint in the world" : 1 = [ 0 : "No" 1 : "Yes" ]
+  startOn(choices) : "Create this constraint on reset" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(214 196 110) size(-12 -12 -12, 12 12 12) = phys_lengthconstraint : "Rope or rigid length constraint along local X"
+[
+  classname(string) : "Entity class" : "phys_lengthconstraint"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render the rope or rod between its anchors" : 1 = [ 0 : "No" 1 : "Yes" ]
+  length(float) : "Authored endpoint distance in map units" : "128"
+  constraintMode(choices) : "Length behavior" : "rope" = [ "rope" : "Rope (maximum length)" "rod" : "Rigid rod" ]
+  startOn(choices) : "Create this constraint on reset" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(237 147 193) size(-12 -12 -12, 12 12 12) = phys_spring : "Spring-configured distance constraint along local X"
+[
+  classname(string) : "Entity class" : "phys_spring"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render a coiled spring between its anchors" : 1 = [ 0 : "No" 1 : "Yes" ]
+  length(float) : "Authored endpoint distance in map units" : "128"
+  frequency(float) : "Spring frequency" : "4"
+  damping(float) : "Spring damping ratio" : "0.7"
+  maxForce(float) : "Maximum spring force" : "1000"
+  startOn(choices) : "Create this constraint on reset" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@PointClass color(173 173 230) size(-12 -12 -12, 12 12 12) = phys_constraint : "Rigid weld constraint"
+[
+  classname(string) : "Entity class" : "phys_constraint"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  attach1(target_destination) : "Required first body"
+  attach2(target_destination) : "Optional second body; omitted attaches to world"
+  angles(angle) : "Source-style pitch yaw roll" : "0 0 0"
+  renderable(choices) : "Render this constraint in the world" : 1 = [ 0 : "No" 1 : "Yes" ]
+  startOn(choices) : "Create this constraint on reset" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@SolidClass color(235 151 75) = func_conveyor : "Static compound surface motor"
+[
+  classname(string) : "Entity class" : "func_conveyor"
+  authoredId(string) : "Stable unique persistence identity"
+  targetname(target_source) : "Optional signal target name"
+  direction(vector) : "Map-space travel direction" : "1 0 0"
+  speed(float) : "Surface speed in map units per second" : "128"
+  friction(float) : "Surface friction" : "0.8"
+  startOn(choices) : "Begin enabled" : 1 = [ 0 : "No" 1 : "Yes" ]
+]
+
+@SolidClass color(157 111 224) = trigger_gravity : "Compound gravity-factor trigger volume"
+[
+  classname(string) : "Entity class" : "trigger_gravity"
+  gravityFactor(float) : "Multiplier applied to baseline gravity" : "0.5"
+  priority(float) : "Highest overlapping priority wins" : "0"
 ]
 
 @SolidClass color(105 190 155) = func_door : "Signal-driven kinematic sliding door"
@@ -54,9 +186,9 @@
   classname(string) : "Entity class" : "trigger_once"
   authoredId(string) : "Stable unique persistence identity"
   onEnterTarget(target_destination) : "Entity targetname to receive the enter input"
-  onEnterInput(string) : "Typed input sent when a player enters" : "trigger"
+  onEnterInput(choices) : "Typed input sent when a player enters" : "trigger" = [ "trigger" : "trigger" "open" : "open" "close" : "close" "play" : "play" "stop" : "stop" "enable" : "enable" "disable" : "disable" "toggle" : "toggle" "reverse" : "reverse" ]
   onExitTarget(target_destination) : "Entity targetname to receive the exit input"
-  onExitInput(string) : "Typed input sent when a player exits" : "trigger"
+  onExitInput(choices) : "Typed input sent when a player exits" : "trigger" = [ "trigger" : "trigger" "open" : "open" "close" : "close" "play" : "play" "stop" : "stop" "enable" : "enable" "disable" : "disable" "toggle" : "toggle" "reverse" : "reverse" ]
   wait(float) : "Minimum seconds between signals" : "0"
 ]
 
@@ -65,9 +197,9 @@
   classname(string) : "Entity class" : "trigger_multiple"
   authoredId(string) : "Stable unique persistence identity"
   onEnterTarget(target_destination) : "Entity targetname to receive the enter input"
-  onEnterInput(string) : "Typed input sent when a player enters" : "trigger"
+  onEnterInput(choices) : "Typed input sent when a player enters" : "trigger" = [ "trigger" : "trigger" "open" : "open" "close" : "close" "play" : "play" "stop" : "stop" "enable" : "enable" "disable" : "disable" "toggle" : "toggle" "reverse" : "reverse" ]
   onExitTarget(target_destination) : "Entity targetname to receive the exit input"
-  onExitInput(string) : "Typed input sent when a player exits" : "trigger"
+  onExitInput(choices) : "Typed input sent when a player exits" : "trigger" = [ "trigger" : "trigger" "open" : "open" "close" : "close" "play" : "play" "stop" : "stop" "enable" : "enable" "disable" : "disable" "toggle" : "toggle" "reverse" : "reverse" ]
   wait(float) : "Minimum seconds between signals" : "0.5"
 ]
 

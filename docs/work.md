@@ -27,9 +27,28 @@ scenarios, and protocol/ownership/presentation tests are active. The release
 matrix gates 16 players/128 props; 32 players/256 props remains a nonblocking
 stress report.
 
+Source-style physics contraptions are implemented as a vertical slice:
+
+- mapper joints compile to native revolute, prismatic, spherical, weld, and
+  configurable distance joints with authored local frames;
+- jointed graphs are fixed host authority and compiler-rejected when grabbable;
+- multi-brush conveyors use Box3D tangent velocity for bodies and player support;
+- compound gravity fields use deterministic priority and authority-local
+  evaluation;
+- enabled/reversed motor and conveyor state persists and replicates through the
+  existing protocol-v5 body flags;
+- compound sensors and moving bodies retain every convex brush child.
+- every joint mapper exposes default-on procedural presentation derived from its
+  compiled attachment frames;
+- fixed-authority bodies are directly interactive through exclusive claims:
+  browsers publish smoothed hit-point targets while Bun drives a native control
+  joint and keeps the complete graph authoritative.
+
 ## Active focus
 
-No protocol-v5 implementation work is intentionally deferred. Future protocol
-work should begin only from a measured failing budget or a product requirement;
+Breaking joints, pulley systems, wheel/suspension joints, runtime joint creation,
+whole-graph client ownership, and conveyor texture scrolling are deferred.
+Future protocol work should begin only from a measured failing budget or a
+product requirement;
 do not add prediction, reconciliation, extrapolation, collision ownership
 transfer, or speculative interest management.

@@ -25,6 +25,13 @@ export type PersistedButton = {
   readyAtTick: number;
 };
 
+export type PersistedPhysicsControl = {
+  kind: "physics-control";
+  authoredId: string;
+  enabled: boolean;
+  reversed: boolean;
+};
+
 export type PersistedPlayerState = {
   persistentId: string;
   position: Vec3;
@@ -39,7 +46,13 @@ export type PersistedPlayerState = {
 };
 
 export type PersistedGameState = {
-  entities: Array<PersistedLinearMover | PersistedTrigger | PersistedRelay | PersistedButton>;
+  entities: Array<
+    | PersistedLinearMover
+    | PersistedTrigger
+    | PersistedRelay
+    | PersistedButton
+    | PersistedPhysicsControl
+  >;
   delayedSignals: Array<{ target: string; dueTick: number }>;
 };
 
@@ -99,6 +112,10 @@ export function validatePersistedGameState(value: unknown): asserts value is Per
     } else if (entity.kind === "button") {
       exact(entity, ["kind", "authoredId", "readyAtTick"]);
       if (!tick(entity.readyAtTick)) throw new Error("persisted button is invalid");
+    } else if (entity.kind === "physics-control") {
+      exact(entity, ["kind", "authoredId", "enabled", "reversed"]);
+      if (typeof entity.enabled !== "boolean" || typeof entity.reversed !== "boolean")
+        throw new Error("persisted physics control is invalid");
     } else {
       throw new Error(`unknown persisted game entity kind ${entity.kind}`);
     }

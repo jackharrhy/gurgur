@@ -2,6 +2,10 @@ import { PROTOCOL_VERSION } from "./config";
 import type {
   ClientControlMessage,
   HelloMessage,
+  ManipulationChangedMessage,
+  ManipulationDeniedMessage,
+  ManipulationDropMessage,
+  ManipulationRequestMessage,
   OwnershipDeniedMessage,
   OwnershipRequestMessage,
   PingMessage,
@@ -37,6 +41,8 @@ export function decodeClientControl(text: string): ClientControlMessage {
   if (value.type === "rtc-answer") return rtcAnswer(value);
   if (value.type === "speak") return speak(value);
   if (value.type === "ownership-request") return ownershipRequest(value);
+  if (value.type === "manipulation-request") return manipulationRequest(value);
+  if (value.type === "manipulation-drop") return manipulationDrop(value);
   if (value.type === "use-request") return useRequest(value);
   throw new Error("unknown control packet type");
 }
@@ -48,7 +54,9 @@ export type ServerTextMessage =
   | WorldManifestMessage
   | SpeechMessage
   | SpeechRejectedMessage
-  | OwnershipDeniedMessage;
+  | OwnershipDeniedMessage
+  | ManipulationChangedMessage
+  | ManipulationDeniedMessage;
 
 export function decodeServerControl(text: string): ServerTextMessage {
   const value = parseControl(text);
@@ -59,6 +67,8 @@ export function decodeServerControl(text: string): ServerTextMessage {
   if (value.type === "speech") return speech(value);
   if (value.type === "speech-rejected") return speechRejected(value);
   if (value.type === "ownership-denied") return ownershipDenied(value);
+  if (value.type === "manipulation-changed") return manipulationChanged(value);
+  if (value.type === "manipulation-denied") return manipulationDenied(value);
   throw new Error("unknown control packet type");
 }
 
@@ -244,6 +254,52 @@ function ownershipRequest(value: RecordValue): OwnershipRequestMessage {
   return value as OwnershipRequestMessage;
 }
 
+function manipulationRequest(value: RecordValue): ManipulationRequestMessage {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "requestId",
+    "target",
+    "authorityVersion",
+    "localAnchor",
+    "holdDistance",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.target) ||
+    !safeInteger(value.authorityVersion, 0) ||
+    !vec3(value.localAnchor) ||
+    !finite(value.holdDistance) ||
+    value.holdDistance < 0.25 ||
+    value.holdDistance > 10
+  ) {
+    throw new Error("manipulation request fields are invalid");
+  }
+  return value as ManipulationRequestMessage;
+}
+
+function manipulationDrop(value: RecordValue): ManipulationDropMessage {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "target",
+    "authorityVersion",
+    "claimVersion",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !runtimeId(value.target) ||
+    !safeInteger(value.authorityVersion, 0) ||
+    !safeInteger(value.claimVersion, 1)
+  ) {
+    throw new Error("manipulation drop fields are invalid");
+  }
+  return value as ManipulationDropMessage;
+}
+
 function useRequest(value: RecordValue): UseRequestMessage {
   exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "target"]);
   if (
@@ -267,6 +323,43 @@ function ownershipDenied(value: RecordValue): OwnershipDeniedMessage {
     throw new Error("ownership denial fields are invalid");
   }
   return value as OwnershipDeniedMessage;
+}
+
+function manipulationChanged(value: RecordValue): ManipulationChangedMessage {
+  exact(value, [
+    "type",
+    "protocolVersion",
+    "worldEpoch",
+    "requestId",
+    "target",
+    "authorityVersion",
+    "claimVersion",
+    "manipulatorPlayerId",
+  ]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !nullableSafeInteger(value.requestId, 0) ||
+    !runtimeId(value.target) ||
+    !safeInteger(value.authorityVersion, 0) ||
+    !safeInteger(value.claimVersion, 1) ||
+    (value.manipulatorPlayerId !== null && !runtimeId(value.manipulatorPlayerId))
+  ) {
+    throw new Error("manipulation change fields are invalid");
+  }
+  return value as ManipulationChangedMessage;
+}
+
+function manipulationDenied(value: RecordValue): ManipulationDeniedMessage {
+  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "target", "reason"]);
+  if (
+    !safeInteger(value.worldEpoch, 0) ||
+    !safeInteger(value.requestId, 0) ||
+    !runtimeId(value.target) ||
+    !["stale", "unavailable", "out-of-range", "busy"].includes(value.reason as string)
+  ) {
+    throw new Error("manipulation denial fields are invalid");
+  }
+  return value as ManipulationDeniedMessage;
 }
 
 function rtcOffer(value: RecordValue): RtcOfferMessage {
@@ -345,6 +438,12 @@ function quat(value: unknown): boolean {
   if (!record(value)) return false;
   exact(value, ["x", "y", "z", "w"]);
   return finite(value.x) && finite(value.y) && finite(value.z) && finite(value.w);
+}
+
+function vec3(value: unknown): boolean {
+  if (!record(value)) return false;
+  exact(value, ["x", "y", "z"]);
+  return finite(value.x) && finite(value.y) && finite(value.z);
 }
 
 function record(value: unknown): value is RecordValue {

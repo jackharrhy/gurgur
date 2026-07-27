@@ -3,9 +3,14 @@ import {
   decodeWorldBundle as decodeEngineWorldBundle,
   encodeWorldBundle as encodeEngineWorldBundle,
   type DynamicBrushBody,
+  type JointFrame,
   type KinematicBrushBody,
   type LightPresentation,
+  type PrismaticMotor,
+  type Quat,
+  type RevoluteMotor,
   type SensorBrushBody,
+  type StaticBrushBody,
   type SpriteAssetId,
   type Vec3,
   type WorldBundle as EngineWorldBundle,
@@ -17,7 +22,16 @@ type EntityBase = {
   origin?: Vec3;
 };
 
-export type EntityInput = "trigger" | "open" | "close" | "play" | "stop";
+export type EntityInput =
+  | "trigger"
+  | "open"
+  | "close"
+  | "play"
+  | "stop"
+  | "enable"
+  | "disable"
+  | "toggle"
+  | "reverse";
 
 export type OutputConnection = {
   targetEntityIndices: number[];
@@ -34,7 +48,72 @@ export type PhysicsPropEntity = EntityBase & {
   authoredId: string;
   body: DynamicBrushBody;
   presentation: { kind: "brush"; transform: "body" };
-  interaction: "grab";
+  interaction: "grab" | "manipulate" | "none";
+  targetName?: string;
+};
+
+type PhysicsJointBase = EntityBase & {
+  kind: "physics-joint";
+  authoredId: string;
+  targetName?: string;
+  attachmentAEntityIndex: number;
+  attachmentBEntityIndex: number | null;
+  localFrameA: JointFrame;
+  localFrameB: JointFrame;
+  startEnabled: boolean;
+  body: null;
+  presentation:
+    | {
+        kind: "constraint";
+        style: "hinge" | "motor" | "slider" | "ball-socket" | "rope" | "rod" | "spring" | "weld";
+      }
+    | { kind: "none" };
+  interaction: "none";
+};
+
+export type PhysicsJointEntity = PhysicsJointBase & {
+  joint:
+    | {
+        kind: "revolute";
+        limit: { lowerAngle: number; upperAngle: number } | null;
+        motor: RevoluteMotor;
+      }
+    | {
+        kind: "prismatic";
+        limit: { lowerTranslation: number; upperTranslation: number } | null;
+        motor: PrismaticMotor;
+      }
+    | { kind: "spherical" }
+    | { kind: "weld" }
+    | {
+        kind: "distance";
+        mode: "rope" | "rod" | "spring";
+        length: number;
+        hertz: number;
+        dampingRatio: number;
+        maxForce: number;
+      };
+};
+
+export type SurfaceMotorEntity = EntityBase & {
+  kind: "surface-motor";
+  authoredId: string;
+  targetName?: string;
+  velocity: Vec3;
+  friction: number;
+  startEnabled: boolean;
+  body: StaticBrushBody;
+  presentation: { kind: "brush"; transform: "body" };
+  interaction: "none";
+};
+
+export type GravityFieldEntity = EntityBase & {
+  kind: "gravity-field";
+  factor: number;
+  priority: number;
+  body: SensorBrushBody;
+  presentation: { kind: "none" };
+  interaction: "none";
 };
 
 export type LinearMoverEntity = EntityBase & {
@@ -116,6 +195,9 @@ export type LightEntity = EntityBase & {
 
 export type CompiledGameEntity =
   | PhysicsPropEntity
+  | PhysicsJointEntity
+  | SurfaceMotorEntity
+  | GravityFieldEntity
   | LinearMoverEntity
   | TriggerEntity
   | RelayEntity
@@ -145,7 +227,56 @@ export function decodeCompiledGameEntities(value: unknown): CompiledGameEntity[]
         assertAuthoredId(record);
         requireBody(record.body, "dynamic-brush");
         requireBrushPresentation(record, "body");
-        requireInteraction(record, "grab");
+        if (
+          record.interaction !== "grab" &&
+          record.interaction !== "manipulate" &&
+          record.interaction !== "none"
+        )
+          throw new Error("world bundle physics prop interaction is invalid");
+        if (record.targetName !== undefined)
+          assertString(record.targetName, "world bundle physics prop targetName");
+        break;
+      case "physics-joint":
+        assertAuthoredId(record);
+        if (record.body !== null) throw new Error("world bundle physics joint cannot have a body");
+        if (
+          !isRecord(record.presentation) ||
+          (record.presentation.kind !== "none" && record.presentation.kind !== "constraint")
+        )
+          throw new Error("world bundle physics joint presentation is invalid");
+        requireInteraction(record, "none");
+        assertEntityIndex(record.attachmentAEntityIndex, "physics joint attachment A");
+        if (record.attachmentBEntityIndex !== null)
+          assertEntityIndex(record.attachmentBEntityIndex, "physics joint attachment B");
+        assertJointFrame(record.localFrameA, "physics joint local frame A");
+        assertJointFrame(record.localFrameB, "physics joint local frame B");
+        if (typeof record.startEnabled !== "boolean")
+          throw new Error("world bundle physics joint startEnabled must be boolean");
+        if (record.targetName !== undefined)
+          assertString(record.targetName, "world bundle physics joint targetName");
+        assertPhysicsJoint(record.joint);
+        break;
+      case "surface-motor":
+        assertAuthoredId(record);
+        requireBody(record.body, "static-brush");
+        requireBrushPresentation(record, "body");
+        requireInteraction(record, "none");
+        assertVec3(record.velocity, "world bundle surface motor velocity");
+        assertFiniteFields(record, ["friction"]);
+        if ((record.friction as number) < 0)
+          throw new Error("world bundle surface motor friction cannot be negative");
+        if (record.targetName !== undefined)
+          assertString(record.targetName, "world bundle surface motor targetName");
+        if (typeof record.startEnabled !== "boolean")
+          throw new Error("world bundle surface motor startEnabled must be boolean");
+        break;
+      case "gravity-field":
+        requireBody(record.body, "sensor-brush");
+        requireNoPresentation(record);
+        requireInteraction(record, "none");
+        assertFiniteFields(record, ["factor", "priority"]);
+        if ((record.factor as number) < 0 || !Number.isSafeInteger(record.priority))
+          throw new Error("world bundle gravity field factor or priority is invalid");
         break;
       case "linear-mover":
         assertAuthoredId(record);
@@ -224,6 +355,27 @@ export function decodeCompiledGameEntities(value: unknown): CompiledGameEntity[]
   }
   const compiledEntities = entities as CompiledGameEntity[];
   for (const entity of compiledEntities) {
+    if (entity.kind === "physics-joint") {
+      const attachmentA = compiledEntities[entity.attachmentAEntityIndex];
+      const attachmentB =
+        entity.attachmentBEntityIndex === null
+          ? null
+          : compiledEntities[entity.attachmentBEntityIndex];
+      if (
+        !attachmentA?.body ||
+        attachmentA.body.kind === "sensor-brush" ||
+        (entity.attachmentBEntityIndex !== null &&
+          (!attachmentB?.body || attachmentB.body.kind === "sensor-brush"))
+      )
+        throw new Error("world bundle physics joint attachment is invalid");
+      if (attachmentA.body.kind !== "dynamic-brush" && attachmentB?.body?.kind !== "dynamic-brush")
+        throw new Error("world bundle physics joint requires a dynamic attachment");
+      for (const attachment of [attachmentA, attachmentB]) {
+        if (attachment?.body?.kind === "dynamic-brush" && attachment.interaction === "grab")
+          throw new Error("world bundle jointed body cannot be grabbable");
+      }
+      continue;
+    }
     if (entity.kind !== "trigger") continue;
     for (const connection of [entity.outputs.enter, entity.outputs.exit]) {
       if (!connection) continue;
@@ -248,6 +400,8 @@ export function entityInputDomain(
   if (entity.kind === "linear-mover")
     return input === "trigger" || input === "open" || input === "close" ? "game" : null;
   if (entity.kind === "relay") return input === "trigger" ? "game" : null;
+  if (entity.kind === "surface-motor" || entity.kind === "physics-joint")
+    return ["trigger", "enable", "disable", "toggle", "reverse"].includes(input) ? "game" : null;
   return null;
 }
 
@@ -304,7 +458,121 @@ function connectionDomain(
 }
 
 function entityInput(value: unknown): value is EntityInput {
-  return ["trigger", "open", "close", "play", "stop"].includes(String(value));
+  return [
+    "trigger",
+    "open",
+    "close",
+    "play",
+    "stop",
+    "enable",
+    "disable",
+    "toggle",
+    "reverse",
+  ].includes(String(value));
+}
+
+function assertEntityIndex(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${label} is invalid`);
+}
+
+function assertJointFrame(value: unknown, label: string): asserts value is JointFrame {
+  if (!isRecord(value)) throw new Error(`${label} is invalid`);
+  assertVec3(value.position, `${label} position`);
+  assertQuat(value.rotation, `${label} rotation`);
+}
+
+function assertQuat(value: unknown, label: string): asserts value is Quat {
+  if (
+    !isRecord(value) ||
+    !["x", "y", "z", "w"].every(
+      (field) => typeof value[field] === "number" && Number.isFinite(value[field]),
+    )
+  )
+    throw new Error(`${label} must contain finite x, y, z, and w`);
+}
+
+function assertPhysicsJoint(value: unknown): void {
+  if (!isRecord(value) || typeof value.kind !== "string")
+    throw new Error("world bundle physics joint definition is invalid");
+  if (value.kind === "revolute") {
+    if (value.limit !== null) {
+      if (!isRecord(value.limit)) throw new Error("world bundle revolute joint limit is invalid");
+      assertFiniteFields(value.limit, ["lowerAngle", "upperAngle"]);
+      if ((value.limit.lowerAngle as number) > (value.limit.upperAngle as number))
+        throw new Error("world bundle revolute joint limits are reversed");
+    }
+    assertRevoluteMotor(value.motor);
+    return;
+  }
+  if (value.kind === "prismatic") {
+    if (value.limit !== null) {
+      if (!isRecord(value.limit)) throw new Error("world bundle prismatic joint limit is invalid");
+      assertFiniteFields(value.limit, ["lowerTranslation", "upperTranslation"]);
+      if ((value.limit.lowerTranslation as number) > (value.limit.upperTranslation as number))
+        throw new Error("world bundle prismatic joint limits are reversed");
+    }
+    assertPrismaticMotor(value.motor);
+    return;
+  }
+  if (value.kind === "distance") {
+    if (!["rope", "rod", "spring"].includes(String(value.mode)))
+      throw new Error("world bundle distance joint mode is invalid");
+    assertFiniteFields(value, ["length", "hertz", "dampingRatio", "maxForce"]);
+    if (
+      (value.length as number) <= 0 ||
+      (value.hertz as number) < 0 ||
+      (value.dampingRatio as number) < 0 ||
+      (value.maxForce as number) < 0
+    )
+      throw new Error("world bundle distance joint parameters are invalid");
+    return;
+  }
+  if (value.kind !== "spherical" && value.kind !== "weld")
+    throw new Error("world bundle physics joint kind is invalid");
+}
+
+function assertRevoluteMotor(value: unknown): void {
+  if (!isRecord(value) || typeof value.mode !== "string")
+    throw new Error("world bundle revolute motor is invalid");
+  if (value.mode === "none") return;
+  if (value.mode === "friction") {
+    assertFiniteFields(value, ["maxTorque"]);
+    if ((value.maxTorque as number) < 0)
+      throw new Error("world bundle revolute friction torque is invalid");
+    return;
+  }
+  if (value.mode === "target-angle") {
+    assertFiniteFields(value, ["targetAngle", "hertz", "dampingRatio"]);
+    if ((value.hertz as number) < 0 || (value.dampingRatio as number) < 0)
+      throw new Error("world bundle revolute spring tuning is invalid");
+    return;
+  }
+  if (value.mode === "target-velocity") {
+    assertFiniteFields(value, ["targetVelocity", "maxTorque"]);
+    if ((value.maxTorque as number) < 0)
+      throw new Error("world bundle revolute motor torque is invalid");
+    return;
+  }
+  throw new Error("world bundle revolute motor mode is invalid");
+}
+
+function assertPrismaticMotor(value: unknown): void {
+  if (!isRecord(value) || typeof value.mode !== "string")
+    throw new Error("world bundle prismatic motor is invalid");
+  if (value.mode === "none") return;
+  if (value.mode === "target-position") {
+    assertFiniteFields(value, ["targetPosition", "hertz", "dampingRatio"]);
+    if ((value.hertz as number) < 0 || (value.dampingRatio as number) < 0)
+      throw new Error("world bundle prismatic spring tuning is invalid");
+    return;
+  }
+  if (value.mode === "target-velocity") {
+    assertFiniteFields(value, ["targetVelocity", "maxForce"]);
+    if ((value.maxForce as number) < 0)
+      throw new Error("world bundle prismatic motor force is invalid");
+    return;
+  }
+  throw new Error("world bundle prismatic motor mode is invalid");
 }
 
 function requireBody(value: unknown, kind: string): void {

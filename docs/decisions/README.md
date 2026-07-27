@@ -16,6 +16,8 @@ specification tentative.
 - [`0017-loopback-development-mcp.md`](0017-loopback-development-mcp.md)
 - [`0018-positional-lintalker-speech.md`](0018-positional-lintalker-speech.md)
 - [`0019-object-ownership-netcode.md`](0019-object-ownership-netcode.md)
+- [`0020-source-style-physics-contraptions.md`](0020-source-style-physics-contraptions.md)
+- [`0021-fixed-authority-contraption-manipulation.md`](0021-fixed-authority-contraption-manipulation.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

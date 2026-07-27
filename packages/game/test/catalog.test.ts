@@ -74,6 +74,7 @@ describe("typed entity catalog", () => {
         "env_sprite",
         "ambient_audio",
         "func_button",
+        "func_conveyor",
         "func_door",
         "func_physics",
         "func_platform",
@@ -84,6 +85,14 @@ describe("typed entity catalog", () => {
         "light_point",
         "light_spot",
         "logic_relay",
+        "phys_ballsocket",
+        "phys_constraint",
+        "phys_hinge",
+        "phys_lengthconstraint",
+        "phys_motor",
+        "phys_slideconstraint",
+        "phys_spring",
+        "trigger_gravity",
         "trigger_multiple",
         "trigger_once",
         "worldspawn",
@@ -433,6 +442,154 @@ ${cube}
         "missing-exit.map",
       ),
     ).toThrow("listener outputs must pair play on enter with stop on exit");
+  });
+
+  test("compiles Source-style contraptions into closed joint, surface, and gravity archetypes", () => {
+    const body = (id: string, targetname: string) => `{
+"classname" "func_physics"
+"authoredId" "${id}"
+"targetname" "${targetname}"
+"grabbable" "0"
+"gravityScale" "0.75"
+${cube}
+}`;
+    const point = (classname: string, id: string, extra: string) => `{
+"classname" "${classname}"
+"authoredId" "${id}"
+"origin" "8 8 8"
+"angles" "0 0 0"
+${extra.replaceAll("\\n", "\n")}
+}`;
+    const bundle = compileWorld(
+      baseMap(`
+${body("body.a", "body_a")}
+${body("body.b", "body_b")}
+${point("phys_hinge", "joint.hinge", '"attach1" "body_a"\\n"attach2" "body_b"\\n"motorMode" "target-velocity"')}
+${point("phys_motor", "joint.motor", '"attach1" "body_a"')}
+${point("phys_slideconstraint", "joint.slide", '"attach1" "body_a"\\n"attach2" "body_b"')}
+${point("phys_ballsocket", "joint.ball", '"attach1" "body_a"\\n"attach2" "body_b"')}
+${point("phys_lengthconstraint", "joint.rope", '"attach1" "body_a"\\n"attach2" "body_b"\\n"length" "64"')}
+${point("phys_spring", "joint.spring", '"attach1" "body_a"\\n"attach2" "body_b"\\n"length" "96"')}
+${point("phys_constraint", "joint.weld", '"attach1" "body_a"\\n"attach2" "body_b"\\n"renderable" "0"')}
+{
+"classname" "func_conveyor"
+"authoredId" "conveyor.main"
+"direction" "1 0 0"
+"speed" "128"
+${cube}
+${cube}
+}
+{
+"classname" "trigger_gravity"
+"gravityFactor" "0.25"
+"priority" "4"
+${cube}
+${cube}
+}`),
+      "contraptions.map",
+    );
+    expect(bundle.entities.map((entity) => entity.kind)).toEqual([
+      "physics-prop",
+      "physics-prop",
+      "physics-joint",
+      "physics-joint",
+      "physics-joint",
+      "physics-joint",
+      "physics-joint",
+      "physics-joint",
+      "physics-joint",
+      "surface-motor",
+      "gravity-field",
+    ]);
+    const joints = bundle.entities.filter((entity) => entity.kind === "physics-joint");
+    expect(
+      bundle.entities
+        .filter((entity) => entity.kind === "physics-prop")
+        .map((entity) => entity.interaction),
+    ).toEqual(["manipulate", "manipulate"]);
+    expect(joints.map((entity) => entity.joint.kind)).toEqual([
+      "revolute",
+      "revolute",
+      "prismatic",
+      "spherical",
+      "distance",
+      "distance",
+      "weld",
+    ]);
+    expect(joints.map((entity) => entity.presentation)).toEqual([
+      { kind: "constraint", style: "hinge" },
+      { kind: "constraint", style: "motor" },
+      { kind: "constraint", style: "slider" },
+      { kind: "constraint", style: "ball-socket" },
+      { kind: "constraint", style: "rope" },
+      { kind: "constraint", style: "spring" },
+      { kind: "none" },
+    ]);
+    expect(joints[0]).toMatchObject({
+      attachmentAEntityIndex: 0,
+      attachmentBEntityIndex: 1,
+      localFrameA: {
+        position: { x: 0, y: 0, z: 0 },
+      },
+    });
+    expect(joints[0]!.localFrameA.rotation.x).toBeCloseTo(-Math.SQRT1_2);
+    expect(joints[0]!.localFrameA.rotation.w).toBeCloseTo(Math.SQRT1_2);
+    expect(bundle.entities[9]).toMatchObject({
+      velocity: { x: 3.2512, y: 0, z: 0 },
+      body: { kind: "static-brush", brushIndices: [3, 4] },
+    });
+    expect(bundle.entities[10]).toMatchObject({
+      factor: 0.25,
+      priority: 4,
+      body: { kind: "sensor-brush", brushIndices: [5, 6] },
+    });
+  });
+
+  test("rejects ambiguous and grab-leased constraint graphs", () => {
+    expect(() =>
+      compileWorld(
+        baseMap(`
+{
+"classname" "func_physics"
+"authoredId" "body.grabbable"
+"targetname" "body"
+${cube}
+}
+{
+"classname" "phys_hinge"
+"authoredId" "joint.invalid"
+"origin" "8 8 8"
+"attach1" "body"
+}`),
+        "grabbable-joint.map",
+      ),
+    ).toThrow("must explicitly set grabbable 0");
+    expect(() =>
+      compileWorld(
+        baseMap(`
+{
+"classname" "func_physics"
+"authoredId" "body.a"
+"targetname" "shared"
+"grabbable" "0"
+${cube}
+}
+{
+"classname" "func_physics"
+"authoredId" "body.b"
+"targetname" "shared"
+"grabbable" "0"
+${cube}
+}
+{
+"classname" "phys_motor"
+"authoredId" "joint.ambiguous"
+"origin" "8 8 8"
+"attach1" "shared"
+}`),
+        "ambiguous-joint.map",
+      ),
+    ).toThrow("must resolve to exactly one entity");
   });
 });
 

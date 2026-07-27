@@ -8,9 +8,10 @@ unowned object is simulated by the host. The primary pinned reference is
 [sbox-public `GameObject.Network.cs` at `2053455`](https://github.com/Facepunch/sbox-public/blob/2053455813f24165d614cdeaf561082eecc86990/engine/Sandbox.Engine/Scene/GameObject/GameObject.Network.cs#L895-L961).
 
 [Facepunch/sandbox's pinned physgun `GrabState`](https://github.com/Facepunch/sandbox/blob/1cee1dd28b6de82b21afdcecdbc3f34c0047152c/Code/Weapons/PhysGun/Physgun.cs#L20-L68)
-is an interaction-state reference only. Gurgur keeps its centre-of-mass,
-obstruction-aware carry controller and does not adopt the physgun's arbitrary
-hit offset or authority policy.
+is the fixed-authority contraption-manipulation reference. Gurgur retains its
+centre-of-mass, obstruction-aware controller for leased loose props, while
+fixed contraptions capture the selected hit offset and are pulled by a
+host-created control joint.
 
 ## Authority registry
 
@@ -23,6 +24,7 @@ Every runtime descriptor contains `ownerPlayerId`, `authorityVersion`, and
 | Dynamic grabbable map/stress prop | Bun               | `grab-lease`    |
 | Unheld prop                       | Bun               | `grab-lease`    |
 | Mechanism, trigger, mover, sensor | Bun               | `fixed`         |
+| Joint-connected body/contraption  | Bun               | `fixed`         |
 | MCP/diagnostic actor              | Bun               | `fixed`         |
 
 Exactly one peer simulates each object. Ordinary contact does not change the
@@ -51,11 +53,13 @@ Reliable WebSocket traffic carries:
 - world manifest and complete binary bootstrap;
 - lifecycle create/remove;
 - ownership request, grant/denial, drop, and reliable owner discontinuity;
+- fixed-authority manipulation request, grant/denial, and drop;
 - use requests, reset/world replacement, speech, and ping/pong.
 
 Disposable unordered WebRTC traffic uses two channels:
 
-- `gurgur-owner-v5`: browser `OwnedState` and recipient `StateAck`;
+- `gurgur-owner-v5`: browser `OwnedState`, recipient `StateAck`, and fixed
+  51-byte `ManipulationState` targets;
 - `gurgur-state-v5`: Bun-relayed `StateCluster`.
 
 Binary state uses fixed tags, float32 transforms/controller values, presence
@@ -67,6 +71,15 @@ backpressure instead of queueing it reliably.
 
 There is no spatial interest management in protocol v5. Every peer receives all
 current objects.
+
+Joint definitions, conveyor classnames, and gravity-volume overlap state are not
+protocol concepts. Jointed bodies replicate through the existing body state as
+fixed-authority kinematic proxies. Conveyors reserve the body-state `active` and
+`reversed` flags; reliable bootstrap and ordinary body deltas carry those flags,
+and a device-state change advances that object's sequence. Browser workers use
+the compiled generic surface velocity plus flags for local player and held-prop
+contacts. Gravity volumes are immutable compiled world data and are evaluated
+locally by the current physics authority.
 
 ## Delta baselines and acknowledgements
 
@@ -103,6 +116,29 @@ Release sends one reliable complete pose plus linear/angular velocity. The
 browser immediately converts back to a proxy. Bun applies the final state,
 increments authority version, resumes dynamic simulation, and broadcasts the
 atomic change. Held props cannot be stolen.
+
+## Fixed-authority manipulation claim
+
+A `func_physics` with `grabbable 0` and `manipulable 1` remains unowned and
+dynamically simulated by Bun, including when it belongs to a joint graph. A
+primary press sends a reliable request containing target identity, current
+authority version, captured body-local hit point, and hold distance. Bun
+validates epoch, exact version, fixed policy, compiled capability, finite
+values, reach, and claim availability. One player and one body may participate
+in at most one claim; the first valid request wins.
+
+The browser never publishes a body transform for this path. At 30 Hz it sends a
+51-byte disposable target containing the claim version, uint16 target sequence,
+desired world anchor, and desired rotation. Bun accepts it only from the
+claiming player at the current object/claim versions, rejects duplicate or old
+sequences across wrap, and applies it to a private native control joint. The
+ordinary host-owned body state remains the only replicated physics result.
+
+Release is reliable and removes the control joint without an authority or body
+type change. Missing target state times out after 1.5 seconds. Transport loss,
+respawn, lifecycle removal, and reset also release immediately. An active claim
+uses the existing held network flag for interaction availability, but claim
+version is independent of `authorityVersion`.
 
 ## Validation and recovery
 

@@ -28,6 +28,15 @@ export type PropGrab = {
   errorSeconds: number;
 };
 
+export type HostManipulationTarget = {
+  target: RuntimeId;
+  localAnchor: Vec3;
+  distance: number;
+  relativeRotation: Quat;
+  targetPosition: Vec3;
+  targetRotation: Quat;
+};
+
 export function createPropGrab(
   engine: GameEngine,
   target: RuntimeId,
@@ -78,6 +87,43 @@ export function stepPropGrab(engine: GameEngine, grab: PropGrab, pose: GrabPose)
       ? grab.errorSeconds + engine.dt
       : Math.max(0, grab.errorSeconds - engine.dt * 2);
   return !tooFar && grab.errorSeconds < ERROR_GRACE_SECONDS;
+}
+
+export function createHostManipulationTarget(
+  engine: GameEngine,
+  target: RuntimeId,
+  localAnchor: Vec3,
+  pose: GrabPose,
+  holdDistance: number,
+): HostManipulationTarget {
+  const body = engine.bodies.state(target);
+  return {
+    target: { ...target },
+    localAnchor: { ...localAnchor },
+    distance: clamp(holdDistance, MIN_DISTANCE, MAX_DISTANCE),
+    relativeRotation: multiplyQuat(inverseQuat(yawRotation(pose.yaw)), body.rotation),
+    targetPosition: add(body.position, rotateVector(body.rotation, localAnchor)),
+    targetRotation: { ...body.rotation },
+  };
+}
+
+export function stepHostManipulationTarget(
+  engine: GameEngine,
+  target: HostManipulationTarget,
+  pose: GrabPose,
+): void {
+  const desiredPosition = carryTarget(engine, pose, target.target, target.distance);
+  const desiredRotation = multiplyQuat(yawRotation(pose.yaw), target.relativeRotation);
+  target.targetPosition = moveToward(
+    target.targetPosition,
+    desiredPosition,
+    TARGET_SPEED * engine.dt,
+  );
+  target.targetRotation = rotateToward(
+    target.targetRotation,
+    desiredRotation,
+    TARGET_ANGULAR_SPEED * engine.dt,
+  );
 }
 
 export function grabDistanceFor(bundle: WorldBundle, entityIndex: number): number {
@@ -138,6 +184,17 @@ function multiplyQuat(a: Quat, b: Quat): Quat {
     y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
     z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
     w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+function rotateVector(rotation: Quat, value: Vec3): Vec3 {
+  const tx = 2 * (rotation.y * value.z - rotation.z * value.y);
+  const ty = 2 * (rotation.z * value.x - rotation.x * value.z);
+  const tz = 2 * (rotation.x * value.y - rotation.y * value.x);
+  return {
+    x: value.x + rotation.w * tx + rotation.y * tz - rotation.z * ty,
+    y: value.y + rotation.w * ty + rotation.z * tx - rotation.x * tz,
+    z: value.z + rotation.w * tz + rotation.x * ty - rotation.y * tx,
   };
 }
 

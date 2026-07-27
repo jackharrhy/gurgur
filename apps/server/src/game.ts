@@ -5,6 +5,7 @@ import {
   stepPlayerController,
   type GameEngine,
   type GameSimulation,
+  type HostMechanismEngine,
   type WorldBundle,
   type WorldMessage,
 } from "@gurgur/game";
@@ -20,6 +21,10 @@ import {
   cloneNetworkState,
   isNewerSequence16,
   type InputCommand,
+  type ManipulationChangedMessage,
+  type ManipulationDropMessage,
+  type ManipulationRequestMessage,
+  type ManipulationStatePacket,
   type NetworkBodyState,
   type NetworkObjectState,
   type OwnershipChangedPacket,
@@ -78,6 +83,7 @@ export class WorldHost {
   readonly #store: WorldStore;
   readonly #onState: (states: NetworkObjectState[]) => void;
   readonly #onWorld: (world: WorldMessage) => void;
+  readonly #onManipulation: (message: ManipulationChangedMessage) => void;
   #runtimeBodies: RuntimeBody[] = [];
   #simulation!: GameSimulation;
   #saveRequested = false;
@@ -94,6 +100,7 @@ export class WorldHost {
   readonly #devPlayers = new Map<string, DevPlayer>();
   #devBodySequence = 0;
   readonly #lastPublishedBodies = new Map<string, NetworkBodyState>();
+  readonly #manipulationVersions = new Map<string, number>();
 
   private constructor(
     physics: PhysicsWorld,
@@ -101,6 +108,7 @@ export class WorldHost {
     store: WorldStore,
     onState: (states: NetworkObjectState[]) => void,
     onWorld: (world: WorldMessage) => void,
+    onManipulation: (message: ManipulationChangedMessage) => void,
     worldEpoch: number,
     serverTick: number,
     playerSpawn: Vec3 | null,
@@ -110,6 +118,7 @@ export class WorldHost {
     this.#store = store;
     this.#onState = onState;
     this.#onWorld = onWorld;
+    this.#onManipulation = onManipulation;
     this.#worldEpoch = worldEpoch;
     this.#serverTick = serverTick;
     this.#playerSpawn = playerSpawn ? { ...playerSpawn } : null;
@@ -119,10 +128,17 @@ export class WorldHost {
     store: WorldStore,
     onState: (states: NetworkObjectState[]) => void,
     onWorld: (world: WorldMessage) => void,
-    options: { playerSpawn?: Vec3; extraDynamicBodies?: number; worldBundle?: WorldBundle } = {},
+    options: {
+      playerSpawn?: Vec3;
+      extraDynamicBodies?: number;
+      worldBundle?: WorldBundle;
+      onManipulationChanged?: (message: ManipulationChangedMessage) => void;
+    } = {},
   ): Promise<WorldHost> {
     const bundle = options.worldBundle ?? WORLD_BUNDLE;
-    const physics = await PhysicsWorld.create({ gravity: bundle.settings.gravity });
+    const physics = await PhysicsWorld.create({
+      gravity: bundle.settings.gravity,
+    });
     physics.createStaticMesh({
       vertices: bundle.staticCollision.vertices,
       triangles: bundle.staticCollision.triangles,
@@ -134,6 +150,7 @@ export class WorldHost {
       store,
       onState,
       onWorld,
+      options.onManipulationChanged ?? (() => {}),
       restored?.worldEpoch ?? 1,
       restored?.serverTick ?? 0,
       options.playerSpawn ? { ...options.playerSpawn } : null,
@@ -190,7 +207,9 @@ export class WorldHost {
   }
 
   connectPlayer(persistentId: string = crypto.randomUUID()): RuntimeId {
-    return this.#simulation.players.connect(persistentId, undefined, { externallyOwned: true });
+    return this.#simulation.players.connect(persistentId, undefined, {
+      externallyOwned: true,
+    });
   }
 
   disconnectPlayer(id: RuntimeId): boolean {
@@ -230,6 +249,66 @@ export class WorldHost {
       );
     }
     return true;
+  }
+
+  requestManipulation(
+    owner: RuntimeId,
+    request: ManipulationRequestMessage,
+  ): ManipulationChangedMessage | "stale" | "unavailable" | "out-of-range" | "busy" {
+    if (request.worldEpoch !== this.#worldEpoch) return "stale";
+    const body = this.#body(request.target);
+    const entity = body ? this.#bundle.entities[body.entityIndex] : null;
+    if (!body || body.authorityVersion !== request.authorityVersion || body.ownerPlayerId !== null)
+      return "stale";
+    if (
+      body.transferPolicy !== "fixed" ||
+      entity?.kind !== "physics-prop" ||
+      entity.interaction !== "manipulate" ||
+      !Number.isFinite(request.holdDistance) ||
+      request.holdDistance < 0.25 ||
+      request.holdDistance > 10
+    )
+      return "unavailable";
+    const claimVersion = nextVersion(this.#manipulationVersions.get(key(body.id)) ?? 0);
+    const result = this.#simulation.beginManipulation(
+      owner,
+      request.target,
+      claimVersion,
+      request.localAnchor,
+    );
+    if (result !== true) return result;
+    this.#manipulationVersions.set(key(body.id), claimVersion);
+    this.#saveRequested = true;
+    return this.#manipulationChanged(body, request.requestId, claimVersion, owner);
+  }
+
+  acceptManipulationState(owner: RuntimeId, state: ManipulationStatePacket): boolean {
+    if (state.worldEpoch !== this.#worldEpoch) return false;
+    const body = this.#body(state.target);
+    if (!body || state.authorityVersion !== body.authorityVersion) return false;
+    return this.#simulation.updateManipulation(owner, state);
+  }
+
+  dropManipulation(
+    owner: RuntimeId,
+    request: ManipulationDropMessage,
+  ): ManipulationChangedMessage | null {
+    if (request.worldEpoch !== this.#worldEpoch) return null;
+    const body = this.#body(request.target);
+    if (!body || request.authorityVersion !== body.authorityVersion) return null;
+    const claim = this.#simulation.endManipulation(owner, request.target, request.claimVersion);
+    if (!claim) return null;
+    this.#saveRequested = true;
+    return this.#manipulationChanged(body, null, claim.claimVersion, null);
+  }
+
+  endManipulationsForPlayer(owner: RuntimeId): ManipulationChangedMessage[] {
+    const claims = this.#simulation.endManipulationsForPlayer(owner);
+    if (claims.length > 0) this.#saveRequested = true;
+    return claims.flatMap((claim) => {
+      const body = this.#body(claim.target);
+      return body ? [this.#manipulationChanged(body, null, claim.claimVersion, null)] : [];
+    });
   }
 
   requestOwnership(
@@ -341,7 +420,11 @@ export class WorldHost {
     const playerPosition = this.playerPosition(playerId);
     const body = this.#body(target);
     if (!playerPosition || !body) return false;
-    const origin = { x: playerPosition.x, y: playerPosition.y + 0.4, z: playerPosition.z };
+    const origin = {
+      x: playerPosition.x,
+      y: playerPosition.y + 0.4,
+      z: playerPosition.z,
+    };
     const targetPosition = this.#physics.state(body.handle).position;
     const displacement = {
       x: targetPosition.x - origin.x,
@@ -595,6 +678,13 @@ export class WorldHost {
       const tickStartedAt = performance.now();
       this.#submitDevPlayerInputs();
       this.#simulation.step();
+      for (const claim of this.#simulation.takeTimedOutManipulations()) {
+        const body = this.#body(claim.target);
+        if (body) {
+          this.#saveRequested = true;
+          this.#onManipulation(this.#manipulationChanged(body, null, claim.claimVersion, null));
+        }
+      }
       const events = this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       this.#processPostPhysics(events);
       this.#serverTick += 1;
@@ -614,15 +704,18 @@ export class WorldHost {
 
   snapshot(): Snapshot {
     const players = this.#simulation.players.views();
-    const bodies = this.#runtimeBodies.map(({ handle, ownerPlayerId }) => {
+    const bodies = this.#runtimeBodies.map(({ handle, ownerPlayerId, entityIndex }) => {
       const identity = key(handle);
       const grabbed = players.some(
         (player) => player.grabTarget && key(player.grabTarget) === identity,
       );
+      const manipulated = this.#simulation.manipulationOwner(handle) !== null;
       const { awake: _awake, ...state } = this.#physics.state(handle);
       return {
         ...state,
-        flags: ownerPlayerId || grabbed ? NETWORK_FLAG_HELD : 0,
+        flags:
+          (ownerPlayerId || grabbed || manipulated ? NETWORK_FLAG_HELD : 0) |
+          this.#simulation.networkFlags(entityIndex),
       };
     });
     return {
@@ -680,6 +773,7 @@ export class WorldHost {
     this.#saveRequested = false;
     this.#devBodyKeys.clear();
     this.#lastPublishedBodies.clear();
+    this.#manipulationVersions.clear();
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
@@ -725,18 +819,20 @@ export class WorldHost {
   #createGameSimulation(restored: PersistedWorld | null): GameSimulation {
     return createGameSimulation({
       engine: this.#gameEngine(),
+      mechanisms: this.#mechanismEngine(),
       bundle: this.#bundle,
       restored: restored?.gameState ?? null,
       players: {
         restored: restored?.players ?? [],
         ...(this.#playerSpawn ? { spawnPosition: this.#playerSpawn } : {}),
-        stepController: (state, input) =>
+        stepController: (state, input, proxy) =>
           stepPlayerController(
             this.#physics,
             state,
             input,
             PHYSICS_DT,
-            Math.max(0, -this.#bundle.settings.gravity.y),
+            Math.max(0, -this.#bundle.settings.gravity.y) *
+              (this.#simulation?.gravityFactor(proxy) ?? 1),
           ),
       },
     });
@@ -774,10 +870,31 @@ export class WorldHost {
         this.#physics.destroy(id);
       },
       driveBodyToTarget: (id, options) =>
-        this.#physics.driveBodyToTarget(id, { ...options, seconds: PHYSICS_DT }),
+        this.#physics.driveBodyToTarget(id, {
+          ...options,
+          seconds: PHYSICS_DT,
+        }),
       requestSave: () => {
         this.#saveRequested = true;
       },
+    };
+  }
+
+  #mechanismEngine(): HostMechanismEngine {
+    return {
+      createControl: (options) => this.#physics.createControlConstraint(options),
+      setControlTarget: (id, position, rotation) =>
+        this.#physics.setControlTarget(id, position, rotation),
+      destroyConstraint: (id) => this.#physics.destroyConstraint(id),
+      createRevolute: (options) => this.#physics.createRevoluteConstraint(options),
+      setRevoluteMotor: (id, motor) => this.#physics.setRevoluteMotor(id, motor),
+      createPrismatic: (options) => this.#physics.createPrismaticConstraint(options),
+      setPrismaticMotor: (id, motor) => this.#physics.setPrismaticMotor(id, motor),
+      createSpherical: (options) => this.#physics.createSphericalConstraint(options),
+      createWeld: (options) => this.#physics.createWeldConstraint(options),
+      createDistance: (options) => this.#physics.createConfigurableDistanceConstraint(options),
+      setSurfaceVelocity: (id, velocity) => this.#physics.setSurfaceVelocity(id, velocity),
+      setGravityScale: (id, scale) => this.#physics.setGravityScale(id, scale),
     };
   }
 
@@ -797,7 +914,12 @@ export class WorldHost {
       id: { ...body.id },
       authorityVersion: body.authorityVersion,
       stateSequence: body.stateSequence,
-      flags: (body.ownerPlayerId ? NETWORK_FLAG_HELD : 0) | (awake ? NETWORK_FLAG_AWAKE : 0),
+      flags:
+        (body.ownerPlayerId || this.#simulation.manipulationOwner(body.id)
+          ? NETWORK_FLAG_HELD
+          : 0) |
+        (awake ? NETWORK_FLAG_AWAKE : 0) |
+        this.#simulation.networkFlags(body.entityIndex),
     };
     const previous = this.#lastPublishedBodies.get(key(body.id));
     if (
@@ -810,6 +932,24 @@ export class WorldHost {
       this.#lastPublishedBodies.set(key(body.id), cloneNetworkState(candidate) as NetworkBodyState);
     }
     return candidate;
+  }
+
+  #manipulationChanged(
+    body: RuntimeBody,
+    requestId: number | null,
+    claimVersion: number,
+    manipulatorPlayerId: RuntimeId | null,
+  ): ManipulationChangedMessage {
+    return {
+      type: "manipulation-changed",
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch: this.#worldEpoch,
+      requestId,
+      target: { ...body.id },
+      authorityVersion: body.authorityVersion,
+      claimVersion,
+      manipulatorPlayerId: manipulatorPlayerId ? { ...manipulatorPlayerId } : null,
+    };
   }
 
   #canAcceptOwnedState(owner: RuntimeId, state: NetworkObjectState): boolean {

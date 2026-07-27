@@ -10,6 +10,7 @@ import {
   clusterStateDeltas,
   createStateDelta,
   decodeBootstrapState,
+  decodeManipulationState,
   decodeOwnerCommit,
   decodeOwnedState,
   decodeOwnershipChanged,
@@ -17,6 +18,7 @@ import {
   decodeStateAck,
   decodeStateCluster,
   encodeBootstrapState,
+  encodeManipulationState,
   encodeOwnerCommit,
   encodeOwnedState,
   encodeOwnershipChanged,
@@ -105,6 +107,43 @@ describe("protocol-v5 network state codecs", () => {
       state: body(),
     };
     expectState(decodeOwnershipDrop(encodeOwnershipDrop(dropped)).state, body());
+  });
+
+  test("round-trips a bounded disposable manipulation target", () => {
+    const state = {
+      worldEpoch: 11,
+      target: body().id,
+      authorityVersion: body().authorityVersion,
+      claimVersion: 9,
+      stateSequence: 65_535,
+      targetPosition: { x: 1.25, y: 2.5, z: -3.75 },
+      targetRotation: { x: 0, y: 0.25, z: 0, w: 0.968_245_8 },
+    };
+    const encoded = encodeManipulationState(state);
+    expect(encoded.byteLength).toBe(51);
+    const decoded = decodeManipulationState(encoded);
+    expect(decoded.worldEpoch).toBe(state.worldEpoch);
+    expect(decoded.target).toEqual(state.target);
+    expect(decoded.authorityVersion).toBe(state.authorityVersion);
+    expect(decoded.claimVersion).toBe(state.claimVersion);
+    expect(decoded.stateSequence).toBe(state.stateSequence);
+    expect(decoded.targetPosition.x).toBeCloseTo(state.targetPosition.x);
+    expect(decoded.targetPosition.y).toBeCloseTo(state.targetPosition.y);
+    expect(decoded.targetPosition.z).toBeCloseTo(state.targetPosition.z);
+    expect(decoded.targetRotation.y).toBeCloseTo(state.targetRotation.y);
+    expect(decoded.targetRotation.w).toBeCloseTo(state.targetRotation.w);
+
+    const bytes = new Uint8Array(encoded);
+    expect(() => decodeManipulationState(bytes.subarray(0, bytes.length - 1))).toThrow("truncated");
+    expect(() =>
+      encodeManipulationState({
+        ...state,
+        targetPosition: { x: Number.NaN, y: 0, z: 0 },
+      }),
+    ).toThrow("manipulation state");
+    expect(() => encodeManipulationState({ ...state, stateSequence: 65_536 })).toThrow(
+      "manipulation state",
+    );
   });
 
   test("encodes complete and baseline-relative field masks", () => {

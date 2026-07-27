@@ -3,7 +3,10 @@ import createBox3D, {
   type b3CompoundData,
   type b3HeightFieldData,
   type b3JointId,
+  type b3JointDef,
   type b3MeshData,
+  type b3PrismaticJointDef,
+  type b3RevoluteJointDef,
   type b3ShapeId,
   type Box3DModule,
   type BodyMoveEvent,
@@ -18,9 +21,13 @@ import type {
   BodySnapshot,
   BodyState,
   ConstraintId,
+  JointBodies,
+  JointFrame,
   PhysicsDebugDraw,
   PhysicsStepEvents,
+  PrismaticMotor,
   Quat,
+  RevoluteMotor,
   RuntimeId,
   Vec3,
 } from "./types";
@@ -32,13 +39,17 @@ type BodySlot = {
   meshes: b3MeshData[];
   compounds: b3CompoundData[];
   heightFields: b3HeightFieldData[];
+  shapes: b3ShapeId[];
+  surfaceVelocity: Vec3;
 };
 type ConstraintSlot = {
   generation: number;
   joint: b3JointId | null;
   bodyA: RuntimeId;
-  bodyB: RuntimeId;
+  bodyB: RuntimeId | null;
+  helperBody: b3BodyId | null;
 };
+const DEFAULT_CATEGORY = 1n;
 const PLAYER_PROXY_CATEGORY = 1n << 1n;
 const TRIGGER_CATEGORY = 1n << 2n;
 
@@ -46,6 +57,7 @@ export class PhysicsWorld {
   readonly #box3d: Box3DModule;
   readonly #gravity: Vec3;
   #world: ReturnType<Box3DModule["b3CreateWorld"]>;
+  #groundBody: b3BodyId;
   readonly #slots: BodySlot[] = [];
   readonly #freeSlots: number[] = [];
   readonly #pendingDestroy = new Set<number>();
@@ -73,6 +85,7 @@ export class PhysicsWorld {
     const definition = box3d.b3DefaultWorldDef();
     definition.gravity = this.#gravity;
     this.#world = box3d.b3CreateWorld(definition);
+    this.#groundBody = box3d.b3CreateBody(this.#world, box3d.b3DefaultBodyDef());
     this.#events = box3d.createEventsBuffer();
     this.#sensorEvent = box3d.createSensorTouchEvent();
     this.#contactTouchEvent = box3d.createContactTouchEvent();
@@ -115,7 +128,7 @@ export class PhysicsWorld {
     shape.density = options.density ?? shape.density;
     shape.enableContactEvents = options.type === "dynamic";
     shape.enableHitEvents = options.type === "dynamic";
-    this.#box3d.b3CreateBoxShape(
+    const shapeId = this.#box3d.b3CreateBoxShape(
       body,
       shape,
       options.halfExtents.x,
@@ -123,7 +136,7 @@ export class PhysicsWorld {
       options.halfExtents.z,
     );
 
-    return this.#track(body);
+    return this.#track(body, { shapes: [shapeId] });
   }
 
   createHull(options: {
@@ -162,11 +175,11 @@ export class PhysicsWorld {
       shape.baseMaterial.restitution = options.restitution ?? shape.baseMaterial.restitution;
       shape.enableContactEvents = options.type === "dynamic";
       shape.enableHitEvents = options.type === "dynamic";
-      this.#box3d.b3CreateHullShape(body, shape, hull);
+      const shapeId = this.#box3d.b3CreateHullShape(body, shape, hull);
+      return this.#track(body, { shapes: [shapeId] });
     } finally {
       this.#box3d.b3DestroyHull(hull);
     }
-    return this.#track(body);
   }
 
   createCompoundHulls(options: {
@@ -191,6 +204,7 @@ export class PhysicsWorld {
         s: options.rotation.w,
       };
     const body = this.#box3d.b3CreateBody(this.#world, definition);
+    const shapes: b3ShapeId[] = [];
     try {
       for (const source of options.hulls) {
         const hull = this.#box3d.b3CreateHull(
@@ -204,7 +218,7 @@ export class PhysicsWorld {
           shape.baseMaterial.restitution = options.restitution ?? shape.baseMaterial.restitution;
           shape.enableContactEvents = options.type === "dynamic";
           shape.enableHitEvents = options.type === "dynamic";
-          this.#box3d.b3CreateHullShape(body, shape, hull);
+          shapes.push(this.#box3d.b3CreateHullShape(body, shape, hull));
         } finally {
           this.#box3d.b3DestroyHull(hull);
         }
@@ -213,7 +227,7 @@ export class PhysicsWorld {
       this.#box3d.b3DestroyBody(body);
       throw error;
     }
-    return this.#track(body);
+    return this.#track(body, { shapes });
   }
 
   createPlayerProxy(position: Vec3, capsule: { radius: number; halfSegment: number }): RuntimeId {
@@ -227,18 +241,30 @@ export class PhysicsWorld {
     shape.enableSensorEvents = true;
     shape.filter.categoryBits = PLAYER_PROXY_CATEGORY;
     shape.filter.maskBits = TRIGGER_CATEGORY;
-    this.#box3d.b3CreateCapsuleShape(body, shape, {
+    const shapeId = this.#box3d.b3CreateCapsuleShape(body, shape, {
       center1: { x: 0, y: -capsule.halfSegment, z: 0 },
       center2: { x: 0, y: capsule.halfSegment, z: 0 },
       radius: capsule.radius,
     });
-    return this.#track(body);
+    return this.#track(body, { shapes: [shapeId] });
   }
 
   createSensorHull(options: { position: Vec3; vertices: Vec3[]; rotation?: Quat }): RuntimeId {
+    return this.createSensorHulls({
+      position: options.position,
+      rotation: options.rotation,
+      hulls: [{ vertices: options.vertices }],
+    });
+  }
+
+  createSensorHulls(options: {
+    position: Vec3;
+    hulls: Array<{ vertices: Vec3[] }>;
+    rotation?: Quat;
+  }): RuntimeId {
     this.#assertLive();
-    if (options.vertices.length < 4)
-      throw new Error("a sensor hull requires at least four vertices");
+    if (options.hulls.length === 0 || options.hulls.some((hull) => hull.vertices.length < 4))
+      throw new Error("sensor hull bodies require one or more convex hulls");
     const definition = this.#box3d.b3DefaultBodyDef();
     definition.type = this.#bodyType("static");
     definition.position = options.position;
@@ -248,24 +274,29 @@ export class PhysicsWorld {
         s: options.rotation.w,
       };
     const body = this.#box3d.b3CreateBody(this.#world, definition);
-    const hull = this.#box3d.b3CreateHull(
-      options.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]),
-    );
-    if (!hull) {
-      this.#box3d.b3DestroyBody(body);
-      throw new Error("Box3D rejected the sensor hull");
-    }
+    const shapes: b3ShapeId[] = [];
     try {
-      const shape = this.#box3d.b3DefaultShapeDef();
-      shape.isSensor = true;
-      shape.enableSensorEvents = true;
-      shape.filter.categoryBits = TRIGGER_CATEGORY;
-      shape.filter.maskBits = PLAYER_PROXY_CATEGORY;
-      this.#box3d.b3CreateHullShape(body, shape, hull);
-    } finally {
-      this.#box3d.b3DestroyHull(hull);
+      for (const source of options.hulls) {
+        const hull = this.#box3d.b3CreateHull(
+          source.vertices.flatMap((vertex) => [vertex.x, vertex.y, vertex.z]),
+        );
+        if (!hull) throw new Error("Box3D rejected a sensor hull");
+        try {
+          const shape = this.#box3d.b3DefaultShapeDef();
+          shape.isSensor = true;
+          shape.enableSensorEvents = true;
+          shape.filter.categoryBits = TRIGGER_CATEGORY;
+          shape.filter.maskBits = PLAYER_PROXY_CATEGORY | DEFAULT_CATEGORY;
+          shapes.push(this.#box3d.b3CreateHullShape(body, shape, hull));
+        } finally {
+          this.#box3d.b3DestroyHull(hull);
+        }
+      }
+    } catch (error) {
+      this.#box3d.b3DestroyBody(body);
+      throw error;
     }
-    return this.#track(body);
+    return this.#track(body, { shapes });
   }
 
   createStaticMesh(options: {
@@ -296,17 +327,17 @@ export class PhysicsWorld {
       throw new Error("Box3D rejected the static indexed mesh");
     }
     try {
-      this.#box3d.b3CreateMeshShape(body, this.#box3d.b3DefaultShapeDef(), mesh, {
+      const shapeId = this.#box3d.b3CreateMeshShape(body, this.#box3d.b3DefaultShapeDef(), mesh, {
         x: 1,
         y: 1,
         z: 1,
       });
+      return this.#track(body, { meshes: [mesh], shapes: [shapeId] });
     } catch (error) {
       this.#box3d.b3DestroyBody(body);
       this.#box3d.b3DestroyMesh(mesh);
       throw error;
     }
-    return this.#track(body, [mesh]);
   }
 
   createStaticCompound(options: {
@@ -360,13 +391,17 @@ export class PhysicsWorld {
       throw new Error("Box3D rejected the static compound");
     }
     try {
-      this.#box3d.b3CreateCompoundShape(body, this.#box3d.b3DefaultShapeDef(), compound);
+      const shapeId = this.#box3d.b3CreateCompoundShape(
+        body,
+        this.#box3d.b3DefaultShapeDef(),
+        compound,
+      );
+      return this.#track(body, { compounds: [compound], shapes: [shapeId] });
     } catch (error) {
       this.#box3d.b3DestroyBody(body);
       this.#box3d.b3DestroyCompound(compound);
       throw error;
     }
-    return this.#track(body, [], [compound]);
   }
 
   createStaticHeightField(options: {
@@ -402,13 +437,17 @@ export class PhysicsWorld {
       throw new Error("Box3D rejected the static height field");
     }
     try {
-      this.#box3d.b3CreateHeightFieldShape(body, this.#box3d.b3DefaultShapeDef(), heightField);
+      const shapeId = this.#box3d.b3CreateHeightFieldShape(
+        body,
+        this.#box3d.b3DefaultShapeDef(),
+        heightField,
+      );
+      return this.#track(body, { heightFields: [heightField], shapes: [shapeId] });
     } catch (error) {
       this.#box3d.b3DestroyBody(body);
       this.#box3d.b3DestroyHeightField(heightField);
       throw error;
     }
-    return this.#track(body, [], [], [heightField]);
   }
 
   restoreBox(options: {
@@ -461,11 +500,14 @@ export class PhysicsWorld {
       slot.meshes = [];
       slot.compounds = [];
       slot.heightFields = [];
+      slot.shapes = [];
+      slot.surfaceVelocity = { x: 0, y: 0, z: 0 };
       slot.generation += 1;
     }
     for (const slot of this.#constraintSlots) {
       if (!slot) continue;
       slot.joint = null;
+      slot.helperBody = null;
       slot.generation += 1;
     }
     this.#freeConstraintSlots.length = 0;
@@ -477,6 +519,7 @@ export class PhysicsWorld {
     const definition = this.#box3d.b3DefaultWorldDef();
     definition.gravity = this.#gravity;
     this.#world = this.#box3d.b3CreateWorld(definition);
+    this.#groundBody = this.#box3d.b3CreateBody(this.#world, this.#box3d.b3DefaultBodyDef());
   }
 
   destroy(id: RuntimeId): boolean {
@@ -529,16 +572,36 @@ export class PhysicsWorld {
     else this.#box3d.b3Body_Disable(body);
   }
 
+  setGravityScale(id: RuntimeId, gravityScale: number): void {
+    if (!Number.isFinite(gravityScale) || gravityScale < 0)
+      throw new Error("gravity scale must be finite and non-negative");
+    this.#box3d.b3Body_SetGravityScale(this.#resolve(id), gravityScale);
+  }
+
+  setSurfaceVelocity(id: RuntimeId, velocity: Vec3): void {
+    if (!Object.values(velocity).every(Number.isFinite))
+      throw new Error("surface velocity must be finite");
+    const slot = this.#slot(id);
+    for (const shape of slot.shapes) {
+      const material = this.#box3d.b3Shape_GetSurfaceMaterial(shape);
+      material.tangentVelocity = { ...velocity };
+      this.#box3d.b3Shape_SetSurfaceMaterial(shape, material);
+    }
+    slot.surfaceVelocity = { ...velocity };
+    if (slot.body) this.#box3d.b3Body_SetAwake(slot.body, true);
+  }
+
   pointVelocity(id: RuntimeId, point: Vec3): Vec3 {
     const body = this.#resolve(id);
+    const surface = this.#slot(id).surfaceVelocity;
     const linear = this.#box3d.b3Body_GetLinearVelocity(body);
     const angular = this.#box3d.b3Body_GetAngularVelocity(body);
     const center = this.#box3d.b3Body_GetPosition(body);
     const offset = subtract(point, center);
     return {
-      x: linear.x + angular.y * offset.z - angular.z * offset.y,
-      y: linear.y + angular.z * offset.x - angular.x * offset.z,
-      z: linear.z + angular.x * offset.y - angular.y * offset.x,
+      x: linear.x + angular.y * offset.z - angular.z * offset.y + surface.x,
+      y: linear.y + angular.z * offset.x - angular.x * offset.z + surface.y,
+      z: linear.z + angular.x * offset.y - angular.y * offset.x + surface.z,
     };
   }
 
@@ -628,6 +691,88 @@ export class PhysicsWorld {
     return true;
   }
 
+  createControlConstraint(options: {
+    body: RuntimeId;
+    localAnchor: Vec3;
+    targetPosition: Vec3;
+    targetRotation: Quat;
+    linearHertz?: number;
+    linearDampingRatio?: number;
+    angularHertz?: number;
+    angularDampingRatio?: number;
+    maxForce?: number;
+    maxTorque?: number;
+  }): ConstraintId {
+    const body = this.#resolve(options.body);
+    if (this.#box3d.b3Body_GetType(body) !== this.#box3d.b3BodyType.b3_dynamicBody)
+      throw new Error("control constraint requires a dynamic body");
+    const mass = this.#box3d.b3Body_GetMass(body);
+    const tuning = {
+      linearHertz: options.linearHertz ?? 32,
+      linearDampingRatio: options.linearDampingRatio ?? 4,
+      angularHertz: options.angularHertz ?? 64,
+      angularDampingRatio: options.angularDampingRatio ?? 4,
+      maxForce: options.maxForce ?? mass * 100,
+      maxTorque: options.maxTorque ?? mass * 300,
+    };
+    if (
+      [
+        ...Object.values(options.localAnchor),
+        ...Object.values(options.targetPosition),
+        ...Object.values(options.targetRotation),
+        ...Object.values(tuning),
+      ].some((value) => !Number.isFinite(value))
+    )
+      throw new Error("control constraint fields must be finite");
+    if (Object.values(tuning).some((value) => value < 0))
+      throw new Error("control constraint tuning must be non-negative");
+
+    const targetDefinition = this.#box3d.b3DefaultBodyDef();
+    targetDefinition.type = this.#box3d.b3BodyType.b3_kinematicBody;
+    targetDefinition.position = { ...options.targetPosition };
+    targetDefinition.rotation = boxRotation(options.targetRotation);
+    const helperBody = this.#box3d.b3CreateBody(this.#world, targetDefinition);
+    const definition = this.#box3d.b3DefaultMotorJointDef();
+    definition.base.bodyIdA = helperBody;
+    definition.base.bodyIdB = body;
+    definition.base.localFrameA = jointTransform({
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+    });
+    definition.base.localFrameB = jointTransform({
+      position: options.localAnchor,
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+    });
+    definition.base.collideConnected = false;
+    definition.linearHertz = tuning.linearHertz;
+    definition.linearDampingRatio = tuning.linearDampingRatio;
+    definition.angularHertz = tuning.angularHertz;
+    definition.angularDampingRatio = tuning.angularDampingRatio;
+    definition.maxSpringForce = tuning.maxForce;
+    definition.maxSpringTorque = tuning.maxTorque;
+    const joint = this.#box3d.b3CreateMotorJoint(this.#world, definition);
+    this.#box3d.b3Body_SetAwake(body, true);
+    return this.#trackConstraint(joint, options.body, undefined, helperBody);
+  }
+
+  setControlTarget(id: ConstraintId, position: Vec3, rotation: Quat): void {
+    const slot = this.#constraintSlots[id.index];
+    if (
+      !slot ||
+      slot.generation !== id.generation ||
+      slot.joint === null ||
+      slot.helperBody === null
+    )
+      throw new Error(`stale constraint handle ${id.index}:${id.generation}`);
+    if (
+      !Object.values(position).every(Number.isFinite) ||
+      !Object.values(rotation).every(Number.isFinite)
+    )
+      throw new Error("control target pose must be finite");
+    this.#box3d.b3Body_SetTransform(slot.helperBody, position, boxRotation(rotation));
+    this.#box3d.b3Body_SetAwake(this.#resolve(slot.bodyA), true);
+  }
+
   createDistanceConstraint(options: {
     bodyA: RuntimeId;
     bodyB: RuntimeId;
@@ -652,22 +797,174 @@ export class PhysicsWorld {
     definition.lowerSpringForce = -(options.maxForce ?? 500);
     definition.upperSpringForce = options.maxForce ?? 500;
     const joint = this.#box3d.b3CreateDistanceJoint(this.#world, definition);
-    const index = this.#freeConstraintSlots.pop() ?? this.#constraintSlots.length;
-    const generation = this.#constraintSlots[index]?.generation ?? 1;
-    this.#constraintSlots[index] = {
-      generation,
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
+  }
+
+  createRevoluteConstraint(
+    options: JointBodies & {
+      limit?: { lowerAngle: number; upperAngle: number };
+      motor?: RevoluteMotor;
+    },
+  ): ConstraintId {
+    const definition = this.#box3d.b3DefaultRevoluteJointDef();
+    this.#configureJointBase(definition.base, options);
+    if (options.limit) {
+      if (
+        !Number.isFinite(options.limit.lowerAngle) ||
+        !Number.isFinite(options.limit.upperAngle) ||
+        options.limit.lowerAngle > options.limit.upperAngle
+      )
+        throw new Error("revolute limits must be finite and ordered");
+      definition.enableLimit = true;
+      definition.lowerAngle = -options.limit.upperAngle;
+      definition.upperAngle = -options.limit.lowerAngle;
+    }
+    this.#applyRevoluteMotorDefinition(definition, options.motor ?? { mode: "none" });
+    const joint = this.#box3d.b3CreateRevoluteJoint(this.#world, definition);
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
+  }
+
+  setRevoluteMotor(id: ConstraintId, motor: RevoluteMotor): void {
+    validateRevoluteMotor(motor);
+    const joint = this.#resolveConstraint(id);
+    this.#box3d.b3RevoluteJoint_EnableSpring(joint, motor.mode === "target-angle");
+    this.#box3d.b3RevoluteJoint_EnableMotor(
       joint,
-      bodyA: { ...options.bodyA },
-      bodyB: { ...options.bodyB },
-    };
-    return { index, generation };
+      motor.mode === "friction" || motor.mode === "target-velocity",
+    );
+    if (motor.mode === "target-angle") {
+      this.#box3d.b3RevoluteJoint_SetTargetAngle(joint, -motor.targetAngle);
+      this.#box3d.b3RevoluteJoint_SetSpringHertz(joint, motor.hertz);
+      this.#box3d.b3RevoluteJoint_SetSpringDampingRatio(joint, motor.dampingRatio);
+    } else if (motor.mode === "friction") {
+      this.#box3d.b3RevoluteJoint_SetMotorSpeed(joint, 0);
+      this.#box3d.b3RevoluteJoint_SetMaxMotorTorque(joint, motor.maxTorque);
+    } else if (motor.mode === "target-velocity") {
+      this.#box3d.b3RevoluteJoint_SetMotorSpeed(joint, -motor.targetVelocity);
+      this.#box3d.b3RevoluteJoint_SetMaxMotorTorque(joint, motor.maxTorque);
+    }
+    this.#box3d.b3Joint_WakeBodies(joint);
+  }
+
+  createPrismaticConstraint(
+    options: JointBodies & {
+      limit?: { lowerTranslation: number; upperTranslation: number };
+      motor?: PrismaticMotor;
+    },
+  ): ConstraintId {
+    const definition = this.#box3d.b3DefaultPrismaticJointDef();
+    this.#configureJointBase(definition.base, options);
+    if (options.limit) {
+      if (
+        !Number.isFinite(options.limit.lowerTranslation) ||
+        !Number.isFinite(options.limit.upperTranslation) ||
+        options.limit.lowerTranslation > options.limit.upperTranslation
+      )
+        throw new Error("prismatic limits must be finite and ordered");
+      definition.enableLimit = true;
+      definition.lowerTranslation = -options.limit.upperTranslation;
+      definition.upperTranslation = -options.limit.lowerTranslation;
+    }
+    this.#applyPrismaticMotorDefinition(definition, options.motor ?? { mode: "none" });
+    const joint = this.#box3d.b3CreatePrismaticJoint(this.#world, definition);
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
+  }
+
+  setPrismaticMotor(id: ConstraintId, motor: PrismaticMotor): void {
+    validatePrismaticMotor(motor);
+    const joint = this.#resolveConstraint(id);
+    this.#box3d.b3PrismaticJoint_EnableSpring(joint, motor.mode === "target-position");
+    this.#box3d.b3PrismaticJoint_EnableMotor(joint, motor.mode === "target-velocity");
+    if (motor.mode === "target-position") {
+      this.#box3d.b3PrismaticJoint_SetTargetTranslation(joint, -motor.targetPosition);
+      this.#box3d.b3PrismaticJoint_SetSpringHertz(joint, motor.hertz);
+      this.#box3d.b3PrismaticJoint_SetSpringDampingRatio(joint, motor.dampingRatio);
+    } else if (motor.mode === "target-velocity") {
+      this.#box3d.b3PrismaticJoint_SetMotorSpeed(joint, -motor.targetVelocity);
+      this.#box3d.b3PrismaticJoint_SetMaxMotorForce(joint, motor.maxForce);
+    }
+    this.#box3d.b3Joint_WakeBodies(joint);
+  }
+
+  createSphericalConstraint(options: JointBodies): ConstraintId {
+    const definition = this.#box3d.b3DefaultSphericalJointDef();
+    this.#configureJointBase(definition.base, options);
+    const joint = this.#box3d.b3CreateSphericalJoint(this.#world, definition);
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
+  }
+
+  createWeldConstraint(
+    options: JointBodies & {
+      linearHertz?: number;
+      angularHertz?: number;
+      dampingRatio?: number;
+    },
+  ): ConstraintId {
+    const definition = this.#box3d.b3DefaultWeldJointDef();
+    this.#configureJointBase(definition.base, options);
+    if (
+      [options.linearHertz, options.angularHertz, options.dampingRatio].some(
+        (value) => value !== undefined && (!Number.isFinite(value) || value < 0),
+      )
+    )
+      throw new Error("weld tuning must be finite and non-negative");
+    if (options.linearHertz !== undefined) definition.linearHertz = options.linearHertz;
+    if (options.angularHertz !== undefined) definition.angularHertz = options.angularHertz;
+    if (options.dampingRatio !== undefined) {
+      definition.linearDampingRatio = options.dampingRatio;
+      definition.angularDampingRatio = options.dampingRatio;
+    }
+    const joint = this.#box3d.b3CreateWeldJoint(this.#world, definition);
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
+  }
+
+  createConfigurableDistanceConstraint(
+    options: JointBodies & {
+      length: number;
+      mode: "rope" | "rod" | "spring";
+      hertz?: number;
+      dampingRatio?: number;
+      maxForce?: number;
+    },
+  ): ConstraintId {
+    if (!Number.isFinite(options.length) || options.length <= 0)
+      throw new Error("distance joint length must be finite and positive");
+    if (
+      [options.hertz, options.dampingRatio, options.maxForce].some(
+        (value) => value !== undefined && (!Number.isFinite(value) || value < 0),
+      )
+    )
+      throw new Error("distance joint tuning must be finite and non-negative");
+    const definition = this.#box3d.b3DefaultDistanceJointDef();
+    this.#configureJointBase(definition.base, options);
+    definition.length = options.length;
+    if (options.mode === "rope") {
+      definition.enableLimit = true;
+      definition.minLength = 0.01;
+      definition.maxLength = options.length;
+    } else if (options.mode === "rod") {
+      definition.enableLimit = true;
+      definition.minLength = options.length;
+      definition.maxLength = options.length;
+    } else {
+      definition.enableSpring = true;
+      definition.hertz = options.hertz ?? 4;
+      definition.dampingRatio = options.dampingRatio ?? 0.7;
+      const maxForce = options.maxForce ?? Number.MAX_VALUE;
+      definition.lowerSpringForce = -maxForce;
+      definition.upperSpringForce = maxForce;
+    }
+    const joint = this.#box3d.b3CreateDistanceJoint(this.#world, definition);
+    return this.#trackConstraint(joint, options.bodyA, options.bodyB);
   }
 
   destroyConstraint(id: ConstraintId): boolean {
     const slot = this.#constraintSlots[id.index];
     if (!slot || slot.generation !== id.generation || !slot.joint) return false;
     this.#box3d.b3DestroyJoint(slot.joint, true);
+    if (slot.helperBody) this.#box3d.b3DestroyBody(slot.helperBody);
     slot.joint = null;
+    slot.helperBody = null;
     slot.generation += 1;
     this.#freeConstraintSlots.push(id.index);
     return true;
@@ -901,6 +1198,19 @@ export class PhysicsWorld {
     return slot.body;
   }
 
+  #slot(id: RuntimeId): BodySlot {
+    this.#resolve(id);
+    return this.#slots[id.index]!;
+  }
+
+  #resolveConstraint(id: ConstraintId): b3JointId {
+    this.#assertLive();
+    const slot = this.#constraintSlots[id.index];
+    if (!slot || slot.generation !== id.generation || slot.joint === null)
+      throw new Error(`stale constraint handle ${id.index}:${id.generation}`);
+    return slot.joint;
+  }
+
   #runtimeIdForBody(body: b3BodyId): RuntimeId {
     const tracked = this.#runtimeIdForEventBody(body);
     if (tracked) return tracked;
@@ -1018,16 +1328,85 @@ export class PhysicsWorld {
     return this.#box3d.b3BodyType.b3_dynamicBody;
   }
 
+  #configureJointBase(base: b3JointDef, options: JointBodies): void {
+    base.bodyIdA = this.#resolve(options.bodyA);
+    base.bodyIdB = options.bodyB ? this.#resolve(options.bodyB) : this.#groundBody;
+    base.localFrameA = jointTransform(options.localFrameA);
+    base.localFrameB = jointTransform(options.localFrameB);
+    base.collideConnected = options.collideConnected ?? false;
+  }
+
+  #applyRevoluteMotorDefinition(definition: b3RevoluteJointDef, motor: RevoluteMotor): void {
+    validateRevoluteMotor(motor);
+    if (motor.mode === "target-angle") {
+      definition.enableSpring = true;
+      definition.targetAngle = -motor.targetAngle;
+      definition.hertz = motor.hertz;
+      definition.dampingRatio = motor.dampingRatio;
+    } else if (motor.mode === "friction") {
+      definition.enableMotor = true;
+      definition.motorSpeed = 0;
+      definition.maxMotorTorque = motor.maxTorque;
+    } else if (motor.mode === "target-velocity") {
+      definition.enableMotor = true;
+      definition.motorSpeed = -motor.targetVelocity;
+      definition.maxMotorTorque = motor.maxTorque;
+    }
+  }
+
+  #applyPrismaticMotorDefinition(definition: b3PrismaticJointDef, motor: PrismaticMotor): void {
+    validatePrismaticMotor(motor);
+    if (motor.mode === "target-position") {
+      definition.enableSpring = true;
+      definition.targetTranslation = -motor.targetPosition;
+      definition.hertz = motor.hertz;
+      definition.dampingRatio = motor.dampingRatio;
+    } else if (motor.mode === "target-velocity") {
+      definition.enableMotor = true;
+      definition.motorSpeed = -motor.targetVelocity;
+      definition.maxMotorForce = motor.maxForce;
+    }
+  }
+
+  #trackConstraint(
+    joint: b3JointId,
+    bodyA: RuntimeId,
+    bodyB?: RuntimeId,
+    helperBody: b3BodyId | null = null,
+  ): ConstraintId {
+    const index = this.#freeConstraintSlots.pop() ?? this.#constraintSlots.length;
+    const generation = this.#constraintSlots[index]?.generation ?? 1;
+    this.#constraintSlots[index] = {
+      generation,
+      joint,
+      bodyA: { ...bodyA },
+      bodyB: bodyB ? { ...bodyB } : null,
+      helperBody,
+    };
+    return { index, generation };
+  }
+
   #track(
     body: b3BodyId,
-    meshes: b3MeshData[] = [],
-    compounds: b3CompoundData[] = [],
-    heightFields: b3HeightFieldData[] = [],
+    resources: {
+      meshes?: b3MeshData[];
+      compounds?: b3CompoundData[];
+      heightFields?: b3HeightFieldData[];
+      shapes?: b3ShapeId[];
+    } = {},
   ): RuntimeId {
     const index = this.#freeSlots.pop() ?? this.#slots.length;
     const existing = this.#slots[index];
     const generation = existing?.generation ?? 1;
-    this.#slots[index] = { generation, body, meshes, compounds, heightFields };
+    this.#slots[index] = {
+      generation,
+      body,
+      meshes: resources.meshes ?? [],
+      compounds: resources.compounds ?? [],
+      heightFields: resources.heightFields ?? [],
+      shapes: resources.shapes ?? [],
+      surfaceVelocity: { x: 0, y: 0, z: 0 },
+    };
     return { index, generation };
   }
 
@@ -1042,7 +1421,10 @@ export class PhysicsWorld {
     ) {
       const constraint = this.#constraintSlots[constraintIndex];
       if (!constraint?.joint) continue;
-      if (sameId(constraint.bodyA, id) || sameId(constraint.bodyB, id)) {
+      if (
+        sameId(constraint.bodyA, id) ||
+        (constraint.bodyB !== null && sameId(constraint.bodyB, id))
+      ) {
         this.destroyConstraint({ index: constraintIndex, generation: constraint.generation });
       }
     }
@@ -1052,6 +1434,8 @@ export class PhysicsWorld {
     slot.meshes = [];
     slot.compounds = [];
     slot.heightFields = [];
+    slot.shapes = [];
+    slot.surfaceVelocity = { x: 0, y: 0, z: 0 };
     slot.generation += 1;
     this.#freeSlots.push(index);
   }
@@ -1119,6 +1503,79 @@ function multiplyQuat(a: Quat, b: Quat): Quat {
 
 function multiply(value: Vec3, amount: number): Vec3 {
   return { x: value.x * amount, y: value.y * amount, z: value.z * amount };
+}
+
+function jointTransform(frame: JointFrame) {
+  if (!Object.values(frame.position).every(Number.isFinite))
+    throw new Error("joint frame position must be finite");
+  const rotationLength = Math.hypot(
+    frame.rotation.x,
+    frame.rotation.y,
+    frame.rotation.z,
+    frame.rotation.w,
+  );
+  if (!Number.isFinite(rotationLength) || rotationLength <= Number.EPSILON)
+    throw new Error("joint frame rotation must be finite and nonzero");
+  return {
+    p: { ...frame.position },
+    q: {
+      v: {
+        x: frame.rotation.x / rotationLength,
+        y: frame.rotation.y / rotationLength,
+        z: frame.rotation.z / rotationLength,
+      },
+      s: frame.rotation.w / rotationLength,
+    },
+  };
+}
+
+function boxRotation(rotation: Quat) {
+  const length = Math.hypot(rotation.x, rotation.y, rotation.z, rotation.w);
+  if (!Number.isFinite(length) || length <= Number.EPSILON)
+    throw new Error("rotation must be finite and nonzero");
+  return {
+    v: {
+      x: rotation.x / length,
+      y: rotation.y / length,
+      z: rotation.z / length,
+    },
+    s: rotation.w / length,
+  };
+}
+
+function validateRevoluteMotor(motor: RevoluteMotor): void {
+  const values =
+    motor.mode === "none"
+      ? []
+      : motor.mode === "friction"
+        ? [motor.maxTorque]
+        : motor.mode === "target-angle"
+          ? [motor.targetAngle, motor.hertz, motor.dampingRatio]
+          : [motor.targetVelocity, motor.maxTorque];
+  if (values.some((value) => !Number.isFinite(value)))
+    throw new Error("revolute motor values must be finite");
+  if (
+    (motor.mode === "friction" && motor.maxTorque < 0) ||
+    (motor.mode === "target-velocity" && motor.maxTorque < 0) ||
+    (motor.mode === "target-angle" && (motor.hertz < 0 || motor.dampingRatio < 0))
+  )
+    throw new Error("revolute motor limits must be non-negative");
+}
+
+function validatePrismaticMotor(motor: PrismaticMotor): void {
+  const values =
+    motor.mode === "none"
+      ? []
+      : motor.mode === "target-position"
+        ? [motor.targetPosition, motor.hertz, motor.dampingRatio]
+        : [motor.targetVelocity, motor.maxForce];
+  if (values.some((value) => !Number.isFinite(value)))
+    throw new Error("prismatic motor values must be finite");
+  if (
+    (motor.mode === "target-velocity" && motor.maxForce < 0) ||
+    (motor.mode === "target-position" && (motor.hertz < 0 || motor.dampingRatio < 0))
+  )
+    throw new Error("prismatic motor limits must be non-negative");
 }
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {

@@ -6,11 +6,17 @@ import {
   PHYSICS_SUBSTEPS,
   PROTOCOL_VERSION,
   NETWORK_FLAG_AWAKE,
+  NETWORK_FLAG_ACTIVE,
   NETWORK_FLAG_HELD,
+  NETWORK_FLAG_REVERSED,
   PhysicsWorld,
   isNewerSequence16,
   type InputCommand,
   type LifecycleMessage,
+  type ManipulationChangedMessage,
+  type ManipulationDropMessage,
+  type ManipulationRequestMessage,
+  type ManipulationStatePacket,
   type NetworkBodyState,
   type NetworkObjectState,
   type NetworkPlayerState,
@@ -18,16 +24,23 @@ import {
   type OwnershipRequestMessage,
   type RuntimeEntityRef,
   type RuntimeId,
+  type PhysicsStepEvents,
 } from "@gurgur/engine";
 import {
   PLAYER_CAPSULE_HALF_SEGMENT,
   PLAYER_CAPSULE_RADIUS,
   PLAYER_CROUCHED_HALF_SEGMENT,
+  PLAYER_GRAB_REACH,
   createPropGrab,
+  createHostManipulationTarget,
   grabDistanceFor,
+  playerChest,
+  playerViewDirection,
+  stepHostManipulationTarget,
   stepPlayerController,
   stepPropGrab,
   type GameEngine,
+  type HostManipulationTarget,
   type PlayerControllerState,
   type PropGrab,
   type WorldBundle,
@@ -48,6 +61,14 @@ type RemotePlayer = {
   crouched: boolean;
 };
 
+type LocalGravityField = {
+  entityIndex: number;
+  handle: RuntimeId;
+  factor: number;
+  priority: number;
+  visitors: Map<string, number>;
+};
+
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let physics: PhysicsWorld | null = null;
 let bundle: WorldBundle | null = null;
@@ -60,11 +81,23 @@ let lastPrimaryCounter = 0;
 let bodies = new Map<string, LocalBody>();
 let localToNetwork = new Map<string, RuntimeId>();
 let remotePlayers = new Map<string, RemotePlayer>();
+let gravityFields: LocalGravityField[] = [];
+let localGravityFactor = 1;
 let descriptors = new Map<string, RuntimeEntityRef>();
 let held: { grab: PropGrab; body: LocalBody; requestId: number } | null = null;
+let manipulation: {
+  target: HostManipulationTarget;
+  authorityVersion: number;
+  claimVersion: number;
+  stateSequence: number;
+} | null = null;
 let pendingGrab = new Map<
   number,
   { target: RuntimeId; holdDistance: number; relativeRotation: NetworkBodyState["rotation"] }
+>();
+let pendingManipulation = new Map<
+  number,
+  { target: RuntimeId; targetState: HostManipulationTarget; authorityVersion: number }
 >();
 let nextOwnershipRequestId = 1;
 let accumulator = 0;
@@ -88,8 +121,12 @@ scope.addEventListener("message", (event: MessageEvent<PhysicsWorkerRequest>) =>
     void worldBarrier.then(() => applyLifecycle(message.message));
   } else if (message.type === "ownership-changed") {
     void worldBarrier.then(() => applyOwnership(message.message));
-  } else {
+  } else if (message.type === "ownership-denied") {
     pendingGrab.delete(message.message.requestId);
+  } else if (message.type === "manipulation-changed") {
+    void worldBarrier.then(() => applyManipulation(message.message));
+  } else {
+    pendingManipulation.delete(message.message.requestId);
   }
 });
 
@@ -113,9 +150,13 @@ async function setWorld(
   bodies = new Map();
   localToNetwork = new Map();
   remotePlayers = new Map();
+  gravityFields = [];
+  localGravityFactor = 1;
   descriptors = new Map(message.runtimeEntities.map((entity) => [key(entity.id), entity]));
   held = null;
+  manipulation = null;
   pendingGrab.clear();
+  pendingManipulation.clear();
   input = null;
   lastPrimaryCounter = 0;
   accumulator = 0;
@@ -157,6 +198,15 @@ async function setWorld(
     if (!body) continue;
     bodies.set(key(descriptor.id), body);
     localToNetwork.set(key(body.handle), { ...descriptor.id });
+    const entity = message.bundle.entities[descriptor.entityIndex];
+    if (entity?.kind === "gravity-field")
+      gravityFields.push({
+        entityIndex: descriptor.entityIndex,
+        handle: body.handle,
+        factor: entity.factor,
+        priority: entity.priority,
+        visitors: new Map(),
+      });
   }
   if (!localPlayer) throw new Error("world bootstrap is missing the local player");
   timer = scope.setInterval(tick, 4);
@@ -187,7 +237,7 @@ function tick(): void {
       controller,
       input,
       PHYSICS_DT,
-      Math.max(0, -bundle.settings.gravity.y),
+      Math.max(0, -bundle.settings.gravity.y) * localGravityFactor,
     );
     let respawned = false;
     if (next.position.y < voidY) {
@@ -202,8 +252,10 @@ function tick(): void {
       };
       respawned = true;
       if (held) dropHeld();
+      if (manipulation) dropManipulation();
     }
     if (localPlayerProxy && next.crouched !== localPlayer.crouched) {
+      clearGravityVisitor(localPlayerProxy);
       physics.destroy(localPlayerProxy);
       localPlayerProxy = physics.createPlayerProxy(next.position, playerCapsule(next.crouched));
     } else if (localPlayerProxy) {
@@ -232,7 +284,10 @@ function tick(): void {
       });
       if (!alive) dropHeld();
     }
-    physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+    if (manipulation)
+      stepHostManipulationTarget(physicsEngine(), manipulation.target, playerPose());
+    const events = physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+    processGravityEvents(events);
     if (held) held.body.state = readBodyState(held.body);
     accumulator -= PHYSICS_DT;
     steps += 1;
@@ -247,7 +302,22 @@ function tick(): void {
     states: localStates,
     producedAtMs: now,
   });
-  if ((localPlayer.stateSequence & 1) === 0) post({ type: "owner-states", states: localStates });
+  if ((localPlayer.stateSequence & 1) === 0) {
+    post({ type: "owner-states", states: localStates });
+    if (manipulation) {
+      manipulation.stateSequence = (manipulation.stateSequence + 1) & 0xffff;
+      const message: ManipulationStatePacket = {
+        worldEpoch,
+        target: { ...manipulation.target.target },
+        authorityVersion: manipulation.authorityVersion,
+        claimVersion: manipulation.claimVersion,
+        stateSequence: manipulation.stateSequence,
+        targetPosition: { ...manipulation.target.targetPosition },
+        targetRotation: { ...manipulation.target.targetRotation },
+      };
+      post({ type: "manipulation-state", message });
+    }
+  }
 }
 
 function processInputEdges(): void {
@@ -258,17 +328,64 @@ function processInputEdges(): void {
     dropHeld();
     return;
   }
+  if (manipulation) {
+    dropManipulation();
+    return;
+  }
   if (!input.interactTarget || !physics || !bundle) return;
   const target = bodies.get(key(input.interactTarget));
   const descriptor = descriptors.get(key(input.interactTarget));
+  if (!target || !descriptor || descriptor.kind !== "world-entity") return;
+  const entity = bundle.entities[descriptor.entityIndex];
   if (
-    !target ||
-    !descriptor ||
-    descriptor.kind !== "world-entity" ||
-    descriptor.transferPolicy !== "grab-lease" ||
-    descriptor.ownerPlayerId !== null
-  )
+    descriptor.transferPolicy === "fixed" &&
+    descriptor.ownerPlayerId === null &&
+    entity?.kind === "physics-prop" &&
+    entity.interaction === "manipulate"
+  ) {
+    const origin = playerChest(localPlayer.position);
+    const direction = playerViewDirection(input.lookYaw, input.lookPitch);
+    const hit = physics.raycastClosest(origin, scale(direction, PLAYER_GRAB_REACH), {
+      ignoreBodies: localPlayerProxy ? [localPlayerProxy] : [],
+    });
+    const hitTarget = hit ? localToNetwork.get(key(hit.body)) : null;
+    if (!hit || !hitTarget || !sameId(hitTarget, target.networkId)) return;
+    const localAnchor = inverseRotate(
+      target.state.rotation,
+      subtract(hit.point, target.state.position),
+    );
+    const holdDistance = Math.hypot(
+      hit.point.x - origin.x,
+      hit.point.y - origin.y,
+      hit.point.z - origin.z,
+    );
+    const requestId = nextOwnershipRequestId++;
+    const targetState = createHostManipulationTarget(
+      physicsEngine(),
+      target.networkId,
+      localAnchor,
+      playerPose(),
+      holdDistance,
+    );
+    pendingManipulation.set(requestId, {
+      target: { ...target.networkId },
+      targetState,
+      authorityVersion: target.state.authorityVersion,
+    });
+    const message: ManipulationRequestMessage = {
+      type: "manipulation-request",
+      protocolVersion: PROTOCOL_VERSION,
+      worldEpoch,
+      requestId,
+      target: { ...target.networkId },
+      authorityVersion: target.state.authorityVersion,
+      localAnchor,
+      holdDistance,
+    };
+    post({ type: "manipulation-request", message });
     return;
+  }
+  if (descriptor.transferPolicy !== "grab-lease" || descriptor.ownerPlayerId !== null) return;
   const requestId = nextOwnershipRequestId++;
   const holdDistance = grabDistanceFor(bundle, descriptor.entityIndex);
   const grab = createPropGrab(physicsEngine(), target.networkId, playerPose(), holdDistance);
@@ -313,6 +430,8 @@ function applyNetworkStates(states: NetworkObjectState[]): void {
     body.state = cloneBody(state);
     physics.setBodyTransform(body.handle, state.position, state.rotation);
     physics.setBodyVelocity(body.handle, state.linearVelocity, state.angularVelocity);
+    if (bundle && descriptor?.kind === "world-entity")
+      applySurfaceMotor(physics, bundle, descriptor.entityIndex, body.handle, state.flags);
   }
 }
 
@@ -351,11 +470,14 @@ function applyOwnership(message: OwnershipChangedPacket): void {
   body.state = cloneBody(message.state);
   physics.setBodyTransform(body.handle, message.state.position, message.state.rotation);
   physics.setBodyVelocity(body.handle, message.state.linearVelocity, message.state.angularVelocity);
+  if (bundle && descriptor?.kind === "world-entity")
+    applySurfaceMotor(physics, bundle, descriptor.entityIndex, body.handle, message.state.flags);
   const localOwner = message.ownerPlayerId && sameId(message.ownerPlayerId, localPlayerId);
   if (localOwner) {
     const pending = message.requestId === null ? null : pendingGrab.get(message.requestId);
     if (!pending || !sameId(pending.target, body.networkId)) return;
     physics.setBodyType(body.handle, "dynamic");
+    applyGravityToBody(body);
     const grab = createPropGrab(
       physicsEngine(),
       body.networkId,
@@ -375,6 +497,32 @@ function applyOwnership(message: OwnershipChangedPacket): void {
   }
 }
 
+function applyManipulation(message: ManipulationChangedMessage): void {
+  if (!localPlayerId || message.worldEpoch !== worldEpoch) return;
+  const localManipulator =
+    message.manipulatorPlayerId !== null && sameId(message.manipulatorPlayerId, localPlayerId);
+  if (localManipulator && message.requestId !== null) {
+    const pending = pendingManipulation.get(message.requestId);
+    if (
+      pending &&
+      sameId(pending.target, message.target) &&
+      pending.authorityVersion === message.authorityVersion
+    ) {
+      manipulation = {
+        target: pending.targetState,
+        authorityVersion: message.authorityVersion,
+        claimVersion: message.claimVersion,
+        stateSequence: 0,
+      };
+      pendingManipulation.delete(message.requestId);
+    }
+    return;
+  }
+  if (manipulation && sameId(manipulation.target.target, message.target)) manipulation = null;
+  for (const [requestId, pending] of pendingManipulation)
+    if (sameId(pending.target, message.target)) pendingManipulation.delete(requestId);
+}
+
 function applyLifecycle(message: LifecycleMessage): void {
   if (!physics || message.worldEpoch !== worldEpoch) return;
   for (const id of message.removed) {
@@ -382,6 +530,7 @@ function applyLifecycle(message: LifecycleMessage): void {
     const body = bodies.get(identity);
     if (body) {
       physics.destroy(body.handle);
+      gravityFields = gravityFields.filter((field) => !sameId(field.handle, body.handle));
       localToNetwork.delete(key(body.handle));
       bodies.delete(identity);
     }
@@ -394,7 +543,11 @@ function applyLifecycle(message: LifecycleMessage): void {
     pendingGrab.forEach((pending, requestId) => {
       if (sameId(pending.target, id)) pendingGrab.delete(requestId);
     });
+    pendingManipulation.forEach((pending, requestId) => {
+      if (sameId(pending.target, id)) pendingManipulation.delete(requestId);
+    });
     if (held && sameId(held.body.networkId, id)) held = null;
+    if (manipulation && sameId(manipulation.target.target, id)) manipulation = null;
   }
   for (const descriptor of message.created)
     descriptors.set(key(descriptor.id), structuredClone(descriptor));
@@ -414,6 +567,20 @@ function dropHeld(): void {
   post({ type: "ownership-drop", message });
 }
 
+function dropManipulation(): void {
+  if (!manipulation) return;
+  const message: ManipulationDropMessage = {
+    type: "manipulation-drop",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch,
+    target: { ...manipulation.target.target },
+    authorityVersion: manipulation.authorityVersion,
+    claimVersion: manipulation.claimVersion,
+  };
+  manipulation = null;
+  post({ type: "manipulation-drop", message });
+}
+
 function updateRemotePlayer(state: NetworkPlayerState): void {
   if (!physics) return;
   const identity = key(state.id);
@@ -431,6 +598,75 @@ function updateRemotePlayer(state: NetworkPlayerState): void {
   }
 }
 
+function processGravityEvents(events: PhysicsStepEvents): void {
+  for (const event of events.sensorBegin) updateGravityOverlap(event.sensor, event.visitor, true);
+  for (const event of events.sensorEnd) updateGravityOverlap(event.sensor, event.visitor, false);
+}
+
+function updateGravityOverlap(sensor: RuntimeId, visitor: RuntimeId, entering: boolean): void {
+  const field = gravityFields.find((candidate) => sameId(candidate.handle, sensor));
+  if (!field) return;
+  const visitorKey = key(visitor);
+  const previous = field.visitors.get(visitorKey) ?? 0;
+  const next = entering ? previous + 1 : Math.max(0, previous - 1);
+  if (next === 0) field.visitors.delete(visitorKey);
+  else field.visitors.set(visitorKey, next);
+  if ((entering && previous === 0) || (!entering && next === 0)) recomputeGravityVisitor(visitor);
+}
+
+function clearGravityVisitor(visitor: RuntimeId): void {
+  const visitorKey = key(visitor);
+  for (const field of gravityFields) field.visitors.delete(visitorKey);
+  if (localPlayerProxy && sameId(localPlayerProxy, visitor)) localGravityFactor = 1;
+}
+
+function recomputeGravityVisitor(visitor: RuntimeId): void {
+  const factor = gravityFactorFor(visitor);
+  if (localPlayerProxy && sameId(localPlayerProxy, visitor)) localGravityFactor = factor;
+  if (held && sameId(held.body.handle, visitor)) applyGravityToBody(held.body);
+}
+
+function gravityFactorFor(visitor: RuntimeId): number {
+  const visitorKey = key(visitor);
+  return (
+    gravityFields
+      .filter((field) => (field.visitors.get(visitorKey) ?? 0) > 0)
+      .toSorted(
+        (left, right) => right.priority - left.priority || left.entityIndex - right.entityIndex,
+      )[0]?.factor ?? 1
+  );
+}
+
+function applyGravityToBody(body: LocalBody): void {
+  if (!physics || !bundle) return;
+  const entity = bundle.entities[body.entityIndex];
+  if (entity?.body?.kind !== "dynamic-brush") return;
+  physics.setGravityScale(body.handle, entity.body.gravityScale * gravityFactorFor(body.handle));
+}
+
+function applySurfaceMotor(
+  world: PhysicsWorld,
+  source: WorldBundle,
+  entityIndex: number,
+  handle: RuntimeId,
+  flags: number,
+): void {
+  const entity = source.entities[entityIndex];
+  if (entity?.kind !== "surface-motor") return;
+  const active = (flags & NETWORK_FLAG_ACTIVE) !== 0;
+  const direction = (flags & NETWORK_FLAG_REVERSED) !== 0 ? -1 : 1;
+  world.setSurfaceVelocity(
+    handle,
+    active
+      ? {
+          x: entity.velocity.x * direction,
+          y: entity.velocity.y * direction,
+          z: entity.velocity.z * direction,
+        }
+      : { x: 0, y: 0, z: 0 },
+  );
+}
+
 function createBody(
   world: PhysicsWorld,
   source: WorldBundle,
@@ -439,13 +675,31 @@ function createBody(
 ): LocalBody | null {
   const entity = source.entities[descriptor.entityIndex];
   const spec = entity?.body;
-  if (!entity || !spec || spec.kind === "sensor-brush") return null;
+  if (!entity || !spec) return null;
   const first = source.brushes[spec.brushIndices[0]!];
   if (!first) return null;
+  if (spec.kind === "sensor-brush") {
+    if (entity.kind !== "gravity-field") return null;
+    const handle = world.createSensorHulls({
+      position: state.position,
+      rotation: state.rotation,
+      hulls: spec.brushIndices.map((index) => ({
+        vertices: source.brushes[index]!.worldVertices,
+      })),
+    });
+    return {
+      networkId: { ...descriptor.id },
+      handle,
+      entityIndex: descriptor.entityIndex,
+      state: cloneBody(state),
+    };
+  }
   const type =
-    descriptor.ownerPlayerId && localPlayerId && sameId(descriptor.ownerPlayerId, localPlayerId)
-      ? "dynamic"
-      : "kinematic";
+    spec.kind === "static-brush"
+      ? "static"
+      : descriptor.ownerPlayerId && localPlayerId && sameId(descriptor.ownerPlayerId, localPlayerId)
+        ? "dynamic"
+        : "kinematic";
   const material =
     spec.kind === "dynamic-brush"
       ? {
@@ -453,7 +707,9 @@ function createBody(
           friction: spec.friction,
           restitution: spec.restitution,
         }
-      : {};
+      : entity.kind === "surface-motor"
+        ? { friction: entity.friction }
+        : {};
   const handle =
     spec.brushIndices.length === 1
       ? world.createHull({
@@ -477,6 +733,8 @@ function createBody(
           ...material,
         });
   world.setBodyVelocity(handle, state.linearVelocity, state.angularVelocity);
+  if (spec.kind === "dynamic-brush") world.setGravityScale(handle, spec.gravityScale);
+  applySurfaceMotor(world, source, descriptor.entityIndex, handle, state.flags);
   return {
     networkId: { ...descriptor.id },
     handle,
@@ -595,6 +853,29 @@ function playerCapsule(crouched: boolean) {
 
 function yawRotation(yaw: number) {
   return { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) };
+}
+
+function subtract(a: NetworkBodyState["position"], b: NetworkBodyState["position"]) {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+function scale(value: NetworkBodyState["position"], amount: number) {
+  return { x: value.x * amount, y: value.y * amount, z: value.z * amount };
+}
+
+function inverseRotate(
+  rotation: NetworkBodyState["rotation"],
+  value: NetworkBodyState["position"],
+) {
+  const inverse = { x: -rotation.x, y: -rotation.y, z: -rotation.z, w: rotation.w };
+  const tx = 2 * (inverse.y * value.z - inverse.z * value.y);
+  const ty = 2 * (inverse.z * value.x - inverse.x * value.z);
+  const tz = 2 * (inverse.x * value.y - inverse.y * value.x);
+  return {
+    x: value.x + inverse.w * tx + inverse.y * tz - inverse.z * ty,
+    y: value.y + inverse.w * ty + inverse.z * tx - inverse.x * tz,
+    z: value.z + inverse.w * tz + inverse.x * ty - inverse.y * tx,
+  };
 }
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {

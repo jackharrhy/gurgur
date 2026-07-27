@@ -18,6 +18,40 @@ export type BodySnapshot = {
 export type ConstraintId = { index: number; generation: number };
 export type BodyKind = "static" | "kinematic" | "dynamic";
 
+export type JointFrame = {
+  position: Vec3;
+  rotation: Quat;
+};
+
+export type JointBodies = {
+  bodyA: RuntimeId;
+  bodyB?: RuntimeId;
+  localFrameA: JointFrame;
+  localFrameB: JointFrame;
+  collideConnected?: boolean;
+};
+
+export type RevoluteMotor =
+  | { mode: "none" }
+  | { mode: "friction"; maxTorque: number }
+  | {
+      mode: "target-angle";
+      targetAngle: number;
+      hertz: number;
+      dampingRatio: number;
+    }
+  | { mode: "target-velocity"; targetVelocity: number; maxTorque: number };
+
+export type PrismaticMotor =
+  | { mode: "none" }
+  | {
+      mode: "target-position";
+      targetPosition: number;
+      hertz: number;
+      dampingRatio: number;
+    }
+  | { mode: "target-velocity"; targetVelocity: number; maxForce: number };
+
 export type BodyState = BodySnapshot & {
   linearVelocity: Vec3;
   angularVelocity: Vec3;
@@ -278,6 +312,56 @@ export type OwnershipDeniedMessage = {
   reason: "stale" | "unavailable" | "out-of-range";
 };
 
+export type ManipulationRequestMessage = {
+  type: "manipulation-request";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number;
+  target: RuntimeId;
+  authorityVersion: number;
+  localAnchor: Vec3;
+  holdDistance: number;
+};
+
+export type ManipulationDropMessage = {
+  type: "manipulation-drop";
+  protocolVersion: 5;
+  worldEpoch: number;
+  target: RuntimeId;
+  authorityVersion: number;
+  claimVersion: number;
+};
+
+export type ManipulationChangedMessage = {
+  type: "manipulation-changed";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number | null;
+  target: RuntimeId;
+  authorityVersion: number;
+  claimVersion: number;
+  manipulatorPlayerId: RuntimeId | null;
+};
+
+export type ManipulationDeniedMessage = {
+  type: "manipulation-denied";
+  protocolVersion: 5;
+  worldEpoch: number;
+  requestId: number;
+  target: RuntimeId;
+  reason: "stale" | "unavailable" | "out-of-range" | "busy";
+};
+
+export type ManipulationStatePacket = {
+  worldEpoch: number;
+  target: RuntimeId;
+  authorityVersion: number;
+  claimVersion: number;
+  stateSequence: number;
+  targetPosition: Vec3;
+  targetRotation: Quat;
+};
+
 export type UseRequestMessage = {
   type: "use-request";
   protocolVersion: 5;
@@ -292,6 +376,8 @@ export type ClientControlMessage =
   | RtcAnswerMessage
   | SpeakMessage
   | OwnershipRequestMessage
+  | ManipulationRequestMessage
+  | ManipulationDropMessage
   | UseRequestMessage;
 export type ServerControlMessage =
   | WelcomeMessage
@@ -299,7 +385,9 @@ export type ServerControlMessage =
   | RtcOfferMessage
   | SpeechMessage
   | SpeechRejectedMessage
-  | OwnershipDeniedMessage;
+  | OwnershipDeniedMessage
+  | ManipulationChangedMessage
+  | ManipulationDeniedMessage;
 
 export type InputCommand = {
   type: "input";

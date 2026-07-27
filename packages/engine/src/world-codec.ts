@@ -433,7 +433,8 @@ export function decodeCompiledEntityCapabilities(value: unknown): CompiledEntity
     if (
       entity.interaction !== "none" &&
       entity.interaction !== "use" &&
-      entity.interaction !== "grab"
+      entity.interaction !== "grab" &&
+      entity.interaction !== "manipulate"
     )
       throw new Error("world bundle entity interaction is invalid");
     assertPresentation(entity.presentation);
@@ -471,7 +472,7 @@ function assertBody(value: unknown): void {
   if (!value.brushIndices.every((index) => Number.isSafeInteger(index) && Number(index) >= 0))
     throw new Error("world bundle body brush indices must be non-negative integers");
   if (value.kind === "dynamic-brush")
-    assertFiniteFields(value, ["density", "friction", "restitution"]);
+    assertFiniteFields(value, ["density", "friction", "restitution", "gravityScale"]);
 }
 
 function assertPresentation(value: unknown): void {
@@ -488,6 +489,20 @@ function assertPresentation(value: unknown): void {
       throw new Error("world bundle sprite asset must be an extensionless logical ID");
     if (!finite(value.height) || typeof value.glow !== "boolean")
       throw new Error("world bundle sprite presentation is invalid");
+    return;
+  }
+  if (value.kind === "constraint") {
+    if (
+      value.style !== "hinge" &&
+      value.style !== "motor" &&
+      value.style !== "slider" &&
+      value.style !== "ball-socket" &&
+      value.style !== "rope" &&
+      value.style !== "rod" &&
+      value.style !== "spring" &&
+      value.style !== "weld"
+    )
+      throw new Error("world bundle constraint presentation style is invalid");
     return;
   }
   if (value.kind === "light") {

@@ -20,6 +20,10 @@ kinematic targets, filtered raycasts, player proxies, bounded dynamic-body targe
 drives, and save requests.
 It cannot step or dispose the world, construct arbitrary bodies, or extract
 debug data.
+Host mechanism construction receives a separate `HostMechanismEngine`
+capability. It can create and mutate native joints—including temporary control
+joints—gravity scale, and surface velocity without forcing browser
+grab-controller adapters to expose dummy joint APIs.
 
 The adapter's bounded debug extraction uses `b3World_Draw` only on demand. The
 installed binding emits broad-phase bounds, joint segments, and live contact
@@ -85,10 +89,65 @@ created as Box3D static triangle meshes. Render batches and collision meshes sha
 the same converted vertices and source-face identity, while keeping independent
 indices where material batching requires it.
 
-Moving brush entities are convex hulls or compounds of convex hulls. Doors and
+Moving brush entities are convex hulls or compounds of convex hulls. A dynamic
+multi-brush entity remains several convex shapes on one moving body; Box3D's
+static-only compound-shape primitive is never used for it. The first brush
+centre is the stable body and presentation origin. Doors and
 platforms are kinematic bodies. Triggers are sensor shapes. Loose props are
 dynamic bodies. Terrain uses a static mesh unless a height field is explicitly
 authored. Dynamic concave triangle meshes are forbidden.
+
+One sensor body may contain several convex sensor shapes. Gameplay maintains
+per-visitor overlap reference counts, so crossing between adjacent brushes in
+one trigger or gravity field produces one logical enter and exit.
+
+## Physics contraptions
+
+`physics-joint` entities map directly to Box3D revolute, prismatic, spherical,
+weld, and distance joints. Revolute and prismatic joints support authored-pose
+limits plus friction, target-angle/position spring motors, and target-velocity
+motors. Distance joints implement rope, rigid rod, and damped spring behavior.
+All joints use compiler-produced local frames; restoring body transforms never
+redefines an anchor from the restored world pose. Connected-body collision is
+disabled.
+
+Joint graphs are always Bun authority. Browsers receive each connected body as a
+kinematic collision/query proxy and never recreate the graph. These bodies have
+`fixed` transfer policy, and compilation rejects a graph containing a
+grab-leased part.
+
+Direct manipulation does not relax that rule. Bun creates an untracked private
+kinematic helper body and a Box3D motor/control joint from it to the captured
+body-local hit point. Browser target state moves only the helper. All
+contraption bodies, authored joints, contacts, motors, and the temporary control
+joint therefore solve together in Bun's world. The helper has no runtime,
+network, renderer, or persistence identity and is destroyed with the claim.
+Force and torque limits scale with target mass; position and rotation use
+separate spring frequencies and damping.
+
+Every body tracks all child shapes. Setting conveyor velocity updates the native
+surface material on every child, and the same tangent velocity is returned as
+support point velocity to the geometric player controller. This gives rigid
+bodies and players the same physical conveyor motion without translating the
+conveyor body.
+
+Gravity fields are evaluated by the peer currently simulating an object.
+Highest priority wins; ties use compiled entity order. The selected factor
+multiplies the object's authored baseline `gravityScale`, including controller
+gravity for players. Leaving the last overlapping shape restores the baseline.
+Ownership handoff does not bake the temporary field factor into authored or
+persisted body state.
+
+## Constraint presentation
+
+Compiled joints optionally carry one generic `constraint` presentation with a
+style of hinge, motor, slider, ball socket, rope, rod, spring, or weld. It
+contains no live physics state. The renderer derives both world anchors from
+the compiled local frames and each presented body transform every frame. Ball
+sockets render as balls; ropes sag between anchors; springs use a coiled line;
+the other styles use compact axle, rail, rod, or weld markers. Presentation
+therefore follows restored and replicated body poses without a mapper classname
+branch or protocol message.
 
 ## Player controller
 

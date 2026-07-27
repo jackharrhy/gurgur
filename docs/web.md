@@ -153,8 +153,9 @@ Ambient lights set the medium density; directional and ambient lights affect
 surfaces but do not contribute volumetric scattering. Glow sprites remain a
 deliberate unlit presentation exception.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
-low-resolution scene pass. Mint means locally available; amber identifies a prop
-owned by the local player's active grab lease.
+low-resolution scene pass. Mint means a loose prop is locally available; orange
+marks an available fixed-authority manipulation target; amber identifies the
+local player's active grab lease or manipulation claim.
 Exact, colorless silhouettes first accumulate stencil coverage without testing
 or changing world depth. The expanded hull then ignores world depth but draws
 only where coverage remains zero, and player billboards render afterward against
@@ -187,6 +188,11 @@ palette pass then quantizes deliberately jagged, already stepped source art rath
 than smoothing pristine 3D shading.
 These choices are presentation rules rather than simulation constraints: physics,
 interaction rays, map geometry, and network transforms remain full precision.
+
+Constraint presentation also consumes only `PresentationSpec`. The renderer
+derives live world anchors from compiled local frames and buffered body
+transforms, then draws a ball, axle, motor ring, slider rail, rope, rod, spring,
+or weld marker. It sends no state and never compares a TrenchBroom classname.
 
 Per-listener area music consumes typed `play`/`stop` outputs from compiled
 `trigger` entities targeting `ambient-audio` entity indices, without mapper

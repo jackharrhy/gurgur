@@ -16,6 +16,7 @@ import {
   entityInputDomain,
   type CompiledGameEntity,
   type OutputConnection,
+  type PhysicsJointEntity,
   type TriggerEntity,
   type WorldBundle,
 } from "./world";
@@ -365,6 +366,14 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
     enter: AuthoredOutputConnection;
     exit?: AuthoredOutputConnection;
   }> = [];
+  const pendingPhysicsJoints: Array<{
+    entityIndex: number;
+    line: number;
+    attach1: string;
+    attach2?: string;
+    worldFrame: { position: Vec3; rotation: { x: number; y: number; z: number; w: number } };
+    secondWorldPosition?: Vec3;
+  }> = [];
   let settings: WorldSettings | undefined;
   let worldspawnCount = 0;
   for (const [sourceEntityIndex, entity] of map.entities.entries()) {
@@ -410,6 +419,29 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
         ...compiled.outputs,
       });
       addTargetEntityIndex(targetEntityIndices, entity.properties.targetname, entityIndex);
+    } else if (compiled.kind === "connected-physics-joint") {
+      const entityIndex = entities.length;
+      entities.push({
+        ...compiled.entity,
+        attachmentAEntityIndex: -1,
+        attachmentBEntityIndex: null,
+        localFrameA: compiled.worldFrame,
+        localFrameB: {
+          position: compiled.secondWorldPosition ?? compiled.worldFrame.position,
+          rotation: compiled.worldFrame.rotation,
+        },
+      } as PhysicsJointEntity);
+      pendingPhysicsJoints.push({
+        entityIndex,
+        line: entity.line,
+        attach1: compiled.attach1,
+        ...(compiled.attach2 ? { attach2: compiled.attach2 } : {}),
+        worldFrame: compiled.worldFrame,
+        ...(compiled.secondWorldPosition
+          ? { secondWorldPosition: compiled.secondWorldPosition }
+          : {}),
+      });
+      addTargetEntityIndex(targetEntityIndices, entity.properties.targetname, entityIndex);
     } else {
       const entityIndex = entities.length;
       entities.push(compiled.entity);
@@ -453,6 +485,52 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
     };
     validateListenerOutputPair(sourceName, pending.line, trigger, entities);
   }
+  for (const pending of pendingPhysicsJoints) {
+    const joint = entities[pending.entityIndex] as PhysicsJointEntity;
+    const attachmentAEntityIndex = resolveJointAttachment(
+      sourceName,
+      pending.line,
+      pending.attach1,
+      entities,
+      targetEntityIndices,
+    );
+    const attachmentBEntityIndex = pending.attach2
+      ? resolveJointAttachment(
+          sourceName,
+          pending.line,
+          pending.attach2,
+          entities,
+          targetEntityIndices,
+        )
+      : null;
+    if (attachmentAEntityIndex === attachmentBEntityIndex)
+      throw new Error(`${sourceName}:${pending.line}: constraint cannot attach a body to itself`);
+    const attachmentA = entities[attachmentAEntityIndex]!;
+    const attachmentB = attachmentBEntityIndex === null ? null : entities[attachmentBEntityIndex]!;
+    if (attachmentA.body?.kind !== "dynamic-brush" && attachmentB?.body?.kind !== "dynamic-brush")
+      throw new Error(
+        `${sourceName}:${pending.line}: constraint graph must include a dynamic body`,
+      );
+    for (const attachment of [attachmentA, attachmentB]) {
+      if (attachment?.body?.kind === "dynamic-brush" && attachment.interaction === "grab")
+        throw new Error(
+          `${sourceName}:${pending.line}: jointed func_physics ${attachment.authoredId} must explicitly set grabbable 0`,
+        );
+    }
+    joint.attachmentAEntityIndex = attachmentAEntityIndex;
+    joint.attachmentBEntityIndex = attachmentBEntityIndex;
+    joint.localFrameA = localJointFrame(bundleBodyOrigin(attachmentA, brushes), pending.worldFrame);
+    joint.localFrameB =
+      attachmentB === null
+        ? {
+            position: pending.secondWorldPosition ?? pending.worldFrame.position,
+            rotation: pending.worldFrame.rotation,
+          }
+        : localJointFrame(bundleBodyOrigin(attachmentB, brushes), {
+            position: pending.secondWorldPosition ?? pending.worldFrame.position,
+            rotation: pending.worldFrame.rotation,
+          });
+  }
   const derived = deriveWorldBuffers(brushes, entities);
   const bundle: WorldBundle = {
     bundleVersion: 1,
@@ -467,6 +545,51 @@ export function compileWorld(source: string, sourceName: string): WorldBundle {
   };
   bundle.mapRevision = createHash("sha256").update(encodeWorldBundle(bundle)).digest("hex");
   return bundle;
+}
+
+function resolveJointAttachment(
+  sourceName: string,
+  line: number,
+  targetName: string,
+  entities: CompiledGameEntity[],
+  targetEntityIndices: Map<string, number[]>,
+): number {
+  const indices = targetEntityIndices.get(targetName) ?? [];
+  if (indices.length !== 1)
+    throw new Error(
+      `${sourceName}:${line}: constraint attachment ${targetName} must resolve to exactly one entity`,
+    );
+  const index = indices[0]!;
+  const entity = entities[index]!;
+  if (!entity.body || entity.body.kind === "sensor-brush")
+    throw new Error(
+      `${sourceName}:${line}: constraint attachment ${targetName} must be a non-sensor body`,
+    );
+  return index;
+}
+
+function bundleBodyOrigin(entity: CompiledGameEntity, brushes: CompiledBrush[]): Vec3 {
+  if (!entity.body || entity.body.brushIndices.length === 0)
+    throw new Error("constraint body has no compiled brushes");
+  const brush = brushes[entity.body.brushIndices[0]!];
+  if (!brush) throw new Error("constraint body brush is missing");
+  if (entity.kind === "linear-mover" && entity.startOpen)
+    return {
+      x: brush.center.x + entity.moveDirection.x * entity.distance,
+      y: brush.center.y + entity.moveDirection.y * entity.distance,
+      z: brush.center.z + entity.moveDirection.z * entity.distance,
+    };
+  return brush.center;
+}
+
+function localJointFrame(
+  bodyPosition: Vec3,
+  frame: { position: Vec3; rotation: { x: number; y: number; z: number; w: number } },
+) {
+  return {
+    position: subtract(frame.position, bodyPosition),
+    rotation: { ...frame.rotation },
+  };
 }
 
 function addTargetEntityIndex(

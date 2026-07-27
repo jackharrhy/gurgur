@@ -17,6 +17,13 @@ authenticated administrator can reset the entire world to its authored state.
   exclusive grab lease.
 - Bun controls unheld props, mechanisms, triggers, movers, diagnostic actors,
   identity, lifecycle, persistence, ownership grants, and global reset.
+- Jointed contraptions are host-fixed compositions. Players can push their
+  parts, operate authored motors, and directly pull one part through an
+  exclusive host-side manipulation claim. The part never leaves the graph's
+  authority.
+- Maps may compose levers, sliders, ball sockets, ropes, springs, welded
+  assemblies, conveyors, gravity areas, and machines such as trebuchets from a
+  small Source-style physics vocabulary.
 - Owner transforms are gameplay truth. Gurgur is a cooperative trusted-client
   social world, not a competitive shooter or anti-cheat boundary.
 - Ordinary collision never transfers control of an object.
@@ -38,6 +45,10 @@ authenticated administrator can reset the entire world to its authored state.
 The centered interaction ray provides world-space feedback without adding a HUD.
 An available physics prop has a pulsing mint silhouette. A prop held by any peer
 is not presented as available.
+An available fixed contraption part uses the same silhouette and becomes amber
+for its local manipulator. Ball sockets, hinges, motors, sliders, ropes, rods,
+springs, and welds have authored-on-by-default physical markers derived from
+their live attachment frames.
 
 Pickup is a reliable request against the prop's current authority version. The
 first valid request wins; a held prop cannot be stolen. The prop is carried from
@@ -45,6 +56,12 @@ its centre of mass toward a stable point in front of the owner. Walls shorten th
 carry position, turning rotates the captured relative orientation, and bounded
 linear/angular response keeps contact physical. Release reliably hands the
 complete final pose and velocity back to Bun.
+
+Direct contraption manipulation is intentionally different from pickup. The
+browser selects the hit point and moves a smoothed target, while Bun pulls that
+point with a control joint and continues simulating the complete machine. The
+first valid claim wins, another player cannot steal it, and release removes only
+the temporary controller.
 
 ## Scope boundaries
 

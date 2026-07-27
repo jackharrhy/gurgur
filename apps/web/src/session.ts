@@ -11,6 +11,7 @@ import {
   decodeOwnershipChanged,
   decodeServerControl,
   decodeStateCluster,
+  encodeManipulationState,
   encodeOwnedState,
   encodeOwnershipDrop,
   encodeOwnerCommit,
@@ -18,6 +19,11 @@ import {
   type BootstrapStatePacket,
   type HelloMessage,
   type LifecycleMessage,
+  type ManipulationChangedMessage,
+  type ManipulationDeniedMessage,
+  type ManipulationDropMessage,
+  type ManipulationRequestMessage,
+  type ManipulationStatePacket,
   type NetworkObjectState,
   type OwnershipChangedPacket,
   type OwnershipDeniedMessage,
@@ -45,6 +51,8 @@ export type SessionCallbacks = {
   state(states: NetworkObjectState[], receivedAtMs: number): void;
   ownership(message: OwnershipChangedPacket, receivedAtMs: number): void;
   ownershipDenied(message: OwnershipDeniedMessage): void;
+  manipulation(message: ManipulationChangedMessage): void;
+  manipulationDenied(message: ManipulationDeniedMessage): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
   network?(rttMs: number, jitterMs: number): void;
   transport?(state: "negotiating" | "webrtc" | "disconnected"): void;
@@ -156,6 +164,26 @@ export class GameSession {
     return this.#sendControl(message);
   }
 
+  requestManipulation(message: ManipulationRequestMessage): boolean {
+    return this.#sendControl(message);
+  }
+
+  sendManipulationState(message: ManipulationStatePacket): boolean {
+    const channel = this.#ownerChannel;
+    if (
+      channel?.readyState !== "open" ||
+      channel.bufferedAmount >= 16_384 ||
+      message.worldEpoch !== this.#worldEpoch
+    )
+      return false;
+    channel.send(encodeManipulationState(message));
+    return true;
+  }
+
+  dropManipulation(message: ManipulationDropMessage): boolean {
+    return this.#sendControl(message);
+  }
+
   dropOwnership(message: OwnershipDropPacket): boolean {
     const socket = this.#socket;
     if (socket?.readyState !== WebSocket.OPEN || message.worldEpoch !== this.#worldEpoch)
@@ -241,6 +269,10 @@ export class GameSession {
       this.#callbacks.speechRejected?.(message);
     } else if (message.type === "ownership-denied") {
       if (message.worldEpoch === this.#worldEpoch) this.#callbacks.ownershipDenied(message);
+    } else if (message.type === "manipulation-changed") {
+      if (message.worldEpoch === this.#worldEpoch) this.#callbacks.manipulation(message);
+    } else if (message.type === "manipulation-denied") {
+      if (message.worldEpoch === this.#worldEpoch) this.#callbacks.manipulationDenied(message);
     }
   }
 

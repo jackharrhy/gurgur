@@ -6,6 +6,8 @@ const fgdType = (property: PropertyDefinition): string =>
     number: "float",
     boolean: "choices",
     vector: "vector",
+    angles: "angle",
+    choices: "choices",
     target: "target_destination",
     targetname: "target_source",
   })[property.editor.type];
@@ -39,6 +41,16 @@ for (const [classname, definition] of Object.entries(entityDefinitions)) {
     if (property.editor.type === "boolean") {
       lines.push(
         `  ${name}(choices) : "${property.editor.description}" : ${property.editor.default ? 1 : 0} = [ 0 : "No" 1 : "Yes" ]`,
+      );
+    } else if (property.editor.type === "choices") {
+      const choices = property.editor.choices
+        ?.map(
+          (choice: { value: string | number; label: string }) =>
+            `${typeof choice.value === "string" ? `"${choice.value}"` : choice.value} : "${choice.label}"`,
+        )
+        .join(" ");
+      lines.push(
+        `  ${name}(choices) : "${property.editor.description}"${quote(property.editor.default ?? "")} = [ ${choices ?? ""} ]`,
       );
     } else {
       const defaultValue =

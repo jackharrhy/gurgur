@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { compileWorld, type WorldBundle } from "@gurgur/game";
 import {
   PHYSICS_DT,
+  NETWORK_FLAG_ACTIVE,
+  NETWORK_FLAG_HELD,
   PROTOCOL_VERSION,
   type InputCommand,
+  type ManipulationRequestMessage,
   type NetworkBodyState,
   type NetworkPlayerState,
   type OwnershipRequestMessage,
@@ -227,6 +230,125 @@ describe("per-object authority host", () => {
       expect(game.worldEpoch).toBe(oldEpoch + 1);
       expect(worlds).toEqual([oldEpoch + 1]);
       expect(playerState(game, player).authorityVersion).toBe(reassigned!.authorityVersion + 1);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("keeps compiled contraption graphs fixed and rebuilds them across reset", async () => {
+    const path = "content/maps/fixtures/physics-contraptions.map";
+    const bundle = compileWorld(await Bun.file(path).text(), path);
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const world = game.worldMessage();
+      const bodyDescriptors = world.runtimeEntities.filter(
+        (entity) => entity.kind === "world-entity",
+      );
+      for (const descriptor of bodyDescriptors) {
+        const entity = bundle.entities[descriptor.entityIndex]!;
+        if (entity.kind === "physics-prop" && entity.interaction === "grab") continue;
+        expect(descriptor.transferPolicy).toBe("fixed");
+      }
+      expect(
+        descriptorFor(game, runtimeId(game, "fixture.trebuchet.projectile")).transferPolicy,
+      ).toBe("grab-lease");
+      const conveyor = runtimeId(game, "fixture.conveyor");
+      expect(bodyState(game, conveyor).flags & NETWORK_FLAG_ACTIVE).toBe(NETWORK_FLAG_ACTIVE);
+      for (let tick = 0; tick < 180; tick += 1) game.advance(PHYSICS_DT);
+      expect(
+        game
+          .snapshot()
+          .bodies.every((body) =>
+            [...Object.values(body.position), ...Object.values(body.rotation)].every(
+              Number.isFinite,
+            ),
+          ),
+      ).toBe(true);
+      const oldEpoch = game.worldEpoch;
+      game.reset();
+      expect(game.worldEpoch).toBe(oldEpoch + 1);
+      expect(bodyState(game, runtimeId(game, "fixture.conveyor")).flags & NETWORK_FLAG_ACTIVE).toBe(
+        NETWORK_FLAG_ACTIVE,
+      );
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("manipulates a jointed body on the host with an exclusive disposable claim", async () => {
+    const path = "content/maps/fixtures/physics-contraptions.map";
+    const bundle = compileWorld(await Bun.file(path).text(), path);
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const first = game.connectPlayer("lever-first");
+      const second = game.connectPlayer("lever-second");
+      const target = runtimeId(game, "fixture.lever.body");
+      const initial = bodyState(game, target);
+      placePlayer(game, first, initial.position, 1);
+      placePlayer(game, second, initial.position, 1);
+      const request: ManipulationRequestMessage = {
+        type: "manipulation-request",
+        protocolVersion: PROTOCOL_VERSION,
+        worldEpoch: game.worldEpoch,
+        requestId: 31,
+        target,
+        authorityVersion: initial.authorityVersion,
+        localAnchor: { x: 0, y: 0, z: 0 },
+        holdDistance: 1.5,
+      };
+      const granted = game.requestManipulation(first, request);
+      expect(typeof granted).not.toBe("string");
+      if (typeof granted === "string") throw new Error(granted);
+      expect(granted.manipulatorPlayerId).toEqual(first);
+      expect(game.requestManipulation(second, { ...request, requestId: 32 })).toBe("busy");
+      expect(bodyState(game, target).flags & NETWORK_FLAG_HELD).toBe(NETWORK_FLAG_HELD);
+      expect(
+        game.acceptManipulationState(first, {
+          worldEpoch: game.worldEpoch,
+          target,
+          authorityVersion: initial.authorityVersion,
+          claimVersion: granted.claimVersion,
+          stateSequence: 1,
+          targetPosition: {
+            x: initial.position.x,
+            y: initial.position.y + 0.75,
+            z: initial.position.z,
+          },
+          targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+        }),
+      ).toBe(true);
+      expect(
+        game.acceptManipulationState(second, {
+          worldEpoch: game.worldEpoch,
+          target,
+          authorityVersion: initial.authorityVersion,
+          claimVersion: granted.claimVersion,
+          stateSequence: 2,
+          targetPosition: initial.position,
+          targetRotation: initial.rotation,
+        }),
+      ).toBe(false);
+      game.advance(PHYSICS_DT);
+      const released = game.endManipulationsForPlayer(first);
+      expect(released).toHaveLength(1);
+      expect(released[0]!.manipulatorPlayerId).toBeNull();
+      expect(bodyState(game, target).flags & NETWORK_FLAG_HELD).toBe(0);
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
+      expect(descriptorFor(game, target).authorityVersion).toBe(initial.authorityVersion);
     } finally {
       game.stop();
       store.close();
