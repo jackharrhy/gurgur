@@ -1,4 +1,9 @@
-import { INPUT_BUNDLE_REDUNDANCY, PROTOCOL_VERSION, STATE_CLUSTER_MAX_BYTES } from "./config";
+import {
+  INPUT_BUNDLE_REDUNDANCY,
+  PREDICTION_BODY_CAPACITY,
+  PROTOCOL_VERSION,
+  STATE_CLUSTER_MAX_BYTES,
+} from "./config";
 import type {
   BootstrapStatePacket,
   InputBundlePacket,
@@ -461,8 +466,21 @@ export function encodePredictionCheckpoint(packet: PredictionCheckpointPacket): 
   writer.u32(packet.serverTick >>> 0);
   writer.u32(packet.lastProcessedInputSequence ?? NULL_REQUEST_ID);
   writeDelta(writer, fullStateDelta(packet.player));
+  if (packet.nearbyBodies.length > PREDICTION_BODY_CAPACITY)
+    throw new Error("prediction checkpoint has too many nearby bodies");
+  const nearbyIds = new Set<string>();
+  writer.u8(packet.nearbyBodies.length);
+  for (const body of packet.nearbyBodies) {
+    const identity = `${body.id.index}:${body.id.generation}`;
+    if (nearbyIds.has(identity))
+      throw new Error("prediction checkpoint contains duplicate nearby bodies");
+    nearbyIds.add(identity);
+    writeDelta(writer, fullStateDelta(body));
+  }
   writer.u8(packet.held ? 1 : 0);
   if (packet.held) {
+    if (nearbyIds.has(`${packet.held.body.id.index}:${packet.held.body.id.generation}`))
+      throw new Error("prediction checkpoint duplicates its held body");
     if (
       !Number.isSafeInteger(packet.held.claimVersion) ||
       packet.held.claimVersion < 1 ||
@@ -497,6 +515,19 @@ export function decodePredictionCheckpoint(
   const encodedSequence = reader.u32();
   const player = applyStateDelta(null, readDelta(reader));
   if (player.kind !== "player") throw new Error("prediction checkpoint requires player state");
+  const nearbyCount = reader.u8();
+  if (nearbyCount > PREDICTION_BODY_CAPACITY)
+    throw new Error("prediction checkpoint has too many nearby bodies");
+  const nearbyBodies = [];
+  const nearbyIds = new Set<string>();
+  for (let index = 0; index < nearbyCount; index += 1) {
+    const body = applyStateDelta(null, readDelta(reader));
+    const identity = `${body.id.index}:${body.id.generation}`;
+    if (body.kind !== "body" || nearbyIds.has(identity))
+      throw new Error("prediction checkpoint nearby-body state is invalid");
+    nearbyIds.add(identity);
+    nearbyBodies.push(body);
+  }
   const hasHeld = reader.u8();
   if (hasHeld > 1) throw new Error("invalid prediction held-body marker");
   let held: PredictionCheckpointPacket["held"] = null;
@@ -507,6 +538,8 @@ export function decodePredictionCheckpoint(
     const body = applyStateDelta(null, readDelta(reader));
     if (claimVersion < 1 || body.kind !== "body")
       throw new Error("prediction held-body state is invalid");
+    if (nearbyIds.has(`${body.id.index}:${body.id.generation}`))
+      throw new Error("prediction checkpoint duplicates its held body");
     held = {
       claimVersion,
       startInputSequence:
@@ -526,6 +559,7 @@ export function decodePredictionCheckpoint(
     serverTick,
     lastProcessedInputSequence: encodedSequence === NULL_REQUEST_ID ? null : encodedSequence,
     player,
+    nearbyBodies,
     held,
   };
 }

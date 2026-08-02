@@ -16,8 +16,9 @@ Keep these invariants:
 
 - Bun owns every network player and shared rigid body plus mechanisms, triggers,
   movers, and diagnostic actors. Browsers never publish gameplay transforms.
-- A browser predicts only its local player and one Bun-confirmed loose held
-  prop. Every other nonowner representation is a non-simulating collision proxy.
+- A browser predicts its local player, one Bun-confirmed loose held prop, and
+  only the bounded nearby loose-body set carried by Bun's checkpoint. Every
+  other nonowner representation is a non-simulating collision proxy.
 - Player simulation, manipulation claims, lifecycle, persistence, mechanisms,
   spawning, deletion, and global reset remain authoritative in Bun.
 - Every physics authority advances Box3D at 60 Hz with four substeps. Never step
@@ -25,6 +26,9 @@ Keep these invariants:
 - Prediction uses the same `stepPlayerController`, `stepPropGrab`, Box3D adapter,
   fixed tick, and four substeps as Bun. Checkpoints restore authoritative state
   and replay unacknowledged commands; prediction never becomes host truth.
+- Input commands are sampled intent, not a movement-work FIFO. Bun consumes the
+  newest delivered intent once per tick and recovers bounded action-counter
+  edges without replaying already elapsed movement time.
 - Reliable lifecycle/discontinuities and disposable input/current state use
   separate transport semantics. Never put current input or state clusters behind
   an ordered reliable queue.

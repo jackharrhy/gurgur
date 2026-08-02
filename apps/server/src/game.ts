@@ -12,6 +12,8 @@ import {
 } from "@gurgur/game";
 import {
   MAX_CATCH_UP_TICKS,
+  PREDICTION_BODY_CAPACITY,
+  PREDICTION_BODY_RADIUS_METRES,
   PHYSICS_DT,
   PHYSICS_HZ,
   PHYSICS_SUBSTEPS,
@@ -146,6 +148,8 @@ export class WorldHost {
   readonly #hotBodyUntilTick = new Map<string, number>();
   readonly #manipulationVersions = new Map<string, number>();
   readonly #networkTraces = new Map<string, ServerPhysicsTraceCapture>();
+  readonly #predictionBodySets = new Map<string, string[]>();
+  readonly #activeBodyContacts = new Map<string, Set<string>>();
 
   private constructor(
     physics: PhysicsWorld,
@@ -306,6 +310,7 @@ export class WorldHost {
   }
 
   disconnectPlayer(id: RuntimeId): boolean {
+    this.#predictionBodySets.delete(key(id));
     return this.#simulation.players.disconnect(id);
   }
 
@@ -333,25 +338,123 @@ export class WorldHost {
       .map((body) => this.#networkBodyState(body, advanceHostSequences));
   }
 
-  predictionCheckpoint(playerId: RuntimeId): PredictionCheckpointPacket | null {
+  predictionCheckpoint(
+    playerId: RuntimeId,
+    sourceStates: readonly NetworkObjectState[] = this.networkStates(false),
+    sourceStatesById: ReadonlyMap<string, NetworkObjectState> = new Map(
+      sourceStates.map((state) => [key(state.id), state]),
+    ),
+  ): PredictionCheckpointPacket | null {
     const prediction = this.#simulation.players.prediction(playerId);
-    const player = this.#simulation.players
-      .networkStates()
-      .find((candidate) => sameId(candidate.id, playerId));
-    if (!prediction || !player) return null;
+    const playerState = sourceStatesById.get(key(playerId));
+    if (!prediction || playerState?.kind !== "player") return null;
+    const player: NetworkPlayerState = playerState;
     const heldBody = prediction.grab ? this.#body(prediction.grab.target) : null;
+    const predictionRadiusSquared = PREDICTION_BODY_RADIUS_METRES ** 2;
+    const playerKey = key(playerId);
+    const previousOrder = new Map(
+      (this.#predictionBodySets.get(playerKey) ?? []).map((identity, index) => [identity, index]),
+    );
+    const candidates: Array<{
+      state: NetworkBodyState;
+      identity: string;
+      distanceSquared: number;
+    }> = [];
+    for (const body of this.#runtimeBodies) {
+      if (heldBody && sameId(body.id, heldBody.id)) continue;
+      const entity = this.#bundle.entities[body.entityIndex];
+      const state = sourceStatesById.get(key(body.id));
+      if (
+        entity?.kind !== "physics-prop" ||
+        entity.interaction !== "grab" ||
+        entity.body.kind !== "dynamic-brush" ||
+        state?.kind !== "body" ||
+        (state.flags & NETWORK_FLAG_HELD) !== 0
+      )
+        continue;
+      const distanceSquared = vec3DistanceSquared(player.position, state.position);
+      if (distanceSquared > predictionRadiusSquared) continue;
+      candidates.push({ state, identity: key(body.id), distanceSquared });
+    }
+
+    // Source-style bounded prediction must keep the bodies that actually form
+    // the player's local interaction island. Prefer the current support and the
+    // loose-body contact graph rooted at the held prop; use prior membership to
+    // keep the remaining slots stable, then distance only as the final tie-break.
+    const eligible = new Set(candidates.map((candidate) => candidate.identity));
+    const contactDepth = new Map<string, number>();
+    if (heldBody) {
+      const root = key(heldBody.id);
+      contactDepth.set(root, 0);
+      const queue = [root];
+      for (let index = 0; index < queue.length; index += 1) {
+        const current = queue[index]!;
+        const depth = contactDepth.get(current)!;
+        for (const neighbor of this.#activeBodyContacts.get(current) ?? []) {
+          if (!eligible.has(neighbor) || contactDepth.has(neighbor)) continue;
+          contactDepth.set(neighbor, depth + 1);
+          queue.push(neighbor);
+        }
+      }
+    }
+    const playerIndex = this.#simulation.players
+      .views()
+      .findIndex((candidate) => sameId(candidate.id, playerId));
+    const playerProxy = this.#simulation.players.proxies()[playerIndex] ?? null;
+    const support = this.#physics.raycastClosest(
+      player.position,
+      { x: 0, y: -(PLAYER_HALF_HEIGHT + 0.15), z: 0 },
+      { ignoreBodies: playerProxy ? [playerProxy] : [] },
+    );
+    const supportKey = support ? key(support.body) : null;
+    candidates.sort((left, right) => {
+      const leftContact = contactDepth.get(left.identity);
+      const rightContact = contactDepth.get(right.identity);
+      const leftPriority =
+        left.identity === supportKey
+          ? 0
+          : leftContact !== undefined
+            ? 1 + leftContact
+            : previousOrder.has(left.identity)
+              ? 100 + previousOrder.get(left.identity)!
+              : 1_000;
+      const rightPriority =
+        right.identity === supportKey
+          ? 0
+          : rightContact !== undefined
+            ? 1 + rightContact
+            : previousOrder.has(right.identity)
+              ? 100 + previousOrder.get(right.identity)!
+              : 1_000;
+      return (
+        leftPriority - rightPriority ||
+        left.distanceSquared - right.distanceSquared ||
+        left.identity.localeCompare(right.identity)
+      );
+    });
+    const nearbyBodies = candidates
+      .slice(0, PREDICTION_BODY_CAPACITY)
+      .map((candidate) => candidate.state);
+    this.#predictionBodySets.set(playerKey, [
+      ...(heldBody ? [key(heldBody.id)] : []),
+      ...nearbyBodies.map((state) => key(state.id)),
+    ]);
     return {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick >>> 0,
       lastProcessedInputSequence: prediction.lastProcessedInputSequence,
       player,
+      nearbyBodies,
       held:
         prediction.grab && heldBody
           ? {
               claimVersion: prediction.grabVersion,
               startInputSequence: prediction.grabStartInputSequence,
               localAnchor: { x: 0, y: 0, z: 0 },
-              body: this.#networkBodyState(heldBody, false),
+              body: (() => {
+                const sampled = sourceStatesById.get(key(heldBody.id));
+                return sampled?.kind === "body" ? sampled : this.#networkBodyState(heldBody, false);
+              })(),
               distance: prediction.grab.distance,
               relativeRotation: { ...prediction.grab.relativeRotation },
               targetPosition: { ...prediction.grab.targetPosition },
@@ -565,6 +668,7 @@ export class WorldHost {
     const index = this.#runtimeBodies.findIndex((body) => key(body.id) === identity);
     const body = this.#runtimeBodies[index];
     if (!body) return false;
+    this.#forgetBodyContacts(body.handle);
     this.#physics.destroy(body.handle);
     this.#runtimeBodies.splice(index, 1);
     return true;
@@ -807,6 +911,8 @@ export class WorldHost {
     this.#lastPublishedBodies.clear();
     this.#hotBodyUntilTick.clear();
     this.#manipulationVersions.clear();
+    this.#predictionBodySets.clear();
+    this.#activeBodyContacts.clear();
     this.#maxStateAgeMs = 0;
     this.#worldEpoch += 1;
     this.#serverTick = 0;
@@ -935,6 +1041,38 @@ export class WorldHost {
 
   #processPostPhysics(events: PhysicsStepEvents): void {
     this.#simulation.processSensorEvents(events.sensorBegin, events.sensorEnd);
+    for (const event of events.contactBegin) this.#setBodyContact(event.a, event.b, true);
+    for (const event of events.contactEnd) this.#setBodyContact(event.a, event.b, false);
+  }
+
+  #setBodyContact(a: RuntimeId, b: RuntimeId, active: boolean): void {
+    const aKey = key(a);
+    const bKey = key(b);
+    if (active) {
+      const aContacts = this.#activeBodyContacts.get(aKey) ?? new Set<string>();
+      const bContacts = this.#activeBodyContacts.get(bKey) ?? new Set<string>();
+      aContacts.add(bKey);
+      bContacts.add(aKey);
+      this.#activeBodyContacts.set(aKey, aContacts);
+      this.#activeBodyContacts.set(bKey, bContacts);
+      return;
+    }
+    const aContacts = this.#activeBodyContacts.get(aKey);
+    const bContacts = this.#activeBodyContacts.get(bKey);
+    aContacts?.delete(bKey);
+    bContacts?.delete(aKey);
+    if (aContacts?.size === 0) this.#activeBodyContacts.delete(aKey);
+    if (bContacts?.size === 0) this.#activeBodyContacts.delete(bKey);
+  }
+
+  #forgetBodyContacts(id: RuntimeId): void {
+    const identity = key(id);
+    for (const neighbor of this.#activeBodyContacts.get(identity) ?? []) {
+      const contacts = this.#activeBodyContacts.get(neighbor);
+      contacts?.delete(identity);
+      if (contacts?.size === 0) this.#activeBodyContacts.delete(neighbor);
+    }
+    this.#activeBodyContacts.delete(identity);
   }
 
   #recordPhysicsTraces(events: PhysicsStepEvents): void {

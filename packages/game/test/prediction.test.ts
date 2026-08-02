@@ -72,6 +72,45 @@ describe("shared Source-style prediction subset", () => {
     }
   });
 
+  test("replays a held prop and its loose-body contact island identically", async () => {
+    const server = await createAdapter(true);
+    const browser = await createAdapter(true);
+    try {
+      const initialNeighbor = server.world.state(server.looseBodies[0]!).position;
+      for (let tick = 0; tick < 180; tick += 1) {
+        const command = {
+          moveX: tick < 90 ? 0.2 : -0.15,
+          moveZ: tick < 120 ? 0.35 : 0,
+          lookYaw: Math.min(1.15, tick / 90),
+          lookPitch: -0.18,
+          jumpCounter: 0,
+        };
+        const authoritative = stepAdapter(server, command);
+        const predicted = stepAdapter(browser, command);
+        expectVec3(predicted.player.position, authoritative.player.position, 1e-4);
+        expectVec3(predicted.body.position, authoritative.body.position, 1e-4);
+        for (let index = 0; index < authoritative.looseBodies.length; index += 1) {
+          expectVec3(
+            predicted.looseBodies[index]!.position,
+            authoritative.looseBodies[index]!.position,
+            1e-4,
+          );
+          expectVec3(
+            predicted.looseBodies[index]!.linearVelocity,
+            authoritative.looseBodies[index]!.linearVelocity,
+            1e-4,
+          );
+        }
+      }
+      expect(
+        distance(server.world.state(server.looseBodies[0]!).position, initialNeighbor),
+      ).toBeGreaterThan(0.05);
+    } finally {
+      server.world.dispose();
+      browser.world.dispose();
+    }
+  });
+
   test("walks onto, stands on, and crosses the newest loose-prop collision proxy", async () => {
     const world = await PhysicsWorld.create();
     try {
@@ -149,10 +188,11 @@ type Adapter = {
   playerProxy: RuntimeId;
   player: PlayerControllerState;
   grab: PropGrab;
+  looseBodies: RuntimeId[];
   tick: number;
 };
 
-async function createAdapter(): Promise<Adapter> {
+async function createAdapter(withContactIsland = false): Promise<Adapter> {
   const world = await PhysicsWorld.create();
   world.createBox({
     type: "static",
@@ -165,6 +205,22 @@ async function createAdapter(): Promise<Adapter> {
     halfExtents: { x: 0.3, y: 0.3, z: 0.3 },
     density: 1,
   });
+  const looseBodies = withContactIsland
+    ? [
+        world.createBox({
+          type: "dynamic",
+          position: { x: 0.62, y: 0.35, z: -1.4 },
+          halfExtents: { x: 0.3, y: 0.3, z: 0.3 },
+          density: 0.5,
+        }),
+        world.createBox({
+          type: "dynamic",
+          position: { x: 1.24, y: 0.35, z: -1.4 },
+          halfExtents: { x: 0.3, y: 0.3, z: 0.3 },
+          density: 3,
+        }),
+      ]
+    : [];
   for (let tick = 0; tick < 60; tick += 1) world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
   const player: PlayerControllerState = {
     position: { x: 0, y: 0.9, z: 1.2 },
@@ -179,7 +235,7 @@ async function createAdapter(): Promise<Adapter> {
     radius: PLAYER_CAPSULE_RADIUS,
     halfSegment: PLAYER_CAPSULE_HALF_SEGMENT,
   });
-  const adapter = { world, prop, playerProxy, player, tick: 0 } as Adapter;
+  const adapter = { world, prop, playerProxy, player, looseBodies, tick: 0 } as Adapter;
   const engine: GameEngine = {
     get tick() {
       return adapter.tick;
@@ -222,7 +278,7 @@ function stepAdapter(
     lookPitch: number;
     jumpCounter: number;
   },
-): { player: PlayerControllerState; body: BodyState } {
+): { player: PlayerControllerState; body: BodyState; looseBodies: BodyState[] } {
   adapter.player = stepPlayerController(adapter.world, adapter.player, command, PHYSICS_DT);
   adapter.engine.updatePlayerProxy(
     adapter.playerProxy,
@@ -239,7 +295,11 @@ function stepAdapter(
   ).toBe(true);
   adapter.world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
   adapter.tick += 1;
-  return { player: structuredClone(adapter.player), body: adapter.world.state(adapter.prop) };
+  return {
+    player: structuredClone(adapter.player),
+    body: adapter.world.state(adapter.prop),
+    looseBodies: adapter.looseBodies.map((body) => adapter.world.state(body)),
+  };
 }
 
 function expectVec3(

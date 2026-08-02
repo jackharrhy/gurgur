@@ -3,16 +3,16 @@
 ## Selected model
 
 Protocol v7 uses Source-style bounded prediction over Bun-authoritative gameplay.
-Bun owns every player and shared rigid body. A browser predicts only its local
-player and, after Bun confirms a loose-prop claim, that one held prop. Prediction
-uses the same `stepPlayerController`, `stepPropGrab`, Box3D adapter, 60 Hz tick,
-and four substeps as Bun. It is restored from authoritative checkpoints and
-replays commands that Bun has not acknowledged.
+Bun owns every player and shared rigid body. A browser predicts its local
+player, a confirmed loose held prop, and the checkpoint-selected nearby loose
+contact island. Prediction uses the same `stepPlayerController`, `stepPropGrab`,
+Box3D adapter, 60 Hz tick, and four substeps as Bun. It is restored from
+authoritative checkpoints and replays commands that Bun has not acknowledged.
 
 This is not deterministic full-world lockstep. Joint-connected contraptions,
-mechanisms, other players, and every unheld shared body remain Bun-only dynamic
-simulation. Browser copies of those objects are non-simulating collision
-proxies.
+mechanisms, other players, and loose bodies outside the bounded local set remain
+Bun-only dynamic simulation. Browser copies of those objects are non-simulating
+collision proxies.
 
 The model follows Source SDK 2013's separation between authoritative server
 movement, shared predicted movement code, command acknowledgement, restore, and
@@ -32,7 +32,8 @@ and transfer policy `fixed`. In protocol v7 every gameplay descriptor has
 | Local network player             | Bun               | predicted and reconciled               |
 | Remote network player            | Bun               | source-timed proxy and buffered render |
 | Confirmed held loose prop        | Bun               | predicted dynamic body, reconciled     |
-| Unheld loose prop                | Bun               | newest-state kinematic collision proxy |
+| Selected nearby loose prop       | Bun               | predicted dynamic body, reconciled     |
+| Other unheld loose prop          | Bun               | newest-state kinematic collision proxy |
 | Jointed body or mechanism        | Bun               | proxy only; no graph prediction        |
 | Trigger, mover, diagnostic actor | Bun               | replicated capability/proxy            |
 
@@ -53,11 +54,14 @@ current command plus up to the previous three commands, oldest to newest. This
 redundancy makes isolated loss recoverable without putting current input behind
 an ordered reliable queue.
 
-Bun keeps a bounded 128-command queue per player. It deduplicates by sequence,
-rejects stale epochs, invalid values, oversized bundles, and implausibly future
-sequences, and consumes at most one queued command per server tick. If the queue
-is empty, continuous intent may repeat, but action counters do not retrigger.
-After the intent timeout, movement returns to zero.
+Bun keeps a bounded 128-command arrival queue per player. It deduplicates by
+sequence and rejects stale epochs, invalid values, oversized bundles, and
+implausibly future sequences. On each server tick it drains the arrivals,
+advances movement once from the newest valid intent, and recovers a bounded
+number of action-counter edges from older samples. A late burst therefore
+cannot become a permanent movement backlog. If no command arrives, continuous
+intent may repeat without retriggering actions; after the intent timeout,
+movement returns to zero.
 
 ## Checkpoints, restore, and replay
 
@@ -67,34 +71,43 @@ At 30 Hz Bun sends each browser an owner-specific
 - `worldEpoch` and authoritative server tick;
 - last processed input sequence;
 - complete local-player physics/controller state;
+- exact states for a stable set of at most four eligible loose bodies within
+  six metres; the player's support and the held prop's live contact graph take
+  priority, retained members fill the next slots, and distance breaks ties;
 - optional complete held-body state;
 - held claim version and grab seed: target, start input sequence, centre local
   anchor, distance, relative rotation, target position/rotation, and tracking
   error.
 
+The checkpoint object and world-state batch are captured inside the same fixed
+tick. Delta encoding, packet construction, and data-channel writes run after the
+simulation step from that immutable batch, so network I/O does not consume the
+Box3D tick budget or change the checkpoint's source tick.
+
 The browser retains 128 prediction records. On a checkpoint it:
 
 1. discards acknowledged records;
-2. restores the authoritative player and optional held body;
-3. samples nearby proxy history at the checkpoint/replay source ticks;
+2. restores the authoritative player, optional held body, and bounded nearby
+   loose-body set as dynamic bodies;
+3. restores every other proxy from source-tick history at the checkpoint tick;
 4. replays every unacknowledged command through the shared controllers and
    Box3D step;
-5. returns ordinary proxies to their newest accepted authoritative state.
+5. keeps only the checkpoint-selected loose set dynamic and returns every other
+   body to its newest accepted authoritative proxy state.
 
 Physics correction is immediate. Rendering keeps continuity with an additive
 visual error offset that decays over 100 ms without suppressing new predicted
-motion. Corrections over one metre ordinarily hard-snap. The initial confirmed
-pickup and a locally predicted release preserve continuity; extraordinary
-release separation remains rate-bounded until it catches the authoritative
-track. Epoch, map, respawn, and lifecycle discontinuities replace history.
+motion. Player corrections over one metre ordinarily hard-snap. Predicted-body
+corrections and transitions out of the bounded set remain rate-bounded. Epoch,
+map, respawn, and lifecycle discontinuities replace history.
 
 ## Collision and presentation timelines
 
 Browser physics never uses the old fixed eight-tick collision delay. An ordinary
 body proxy retains source-tick history but normally targets the newest accepted
 authoritative transform. During checkpoint replay it samples that history at
-the replayed server tick. The local player and confirmed held prop use their
-predicted physics bodies.
+the replayed server tick. The local player, confirmed held prop, and at most four
+checkpoint-selected nearby loose bodies use their predicted physics bodies.
 
 Rendering remains a separate consumer:
 

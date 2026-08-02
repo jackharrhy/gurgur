@@ -7,23 +7,32 @@ Updated: 2026-08-02.
 ## Current state
 
 Protocol v7 implements the Source-style recovery selected by
-[decision 0024](decisions/0024-source-style-networked-physics.md):
+[decision 0024](decisions/0024-source-style-networked-physics.md) and the
+bounded contact-island refinement in
+[decision 0025](decisions/0025-bounded-contact-island-prediction.md):
 
 - Bun simulates every player and shared rigid body at 60 Hz with four substeps;
 - browsers send four-command redundant unordered input bundles and publish no
   player or loose-body gameplay state;
-- each browser predicts its local player and one confirmed held loose prop with
-  the same Box3D adapter, `stepPlayerController`, and `stepPropGrab` used by Bun;
+- each browser predicts its local player, one confirmed held loose prop, and a
+  stable set of at most four eligible loose bodies within six metres with the same Box3D
+  adapter, `stepPlayerController`, and `stepPropGrab` used by Bun;
 - Bun sends owner-specific checkpoints at 30 Hz with the last processed command,
-  complete player state, and optional held-body/grab state;
+  complete player state, bounded nearby loose-body states, and optional
+  held-body/grab state;
 - browsers retain 128 commands, restore checkpoints, replay unacknowledged
   input, and sample nearby proxy history at each replay source tick;
+- Bun treats delivered commands as sampled intent: a late burst acknowledges
+  and consumes its newest sample immediately while recovering action edges;
 - ordinary collision proxies use newest authoritative state instead of the v6
   fixed eight-tick collision timeline;
-- held props render from their predicted dynamic bodies, and both player and
-  held-prop reconciliation use 100 ms visual error decay;
+- every locally predicted body advances a distinct 60 Hz presentation sequence;
+  host samples update correction targets without replacing local tracks;
+- held and nearby predicted props render from their dynamic bodies, and
+  reconciliation uses visual error decay with a 20 cm body step bound;
 - a confirmed grab's release edge is predicted during replay, and extraordinary
   release correction is presentation-rate-bounded instead of teleporting;
+- a held prop is released if it becomes the player's support;
 - interaction-relevant bodies blend to collision-aligned presentation over
   100 ms, remain relevant for 500 ms, and leave outside 2.5 m;
 - loose claims and targets derive from Bun's authoritative player/input state;
@@ -41,22 +50,23 @@ The automated surface now includes:
 
 - protocol-v7 finite/bounds/round-trip coverage for redundant input bundles and
   checkpoints with and without held state;
-- per-player deduplication, bounded ordering, one-command-per-tick consumption,
-  monotonic acknowledgement, and single execution of action edges;
-- independent Bun/browser Box3D adapters that agree for a player and free held
-  prop within `1e-4` metres/radians for the same checkpoint and commands;
+- per-player deduplication, newest-intent burst recovery, monotonic
+  acknowledgement, and single execution of action edges;
+- independent Bun/browser Box3D adapters that agree for a player, free held
+  prop, and held-plus-two-body contact island within `1e-4` metres/radians for
+  the same checkpoint and commands;
 - pickup acceleration/velocity gates that forbid one-frame target arrival;
-- walk, stand, and cross fixtures using newest loose-body proxies, with a 1 cm
+- walk, stand, and cross fixtures using newest loose-body collision poses, with a 1 cm
   penetration and bounded grounded-transition budget;
 - server-authoritative pickup, release, contention, disconnect, reset, and
   jointed manipulation through real Bun/WebRTC;
-- production Chrome movement, physical pickup/release, contention, and
-  contraption scenarios;
+- production Chrome movement, physical pickup/release, same-source-tick
+  host/browser held-state agreement, contention, and contraption scenarios;
 - a bounded trace with command/ack/replay/contact/support data and
   authoritative, collision, predicted, and rendered transforms;
 - a `?debug`/`F8` 15-second capture pairs that browser trace with 900 Bun
-  authoritative frames and downloads one versioned JSON artifact for real
-  gameplay bug reports;
+  authoritative frames, assembles/compresses off the main thread, and downloads
+  one versioned JSON artifact for real gameplay bug reports;
 - the 16-player/128-body real transport matrix and existing fixed-step/tick,
   state-age, traffic, underrun, and analytic-presentation budgets.
 
@@ -64,13 +74,13 @@ The automated surface now includes:
 
 Automated implementation gate, 2026-08-02:
 
-- `bun run check` passes formatting, lint, TypeScript, and all 176 tests;
+- `bun run check` passes formatting, lint, TypeScript, and all 182 tests;
 - `bun run test:browser` passes movement, physical pickup/release, first-wins
   contention/recovery, and server-only contraption scenarios; the adverse
   pickup path also passed three consecutive isolated runs;
 - the 16-player/128-body matrix passes with zero correctness/stale-authority
   errors, zero measured underruns, 100% advancing moving-oracle frames at 60 and
-  120 Hz, approximately 0.74 Mbit/s per recipient, and 2.31/3.37 ms host tick
+  120 Hz, approximately 0.83 Mbit/s per recipient, and 2.47/3.29 ms host tick
   p95/p99;
 - localhost pickup must begin with bounded physical motion, never a mesh
   teleport, and release remains inside the browser discontinuity gate;

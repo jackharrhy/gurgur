@@ -86,10 +86,15 @@ export class PresentationBuffer {
     };
   }
 
-  pushNetwork(states: readonly NetworkObjectState[], receivedAtMs: number): void {
+  pushNetwork(
+    states: readonly NetworkObjectState[],
+    receivedAtMs: number,
+    preserveLocalIds: ReadonlySet<string> = new Set(),
+  ): void {
     for (const state of states) this.#latestNetwork.set(idKey(state.id), cloneState(state));
-    this.#push(states, receivedAtMs, "host", PROXY_INTERPOLATION_TICKS);
-    this.#observeNetworkLateness(states, receivedAtMs);
+    const hostStates = states.filter((state) => !preserveLocalIds.has(idKey(state.id)));
+    this.#push(hostStates, receivedAtMs, "host", PROXY_INTERPOLATION_TICKS);
+    this.#observeNetworkLateness(hostStates, receivedAtMs);
   }
 
   pushLocal(states: readonly NetworkObjectState[], receivedAtMs: number): void {

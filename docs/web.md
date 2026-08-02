@@ -66,23 +66,27 @@ objects present the newest completed 60 Hz worker step with 100 ms visual error
 decay after reconciliation. Remote objects render from
 independent adaptive tracks between four and eight source ticks without
 extrapolation. Recent late arrivals and underruns raise only the affected track;
-delay falls slowly and never rewinds the render timeline. Associated Box3D
-bodies are motion-disabled proxies at the newest accepted authoritative state;
-checkpoint replay samples their retained source-tick history.
+delay falls slowly and never rewinds the render timeline. Box3D bodies outside
+the checkpoint-selected nearby set are motion-disabled proxies at the newest
+accepted authoritative state; checkpoint replay samples their retained
+source-tick history.
 
-After a loose-prop claim appears in a Bun checkpoint, the worker creates a real
-dynamic Box3D body and runs the same fixed-tick grab controller as Bun. The
-renderer reads that predicted physical body, never the desired grab target.
-Checkpoint corrections restore physics immediately and preserve visible player
-and held-body motion with an additive 100 ms error offset. Ordinary corrections
-over one metre hard-snap; confirmed pickup and predicted release keep a bounded
-continuity path, including a 20 cm maximum presentation step while catching an
-extraordinary release separation.
-Nearby, touching, or supporting shared bodies blend to their collision-aligned
-pose over 100 ms and use distance/time hysteresis before returning to buffered
-presentation. Lifecycle removal, respawn, reset, or replacement clears the
-associated prediction and presentation history. Jointed contraptions remain
-server-only and buffered.
+After a loose-prop claim appears in a Bun checkpoint, the worker runs the same
+fixed-tick grab controller as Bun on a real dynamic Box3D body. The checkpoint
+also selects at most four nearby eligible loose bodies for dynamic replay. The
+renderer reads those predicted physical bodies, never the desired grab target.
+Every predicted body advances its local presentation sequence on every worker
+tick; incoming host state updates the correction target without replacing the
+active local track.
+
+Checkpoint corrections restore physics immediately and preserve visible motion
+with an additive 100 ms error offset. Large player discontinuities hard-snap;
+predicted-body correction and exit from the bounded set use a 20 cm maximum
+presentation step. Other nearby, touching, or supporting shared bodies blend to
+their collision-aligned pose over 100 ms and use distance/time hysteresis before
+returning to buffered presentation. Lifecycle removal, respawn, reset, or
+replacement clears the associated prediction and presentation history. Jointed
+contraptions remain server-only and buffered.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission. Leaving the page closes the
@@ -190,9 +194,11 @@ joints, and contact points above the scene. The overlay is diagnostic only and
 does not replace coordinator validation of ownership and reliable interactions.
 The same overlay includes a **record 15s** button; `F8` is the in-game shortcut.
 Recording starts a bounded Bun trace for the local player and resets the browser
-prediction recorder at the same time. After 15 seconds the browser combines both
-timelines into a versioned `gurgur-physics-*.json.gz` artifact and downloads it
-(plain JSON is the fallback when browser gzip is unavailable).
+prediction recorder at the same time. Client frames stream to a dedicated
+capture worker. After 15 seconds the main thread transfers Bun's raw trace bytes
+to that worker, which assembles and compresses the versioned
+`gurgur-physics-*.json.gz` artifact before download. Capture serialization cannot
+stall the gameplay worker or turn the diagnostic itself into an input backlog.
 The panel retains a download button in case the automatic download is blocked.
 The artifact contains full commands, acknowledgements, replay counts,
 contact/support identities, the local player and nearby-body authoritative,

@@ -108,6 +108,7 @@ describe("protocol-v7 network state codecs", () => {
       serverTick: 900,
       lastProcessedInputSequence: 3,
       player: player(),
+      nearbyBodies: [body({ id: { index: 8, generation: 2 } })],
       held: {
         claimVersion: 7,
         startInputSequence: 2,
@@ -125,12 +126,16 @@ describe("protocol-v7 network state codecs", () => {
     expect(decoded.serverTick).toBe(checkpoint.serverTick);
     expect(decoded.lastProcessedInputSequence).toBe(3);
     expectState(decoded.player, checkpoint.player);
+    expectState(decoded.nearbyBodies[0]!, checkpoint.nearbyBodies[0]!);
     expectState(decoded.held!.body, checkpoint.held.body);
     expect(decoded.held!.claimVersion).toBe(7);
     expect(decoded.held!.startInputSequence).toBe(2);
     expect(decoded.held!.localAnchor).toEqual({ x: 0, y: 0, z: 0 });
     expect(decoded.held!.distance).toBeCloseTo(1.75);
     expect(decoded.held!.targetPosition).toEqual(checkpoint.held.targetPosition);
+    expect(() =>
+      encodePredictionCheckpoint({ ...checkpoint, nearbyBodies: [checkpoint.held.body] }),
+    ).toThrow("duplicates its held body");
   });
 
   test("round-trips a bounded disposable manipulation target", () => {

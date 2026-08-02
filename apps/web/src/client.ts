@@ -3,7 +3,7 @@ import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createOwnershipClient } from "./ownership-client";
 import { WorldAudio } from "./audio";
-import { PROTOCOL_VERSION } from "@gurgur/engine";
+import { NETWORK_FLAG_HELD, PROTOCOL_VERSION } from "@gurgur/engine";
 import type {
   InputCommand,
   NetworkObjectState,
@@ -15,12 +15,16 @@ import type { WorldMessage } from "@gurgur/game";
 import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
 import { installSpeechChat, type SpeechChat } from "./speech-chat";
 import { SpeechSynthesizer } from "./speech-synthesis";
-import { PredictionTraceRecorder, type PredictionTracePose } from "./prediction-trace";
+import {
+  PredictionTraceRecorder,
+  type PredictionTraceFrame,
+  type PredictionTracePose,
+} from "./prediction-trace";
 import {
   DEBUG_PHYSICS_CAPTURE_SECONDS,
-  buildDebugPhysicsCapture,
-  downloadDebugPhysicsCapture,
-  type DebugPhysicsCaptureArtifact,
+  DebugPhysicsCaptureAssembler,
+  downloadDebugPhysicsCaptureBlob,
+  type DebugPhysicsCaptureDownload,
   type ServerPhysicsCaptureStart,
 } from "./debug-capture";
 
@@ -146,7 +150,9 @@ let currentWorld: WorldMessage | null = null;
 let workerDiscardedCatchUpSeconds = 0;
 const predictionTrace = new PredictionTraceRecorder();
 const authoritativeStates = new Map<string, NetworkObjectState>();
-let lastDebugPhysicsCapture: DebugPhysicsCaptureArtifact | null = null;
+const debugCaptureAssembler = debugEnabled ? new DebugPhysicsCaptureAssembler() : null;
+let activeDebugPhysicsCaptureId: string | null = null;
+let lastDebugPhysicsCapture: DebugPhysicsCaptureDownload | null = null;
 
 const diagnosticBodies = new Map<
   string,
@@ -211,7 +217,16 @@ if (testEnabled) {
         discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
       }),
       predictionTrace: () => predictionTrace.frames(),
-      lastPhysicsCapture: () => structuredClone(lastDebugPhysicsCapture),
+      lastPhysicsCapture: () =>
+        lastDebugPhysicsCapture
+          ? {
+              filename: lastDebugPhysicsCapture.filename,
+              clientFrameCount: lastDebugPhysicsCapture.clientFrameCount,
+              serverFrameCount: lastDebugPhysicsCapture.serverFrameCount,
+              capturedAt: structuredClone(lastDebugPhysicsCapture.capturedAt),
+              bytes: lastDebugPhysicsCapture.blob.size,
+            }
+          : null,
       stallPhysicsWorker: (durationMs: number) => owner.stallForTest(durationMs),
     }),
   });
@@ -272,7 +287,7 @@ let ownerWorldGeneration = 0;
 let lastUseCounter = 0;
 let nextUseRequestId = 1;
 let inputMoving = false;
-let predictedBodyKey: string | null = null;
+let predictedBodyKeys = new Set<string>();
 const enableInputIfReady = (): void => {
   if (stateTransportReady && ownerPhysicsReady && loadedWorldEpoch !== null) {
     input.setWorld(loadedWorldEpoch);
@@ -343,12 +358,22 @@ const owner = createOwnershipClient(
       workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
       document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
       document.body.dataset.ownerStateAt = String(performance.now());
+      const nextPredictedBodyKeys = new Set(
+        states
+          .filter((state) => state.kind === "body")
+          .map((state) => `${state.id.index}:${state.id.generation}`),
+      );
+      for (const identity of predictedBodyKeys) {
+        if (nextPredictedBodyKeys.has(identity)) continue;
+        const authoritative = authoritativeStates.get(identity);
+        if (authoritative) renderer.releaseLocalState(authoritative, producedAtMs);
+      }
+      predictedBodyKeys = nextPredictedBodyKeys;
       renderer.applyLocalStates(states, producedAtMs, reconciled);
       renderer.setPredictionInteractions([...trace.contactIds, ...trace.supportIds]);
-      const predictedBody = states.find((state) => state.kind === "body") ?? null;
-      predictedBodyKey = predictedBody
-        ? `${predictedBody.id.index}:${predictedBody.id.generation}`
-        : null;
+      const predictedBody =
+        states.find((state) => state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0) ??
+        null;
       updateObservedStates(states);
       const predictedPlayer = states.find((state) => state.kind === "player") ?? null;
       if (predictedPlayer && (debugEnabled || testEnabled)) {
@@ -368,7 +393,7 @@ const owner = createOwnershipClient(
         const authoritativeHeld = heldKey ? (authoritativeStates.get(heldKey) ?? null) : null;
         const renderedHeld = heldKey ? (presentedStates.get(heldKey) ?? null) : null;
         const collisionHeld = heldKey ? (collisionById.get(heldKey) ?? null) : null;
-        predictionTrace.record({
+        const frame: PredictionTraceFrame = {
           atMs: producedAtMs,
           worldEpoch: currentWorld?.worldEpoch ?? 0,
           inputSequence: trace.inputSequence,
@@ -406,7 +431,10 @@ const owner = createOwnershipClient(
               },
             };
           }),
-        });
+        };
+        if (activeDebugPhysicsCaptureId && debugCaptureAssembler)
+          debugCaptureAssembler.record(activeDebugPhysicsCaptureId, frame);
+        else predictionTrace.record(frame);
       }
     },
     inputCommand(command) {
@@ -515,6 +543,7 @@ session = new GameSession(
       presentedStates.clear();
       observedStates.clear();
       authoritativeStates.clear();
+      predictedBodyKeys.clear();
       predictionTrace.reset();
       if (testEnabled)
         for (const runtime of message.runtimeEntities) {
@@ -534,6 +563,7 @@ session = new GameSession(
     lifecycle(message) {
       renderer.applyLifecycle(message);
       owner.applyLifecycle(message);
+      for (const id of message.removed) predictedBodyKeys.delete(`${id.index}:${id.generation}`);
       if (currentWorld?.worldEpoch === message.worldEpoch) {
         const removed = new Set(message.removed.map((id) => `${id.index}:${id.generation}`));
         currentWorld.runtimeEntities = [
@@ -564,11 +594,7 @@ session = new GameSession(
     state(states, receivedAtMs) {
       rememberAuthoritative(states);
       renderer.applyNetworkStates(
-        states.filter(
-          (state) =>
-            `${state.id.index}:${state.id.generation}` !== localPlayerKey &&
-            `${state.id.index}:${state.id.generation}` !== predictedBodyKey,
-        ),
+        states.filter((state) => `${state.id.index}:${state.id.generation}` !== localPlayerKey),
         receivedAtMs,
       );
       owner.pushNetworkStates(states);
@@ -576,7 +602,11 @@ session = new GameSession(
       document.body.dataset.worldEpoch = String(loadedWorldEpoch ?? "");
     },
     checkpoint(message) {
-      rememberAuthoritative([message.player, ...(message.held ? [message.held.body] : [])]);
+      rememberAuthoritative([
+        message.player,
+        ...message.nearbyBodies,
+        ...(message.held ? [message.held.body] : []),
+      ]);
       owner.checkpoint(message);
       document.body.dataset.lastAcknowledgedInputSequence = String(
         message.lastProcessedInputSequence ?? -1,
@@ -694,6 +724,9 @@ if (debugEnabled) {
     downloadButton.disabled = true;
     document.body.dataset.debugCapture = "starting";
     predictionTrace.reset();
+    const captureId = crypto.randomUUID();
+    activeDebugPhysicsCaptureId = captureId;
+    debugCaptureAssembler?.start(captureId);
     const startedAtIso = new Date().toISOString();
     const clientStartedAtMs = performance.now();
     debugCaptureRequest = new AbortController();
@@ -735,7 +768,7 @@ if (debugEnabled) {
       captureStatus.textContent = "recording complete · collecting server timeline";
       document.body.dataset.debugCapture = "collecting";
 
-      let serverCapture: unknown = null;
+      let serverJson: ArrayBuffer | null = null;
       const collectionDeadline = performance.now() + 10_000;
       while (performance.now() < collectionDeadline) {
         const captureResponse = await fetch(
@@ -748,57 +781,67 @@ if (debugEnabled) {
         }
         if (!captureResponse.ok)
           throw new Error(`server capture could not be collected (${captureResponse.status})`);
-        serverCapture = await captureResponse.json();
+        serverJson = await captureResponse.arrayBuffer();
         break;
       }
-      if (!serverCapture) throw new Error("server capture did not finish in time");
+      if (!serverJson) throw new Error("server capture did not finish in time");
 
       const completedAtIso = new Date().toISOString();
       const clientCompletedAtMs = performance.now();
-      lastDebugPhysicsCapture = buildDebugPhysicsCapture({
-        capturedAt: {
-          startedAtIso,
-          completedAtIso,
-          clientPerformanceTimeOriginMs: performance.timeOrigin,
-          clientStartedAtMs,
-          clientCompletedAtMs,
-        },
-        context: {
-          url: location.href,
-          userAgent: navigator.userAgent,
-          mapRevision: world.bundle.mapRevision,
-          worldEpoch: world.worldEpoch,
-          localPlayerId: { ...playerId },
-          network: {
-            rttMs: finiteDatasetNumber(document.body.dataset.rttMs),
-            jitterMs: finiteDatasetNumber(document.body.dataset.jitterMs),
-            transport: document.body.dataset.transport ?? null,
-            simulatedLatencyMs: finiteSearchNumber(searchParams, "simulatedLatencyMs", 0),
-            simulatedJitterMs: finiteSearchNumber(searchParams, "simulatedJitterMs", 0),
-            simulatedLossRate: finiteSearchNumber(searchParams, "simulatedLossRate", 0),
-            simulatedSeed: finiteSearchNumber(searchParams, "simulatedSeed", 0x67757267),
+      activeDebugPhysicsCaptureId = null;
+      if (!debugCaptureAssembler) throw new Error("physics capture worker is unavailable");
+      lastDebugPhysicsCapture = await debugCaptureAssembler.finish(
+        captureId,
+        {
+          capturedAt: {
+            startedAtIso,
+            completedAtIso,
+            clientPerformanceTimeOriginMs: performance.timeOrigin,
+            clientStartedAtMs,
+            clientCompletedAtMs,
+          },
+          context: {
+            url: location.href,
+            userAgent: navigator.userAgent,
+            mapRevision: world.bundle.mapRevision,
+            worldEpoch: world.worldEpoch,
+            localPlayerId: { ...playerId },
+            network: {
+              rttMs: finiteDatasetNumber(document.body.dataset.rttMs),
+              jitterMs: finiteDatasetNumber(document.body.dataset.jitterMs),
+              transport: document.body.dataset.transport ?? null,
+              simulatedLatencyMs: finiteSearchNumber(searchParams, "simulatedLatencyMs", 0),
+              simulatedJitterMs: finiteSearchNumber(searchParams, "simulatedJitterMs", 0),
+              simulatedLossRate: finiteSearchNumber(searchParams, "simulatedLossRate", 0),
+              simulatedSeed: finiteSearchNumber(searchParams, "simulatedSeed", 0x67757267),
+            },
+          },
+          client: {
+            discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
+            feel: renderer.clientFeelDiagnostics(),
           },
         },
-        client: {
-          discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
-          feel: renderer.clientFeelDiagnostics(),
-          frames: predictionTrace.frames(),
-        },
-        server: serverCapture,
-      });
+        serverJson,
+      );
+      const captureSummary = {
+        filename: lastDebugPhysicsCapture.filename,
+        clientFrameCount: lastDebugPhysicsCapture.clientFrameCount,
+        serverFrameCount: lastDebugPhysicsCapture.serverFrameCount,
+        capturedAt: lastDebugPhysicsCapture.capturedAt,
+        bytes: lastDebugPhysicsCapture.blob.size,
+      };
       Object.defineProperty(window, "__gurgurLastPhysicsCapture", {
         configurable: true,
-        value: lastDebugPhysicsCapture,
+        value: captureSummary,
       });
-      await downloadDebugPhysicsCapture(lastDebugPhysicsCapture);
-      const serverFrameCount = Array.isArray((serverCapture as { frames?: unknown }).frames)
-        ? (serverCapture as { frames: unknown[] }).frames.length
-        : 0;
+      downloadDebugPhysicsCaptureBlob(lastDebugPhysicsCapture);
       document.body.dataset.debugCaptureClientFrames = String(
-        lastDebugPhysicsCapture.client.frames.length,
+        lastDebugPhysicsCapture.clientFrameCount,
       );
-      document.body.dataset.debugCaptureServerFrames = String(serverFrameCount);
-      captureStatus.textContent = `capture ready · ${lastDebugPhysicsCapture.client.frames.length} client / ${serverFrameCount} server frames`;
+      document.body.dataset.debugCaptureServerFrames = String(
+        lastDebugPhysicsCapture.serverFrameCount,
+      );
+      captureStatus.textContent = `capture ready · ${lastDebugPhysicsCapture.clientFrameCount} client / ${lastDebugPhysicsCapture.serverFrameCount} server frames`;
       document.body.dataset.debugCapture = "complete";
       downloadButton.hidden = false;
     } catch (error) {
@@ -809,6 +852,10 @@ if (debugEnabled) {
       }
     } finally {
       if (countdown !== null) clearInterval(countdown);
+      if (activeDebugPhysicsCaptureId === captureId) {
+        debugCaptureAssembler?.cancel(captureId);
+        activeDebugPhysicsCaptureId = null;
+      }
       debugCaptureRequest = null;
       debugCaptureActive = false;
       recordButton.disabled = false;
@@ -817,7 +864,7 @@ if (debugEnabled) {
   };
   recordButton.addEventListener("click", () => void startPhysicsCapture());
   downloadButton.addEventListener("click", () => {
-    if (lastDebugPhysicsCapture) void downloadDebugPhysicsCapture(lastDebugPhysicsCapture);
+    if (lastDebugPhysicsCapture) downloadDebugPhysicsCaptureBlob(lastDebugPhysicsCapture);
   });
   debugHotkey = (event): void => {
     if (event.code !== "F8" || event.repeat) return;
@@ -868,6 +915,7 @@ addEventListener("pagehide", () => {
   session.close();
   speechChat?.dispose();
   speechSynthesizer.dispose();
+  debugCaptureAssembler?.dispose();
   owner.dispose();
   input.dispose();
   removeEventListener("pointerdown", unlockAudio, { capture: true });

@@ -1,6 +1,6 @@
 # Testing
 
-`bun run check` runs format verification, lint, TypeScript, 176 unit/simulation/
+`bun run check` runs format verification, lint, TypeScript, 182 unit/simulation/
 integration tests, persistence/content tests, and real protocol-v7 server
 transport tests.
 
@@ -12,6 +12,8 @@ transport tests.
 - `bun run test:browser` runs real Chrome movement, pickup/release, contention,
   and jointed contraption scenarios.
 - `bun run test:browser movement|pickup|contention|contraption` selects one.
+- `bun run test:browser capture` runs the full 15-second paired debug capture,
+  downloads it, decompresses it, and validates both timelines.
 
 Run wall-clock performance gates without another CPU-heavy suite in parallel.
 
@@ -32,17 +34,22 @@ different claims and require different oracles.
 1. Codec tests prove protocol-v7 bounds, four-command ordering/redundancy,
    checkpoints with and without a held body, delta baselines, resend, rollover,
    finite fields, and truncation rejection.
-2. The server-player queue test injects duplicate redundant bundles, consumes
-   one command per tick, keeps acknowledgements monotonic, and proves repeated
-   action counters do not retrigger an edge.
+2. The server-player queue test injects duplicate redundant bundles and a
+   16-command late burst. Bun must consume the newest intent in the current
+   tick, drain the backlog, keep acknowledgements monotonic, and execute each
+   recovered action edge once.
 3. Independent Bun/browser adapters start from the same state and replay the
    same command stream through `stepPlayerController`, `stepPropGrab`, Box3D,
-   60 Hz, and four substeps. Player and free held-body pose/velocity traces must
-   agree within `1e-4` metres/radians before network correction.
+   60 Hz, and four substeps. Player, held-body, and held-plus-two-loose-body
+   contact-island pose/velocity traces must agree within `1e-4` metres/radians
+   before network correction.
 4. Pickup simulation proves target speed and body acceleration are bounded: a
    distant target cannot be reached in one fixed step.
-5. Walk/stand/cross simulation uses the newest loose-body collision proxy and
-   permits at most 1 cm penetration and two grounded transitions.
+5. Walk/stand/cross simulation uses the newest loose-body collision pose and
+   permits at most 1 cm penetration and two grounded transitions. A focused
+   game test requires Source-style release when the held body becomes support;
+   another proves a live held-body contact outranks nearer loose candidates in
+   the bounded checkpoint set.
 6. Physics adapter tests cover wall contact, slopes, steps, crouch clearance,
    moving supports, dynamic reaction impulses, mass-independent target drive,
    stacked/compound bodies, joints, sensors, and deterministic replay.
@@ -56,8 +63,10 @@ different claims and require different oracles.
    captures 900 authoritative 60 Hz frames and stops cleanly on world reset,
    player loss, or shutdown.
 9. Real Chrome tests exercise production Wasm, workers, input, reconciliation,
-   WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. A main
-   thread stall must not discard worker time; a worker stall must be measured.
+   WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. Held
+   host/browser transforms are paired by source tick and must stay within 1 cm.
+   A main-thread stall must not discard worker time; a worker stall must be
+   measured.
 10. Side-by-side manual play against clean `main` remains required. Metrics can
     reject known bad feel but cannot prove the absence of every perceptual flaw.
 
@@ -74,6 +83,8 @@ Browser behavior gates require:
   forced behind the Adverse buffer;
 - a confirmed pickup creates a predicted dynamic body and begins physical
   movement without a mesh teleport;
+- the held browser and host simulation agree within 1 cm when compared at the
+  same source tick;
 - no pickup or release frame discontinuity exceeds the physical 25 cm gate,
   including loss while a recently released body remains on its 60 Hz hot path;
 - look changes affect the held physical body within the bounded input/worker/

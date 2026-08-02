@@ -23,11 +23,11 @@ The conditional Source-style route described later in this guide is now the
 selected protocol-v7 architecture. The direct comparison that forced the change
 was:
 
-| Version                   | Player / prop behavior                                                                                        | Observed result                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Clean `main` at `d604849` | Browser simulates its player and held loose prop together with real Box3D                                     | Best local feel, but split gameplay authority and delayed remote state            |
-| Protocol-v6 overlay       | Browser owns player, Bun owns props, collision proxies stay eight ticks old, mesh follows target in one frame | Pickup snap and visible/collision/authority disagreement while walking over props |
-| Protocol v7               | Bun authority; browser runs shared player/held-body simulation, restores checkpoints, and replays commands    | Responsive bounded local physics with explicit correction and one gameplay truth  |
+| Version                     | Player / prop behavior                                                                                        | Observed result                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Clean `main` at `d604849`   | Browser simulates its player and held loose prop together with real Box3D                                     | Best local feel, but split gameplay authority and delayed remote state            |
+| Protocol-v6 overlay         | Browser owns player, Bun owns props, collision proxies stay eight ticks old, mesh follows target in one frame | Pickup snap and visible/collision/authority disagreement while walking over props |
+| Protocol v7 + decision 0025 | Bun authority; browser replays the player, held body, and bounded nearby loose-body contact island            | Responsive local contacts with explicit correction and one gameplay truth         |
 
 Protocol v6 correctly centralized shared rigid bodies, but its feel layer made a
 false physical claim. `SpeculativeHeldPresenter` moved a mesh to the desired
@@ -44,12 +44,24 @@ Protocol v7 replaces those assertions with shared-simulation conformance,
 bounded acceleration, walk/stand/cross contacts, replay/ack correctness, visual
 decay, and production-browser behavior gates.
 
+The first paired `?debug` captures then found three narrower implementation
+mistakes. A capture-induced producer stall left Bun permanently 15–16 commands
+behind because the server treated sampled input as movement work. The held body
+hit two dynamic props at about 8.5 m/s on Bun while browser replay represented
+those props as kinematic. Finally, predicted held poses reused the last host
+state sequence, causing the renderer to discard valid local steps. Decision
+0025 responds directly: newest-intent burst recovery, off-main-thread capture
+assembly, per-tick local presentation sequences, and a checkpoint-selected
+four-body nearby contact island.
+
 This outcome does not invalidate the s&box, Source, or Gaffer analysis below. It
 changes which lessons are decisive. S&box remains the reference for explicit
 identity, proxy state, authority generations, disposable replication, and
 native control joints. Source's authoritative movement, shared prediction code,
 checkpoint restore, command replay, and local physcannon simulation now define
-the player/held-prop model. `arctic-char` provides the concrete historical-proxy
+the player/held-prop model. Gurgur additionally predicts a bounded nearby loose
+contact island because its geometric player controller exchanges explicit
+reaction impulses with loose bodies. `arctic-char` provides the concrete historical-proxy
 sampling pattern used during replay. Gaffer's work defines the fixed-step and
 presentation-time constraints. Box3D remains because the diagnosed failure was
 not a solver failure and the same adapter passes the Bun/browser trace.
@@ -905,8 +917,10 @@ Decision 0022 selected and protocol v6 implemented:
 Decision 0024 subsequently keeps Bun's shared-body authority and source-time
 model, but moves players to Bun authority, replaces loose targets with numbered
 commands and checkpoints, predicts the local player plus one confirmed held
-body, removes fixed collision delay, and reconciles by restore/replay. The
-make-or-break principle remains simple:
+body, removes fixed collision delay, and reconciles by restore/replay. Decision
+0025 extends only the local contact boundary to four checkpoint-selected loose
+bodies while keeping Bun authoritative. The make-or-break principle remains
+simple:
 
 > Networked physics is correct when authority, time, and test oracle describe
 > the same world. Smooth frames are presentation evidence; they are not physics

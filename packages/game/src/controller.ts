@@ -15,7 +15,7 @@ export const PLAYER_HALF_HEIGHT = PLAYER_CAPSULE_RADIUS + PLAYER_CAPSULE_HALF_SE
 const STANDING_HALF_SEGMENT = PLAYER_CAPSULE_HALF_SEGMENT;
 export const PLAYER_CROUCHED_HALF_SEGMENT = 0.25;
 const CROUCH_HEIGHT_DELTA = STANDING_HALF_SEGMENT - PLAYER_CROUCHED_HALF_SEGMENT;
-const WALKABLE_NORMAL_Y = Math.cos((50 * Math.PI) / 180);
+export const PLAYER_WALKABLE_NORMAL_Y = Math.cos((50 * Math.PI) / 180);
 
 export type PlayerControllerInput = {
   moveX: number;
@@ -87,7 +87,7 @@ export function stepPlayerController(
     ? world.raycastClosest(basePosition, { x: 0, y: -(halfHeight + 0.12), z: 0 })
     : null;
   const supportVelocity =
-    support && support.normal.y >= WALKABLE_NORMAL_Y
+    support && support.normal.y >= PLAYER_WALKABLE_NORMAL_Y
       ? world.pointVelocity(support.body, support.point)
       : { x: 0, y: 0, z: 0 };
   const start = world.moveCapsule(
@@ -105,7 +105,7 @@ export function stepPlayerController(
     z: 0,
   });
   const groundProbe =
-    groundHit && groundHit.normal.y >= WALKABLE_NORMAL_Y
+    groundHit && groundHit.normal.y >= PLAYER_WALKABLE_NORMAL_Y
       ? world.castCapsule(start, { x: 0, y: -GROUND_PROBE, z: 0 }, capsule)
       : world.moveCapsule(start, { x: 0, y: -GROUND_PROBE, z: 0 }, capsule);
   const trustedStepGround = state.grounded && state.stepCooldown > 0;
@@ -113,7 +113,7 @@ export function stepPlayerController(
     trustedStepGround ||
     (groundProbe.y > start.y - GROUND_PROBE + EPSILON &&
       !!groundHit &&
-      groundHit.normal.y >= WALKABLE_NORMAL_Y);
+      groundHit.normal.y >= PLAYER_WALKABLE_NORMAL_Y);
   const jumped = input.jumpCounter !== state.lastJumpCounter && wasGrounded;
   let verticalVelocity = jumped
     ? PLAYER_JUMP_SPEED
@@ -191,7 +191,7 @@ export function stepPlayerController(
     const rise = stepSupport ? stepSupport.point.y - currentFloor : Infinity;
     if (
       stepSupport &&
-      stepSupport.normal.y >= WALKABLE_NORMAL_Y &&
+      stepSupport.normal.y >= PLAYER_WALKABLE_NORMAL_Y &&
       rise > EPSILON &&
       rise <= PLAYER_STEP_HEIGHT + 0.01
     ) {
@@ -218,7 +218,7 @@ export function stepPlayerController(
       y: -(halfHeight + snapDistance + 0.02),
       z: 0,
     });
-    const walkable = !!snappedGround && snappedGround.normal.y >= WALKABLE_NORMAL_Y;
+    const walkable = !!snappedGround && snappedGround.normal.y >= PLAYER_WALKABLE_NORMAL_Y;
     const snapped = walkable
       ? world.castCapsule(position, { x: 0, y: -snapDistance, z: 0 }, capsule)
       : world.moveCapsule(position, { x: 0, y: -snapDistance, z: 0 }, capsule);

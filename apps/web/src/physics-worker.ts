@@ -34,6 +34,7 @@ import {
   PLAYER_CAPSULE_RADIUS,
   PLAYER_CROUCHED_HALF_SEGMENT,
   PLAYER_GRAB_REACH,
+  PLAYER_WALKABLE_NORMAL_Y,
   createHostManipulationTarget,
   stepPropGrab,
   playerChest,
@@ -55,6 +56,8 @@ type LocalBody = {
   entityIndex: number;
   state: NetworkBodyState;
   history: NetworkBodyState[];
+  predictable: boolean;
+  predicted: boolean;
 };
 
 type RemotePlayer = {
@@ -364,7 +367,12 @@ function simulateCommand(command: InputCommand, serverTick: number): void {
     physics.destroy(localPlayerProxy);
     localPlayerProxy = physics.createPlayerProxy(next.position, playerCapsule(next.crouched));
   } else if (localPlayerProxy) {
-    physics.setBodyTransform(localPlayerProxy, next.position, yawRotation(next.yaw));
+    physics.setKinematicTargetTransform(
+      localPlayerProxy,
+      next.position,
+      yawRotation(next.yaw),
+      PHYSICS_DT,
+    );
   }
   localPlayer = {
     ...localPlayer,
@@ -384,6 +392,7 @@ function simulateCommand(command: InputCommand, serverTick: number): void {
     predictionPrimaryCounter = command.primaryCounter;
     if (predictedGrab) releasePredictedGrab();
   }
+  dropSupportedPredictedGrab();
   if (predictedGrab) {
     if (!stepPropGrab(physicsEngine(), predictedGrab.grab, playerPose(command)))
       releasePredictedGrab();
@@ -398,26 +407,38 @@ function simulateCommand(command: InputCommand, serverTick: number): void {
 function localPredictedStates(): NetworkObjectState[] {
   if (!localPlayer) return [];
   const states: NetworkObjectState[] = [clonePlayer(localPlayer)];
-  if (!physics || !predictedGrab) return states;
-  const body = bodies.get(key(predictedGrab.grab.target));
-  if (!body) return states;
-  const state = physics.state(body.handle);
-  states.push({
-    ...body.state,
-    kind: "body",
-    id: { ...body.networkId },
-    sourceTick: localPlayer.sourceTick,
-    position: { ...state.position },
-    rotation: { ...state.rotation },
-    linearVelocity: { ...state.linearVelocity },
-    angularVelocity: { ...state.angularVelocity },
-    flags: body.state.flags | NETWORK_FLAG_HELD,
-  });
+  if (!physics) return states;
+  for (const body of bodies.values()) {
+    if (!body.predicted) continue;
+    const state = physics.state(body.handle);
+    const locallyHeld = predictedGrab !== null && sameId(predictedGrab.grab.target, body.networkId);
+    states.push({
+      ...body.state,
+      kind: "body",
+      id: { ...body.networkId },
+      // Local prediction is its own immediate presentation timeline. Reusing
+      // the last authoritative sequence makes PresentationBuffer discard every
+      // simulated pose until another network state happens to arrive.
+      stateSequence: localPlayer.stateSequence,
+      sourceTick: localPlayer.sourceTick,
+      position: { ...state.position },
+      rotation: { ...state.rotation },
+      linearVelocity: { ...state.linearVelocity },
+      angularVelocity: { ...state.angularVelocity },
+      flags:
+        (body.state.flags & ~(NETWORK_FLAG_AWAKE | NETWORK_FLAG_HELD)) |
+        (state.awake ? NETWORK_FLAG_AWAKE : 0) |
+        (locallyHeld ? NETWORK_FLAG_HELD : 0),
+    });
+  }
   return states;
 }
 
 function clonePredictedBody(states: readonly NetworkObjectState[]): NetworkBodyState | null {
-  const body = states.find((state): state is NetworkBodyState => state.kind === "body");
+  const body = states.find(
+    (state): state is NetworkBodyState =>
+      state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0,
+  );
   return body ? cloneBody(body) : null;
 }
 
@@ -460,24 +481,13 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
     playerCapsule(localPlayer.crouched),
   );
 
+  restoreCheckpointBodies(checkpoint);
+
   if (checkpoint.held) {
     const body = bodies.get(key(checkpoint.held.body.id));
     if (body) {
       if (predictedGrab && !sameId(predictedGrab.grab.target, body.networkId))
         releasePredictedGrab();
-      body.state = cloneBody(checkpoint.held.body);
-      rememberBodyState(body, checkpoint.held.body);
-      physics.setBodyType(body.handle, "dynamic");
-      physics.setBodyTransform(
-        body.handle,
-        checkpoint.held.body.position,
-        checkpoint.held.body.rotation,
-      );
-      physics.setBodyVelocity(
-        body.handle,
-        checkpoint.held.body.linearVelocity,
-        checkpoint.held.body.angularVelocity,
-      );
       predictedGrab = {
         claimVersion: checkpoint.held.claimVersion,
         grab: {
@@ -489,7 +499,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
           errorSeconds: checkpoint.held.errorSeconds,
         },
       };
-    }
+    } else releasePredictedGrab();
   } else {
     releasePredictedGrab();
   }
@@ -528,6 +538,48 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
   });
 }
 
+function restoreCheckpointBodies(checkpoint: PredictionCheckpointPacket): void {
+  if (!physics || !bundle) return;
+  const selected = new Map<string, NetworkBodyState>();
+  for (const state of checkpoint.nearbyBodies) {
+    const body = bodies.get(key(state.id));
+    if (body?.predictable) selected.set(key(state.id), state);
+  }
+  if (checkpoint.held) {
+    const body = bodies.get(key(checkpoint.held.body.id));
+    if (body?.predictable) selected.set(key(checkpoint.held.body.id), checkpoint.held.body);
+  }
+
+  for (const body of bodies.values()) {
+    const descriptor = descriptors.get(key(body.networkId));
+    const entity =
+      descriptor?.kind === "world-entity" ? bundle.entities[descriptor.entityIndex] : null;
+    const spec = entity?.body;
+    if (!spec || (spec.kind !== "dynamic-brush" && spec.kind !== "kinematic-brush")) continue;
+    const checkpointState = selected.get(key(body.networkId));
+    const authoritative =
+      checkpointState ?? sampleHistory(body.history, checkpoint.serverTick) ?? body.state;
+    body.predicted = checkpointState !== undefined;
+    physics.setBodyType(body.handle, body.predicted ? "dynamic" : "kinematic");
+    physics.setBodyTransform(body.handle, authoritative.position, authoritative.rotation);
+    physics.setBodyVelocity(
+      body.handle,
+      authoritative.linearVelocity,
+      authoritative.angularVelocity,
+    );
+    if (body.predicted)
+      physics.setBodyAwake(body.handle, (authoritative.flags & NETWORK_FLAG_AWAKE) !== 0);
+    if (
+      checkpointState &&
+      (checkpointState.authorityVersion > body.state.authorityVersion ||
+        (checkpointState.authorityVersion === body.state.authorityVersion &&
+          (checkpointState.stateSequence === body.state.stateSequence ||
+            isNewerSequence16(checkpointState.stateSequence, body.state.stateSequence))))
+    )
+      body.state = cloneBody(checkpointState);
+  }
+}
+
 function clientCollisionStates(contacts: {
   contactIds: RuntimeId[];
   supportIds: RuntimeId[];
@@ -553,16 +605,17 @@ function clientCollisionStates(contacts: {
       distanceSquared,
       state: {
         ...cloneBody(body.state),
-        sourceTick:
-          predictedGrab && sameId(predictedGrab.grab.target, body.networkId)
-            ? localPlayer.sourceTick
-            : body.state.sourceTick,
+        sourceTick: body.predicted ? localPlayer.sourceTick : body.state.sourceTick,
         position: { ...bodyPhysics.position },
         rotation: { ...bodyPhysics.rotation },
         linearVelocity: { ...bodyPhysics.linearVelocity },
         angularVelocity: { ...bodyPhysics.angularVelocity },
         flags:
-          (body.state.flags & ~NETWORK_FLAG_AWAKE) | (bodyPhysics.awake ? NETWORK_FLAG_AWAKE : 0),
+          (body.state.flags & ~(NETWORK_FLAG_AWAKE | NETWORK_FLAG_HELD)) |
+          (bodyPhysics.awake ? NETWORK_FLAG_AWAKE : 0) |
+          (predictedGrab && sameId(predictedGrab.grab.target, body.networkId)
+            ? NETWORK_FLAG_HELD
+            : 0),
       },
     });
   }
@@ -591,17 +644,27 @@ function clientCollisionStates(contacts: {
 }
 
 function releasePredictedGrab(): void {
-  if (!physics || !predictedGrab) {
-    predictedGrab = null;
-    return;
-  }
-  const body = bodies.get(key(predictedGrab.grab.target));
-  if (body) {
-    physics.setBodyType(body.handle, "kinematic");
-    physics.setBodyTransform(body.handle, body.state.position, body.state.rotation);
-    physics.setBodyVelocity(body.handle, body.state.linearVelocity, body.state.angularVelocity);
-  }
   predictedGrab = null;
+}
+
+function dropSupportedPredictedGrab(): void {
+  if (!physics || !localPlayer || !localPlayerProxy || !predictedGrab) return;
+  const halfHeight =
+    PLAYER_CAPSULE_RADIUS +
+    (localPlayer.crouched ? PLAYER_CROUCHED_HALF_SEGMENT : PLAYER_CAPSULE_HALF_SEGMENT);
+  const support = physics.raycastClosest(
+    localPlayer.position,
+    { x: 0, y: -(halfHeight + 0.15), z: 0 },
+    { ignoreBodies: [localPlayerProxy] },
+  );
+  const supportId = support ? localToNetwork.get(key(support.body)) : null;
+  if (
+    support &&
+    support.normal.y >= PLAYER_WALKABLE_NORMAL_Y &&
+    supportId &&
+    sameId(supportId, predictedGrab.grab.target)
+  )
+    releasePredictedGrab();
 }
 
 function processInputEdges(): void {
@@ -732,8 +795,7 @@ function applyOwnership(message: OwnershipChangedPacket): void {
   physics.setBodyVelocity(body.handle, message.state.linearVelocity, message.state.angularVelocity);
   if (bundle && descriptor?.kind === "world-entity")
     applySurfaceMotor(physics, bundle, descriptor.entityIndex, body.handle, message.state.flags);
-  if (!predictedGrab || !sameId(predictedGrab.grab.target, body.networkId))
-    physics.setBodyType(body.handle, "kinematic");
+  physics.setBodyType(body.handle, body.predicted ? "dynamic" : "kinematic");
 }
 
 function applyManipulation(message: ManipulationChangedMessage): void {
@@ -827,7 +889,7 @@ function updateRemotePlayer(state: NetworkPlayerState): void {
 function applyProxyTargets(serverTick: number): void {
   if (!physics || !bundle) return;
   for (const body of bodies.values()) {
-    if (predictedGrab && sameId(predictedGrab.grab.target, body.networkId)) continue;
+    if (body.predicted) continue;
     const descriptor = descriptors.get(key(body.networkId));
     const entity =
       descriptor?.kind === "world-entity" ? bundle.entities[descriptor.entityIndex] : null;
@@ -899,6 +961,11 @@ function clearGravityVisitor(visitor: RuntimeId): void {
 function recomputeGravityVisitor(visitor: RuntimeId): void {
   const factor = gravityFactorFor(visitor);
   if (localPlayerProxy && sameId(localPlayerProxy, visitor)) localGravityFactor = factor;
+  const networkId = localToNetwork.get(key(visitor));
+  const body = networkId ? bodies.get(key(networkId)) : null;
+  const entity = body && bundle ? bundle.entities[body.entityIndex] : null;
+  if (body && entity?.body?.kind === "dynamic-brush")
+    physics?.setGravityScale(body.handle, entity.body.gravityScale * factor);
 }
 
 function gravityFactorFor(visitor: RuntimeId): number {
@@ -961,6 +1028,8 @@ function createBody(
       entityIndex: descriptor.entityIndex,
       state: cloneBody(state),
       history: [cloneBody(state)],
+      predictable: false,
+      predicted: false,
     };
   }
   const type = spec.kind === "static-brush" ? "static" : "kinematic";
@@ -1005,6 +1074,11 @@ function createBody(
     entityIndex: descriptor.entityIndex,
     state: cloneBody(state),
     history: [cloneBody(state)],
+    predictable:
+      entity.kind === "physics-prop" &&
+      entity.interaction === "grab" &&
+      spec.kind === "dynamic-brush",
+    predicted: false,
   };
 }
 
@@ -1051,7 +1125,7 @@ function physicsEngine(): GameEngine {
     },
     createPlayerProxy: (position, shape) => physics!.createPlayerProxy(position, shape),
     updatePlayerProxy: (id, position, yaw) =>
-      physics!.setBodyTransform(id, position, yawRotation(yaw)),
+      physics!.setKinematicTargetTransform(id, position, yawRotation(yaw), PHYSICS_DT),
     destroyBody: (id) => physics!.destroy(id),
     driveBodyToTarget: (id, options) => {
       const body = bodies.get(key(id));

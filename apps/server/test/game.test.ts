@@ -181,7 +181,9 @@ describe("per-object authority host", () => {
       expect(game.grabbedTarget(competitor)).toBeNull();
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
       expect(descriptorFor(game, target).authorityVersion).toBe(initial.authorityVersion);
-      expect(game.predictionCheckpoint(player)!.held?.body.id).toEqual(target);
+      const heldCheckpoint = game.predictionCheckpoint(player)!;
+      expect(heldCheckpoint.held?.body.id).toEqual(target);
+      expect(heldCheckpoint.nearbyBodies.every((body) => key(body.id) !== key(target))).toBe(true);
       published.length = 0;
       game.acceptInput(player, { ...grabInput(game, 2, target, 1), lookYaw: 0.7 });
       for (let tick = 0; tick < 4; tick += 1) game.advance(PHYSICS_DT);
@@ -200,8 +202,47 @@ describe("per-object authority host", () => {
       ).toBeGreaterThan(0.1);
       game.acceptInput(player, grabInput(game, 3, target, 2));
       game.advance(PHYSICS_DT);
-      expect(game.predictionCheckpoint(player)!.held).toBeNull();
+      const releasedCheckpoint = game.predictionCheckpoint(player)!;
+      expect(releasedCheckpoint.held).toBeNull();
+      expect(releasedCheckpoint.nearbyBodies.some((body) => key(body.id) === key(target))).toBe(
+        true,
+      );
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("prioritizes a held prop's live contact island over nearer loose bodies", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle, playerSpawn: { x: 0, y: 0.9, z: 1.2 } },
+    );
+    try {
+      const player = game.connectPlayer("contact-priority-player");
+      const archetype = game.devPropArchetypes()[0];
+      if (!archetype) throw new Error("fixture has no loose prop archetype");
+      const target = game.spawnDevProp(archetype.entityIndex, { x: 0, y: 0.61, z: 0 });
+      const contact = game.spawnDevProp(archetype.entityIndex, { x: 0.82, y: 0.61, z: 0 });
+      for (const position of [
+        { x: -0.8, y: 0.61, z: 1.2 },
+        { x: 0.8, y: 0.61, z: 1.2 },
+        { x: -0.8, y: 0.61, z: 2 },
+        { x: 0.8, y: 0.61, z: 2 },
+      ])
+        game.spawnDevProp(archetype.entityIndex, position);
+      for (let tick = 0; tick < 30; tick += 1) game.advance(PHYSICS_DT);
+
+      game.acceptInput(player, grabInput(game, 1, target.id, 1));
+      game.advance(PHYSICS_DT);
+      const checkpoint = game.predictionCheckpoint(player)!;
+      expect(checkpoint.held?.body.id).toEqual(target.id);
+      expect(checkpoint.nearbyBodies.some((body) => key(body.id) === key(contact.id))).toBe(true);
     } finally {
       game.stop();
       store.close();

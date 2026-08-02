@@ -28,6 +28,7 @@ import {
   type ManipulationChangedMessage,
   type NetworkObjectState,
   type OwnershipChangedPacket,
+  type PredictionCheckpointPacket,
   type SpeechMessage,
   type SpeechRejectedMessage,
   type Vec3,
@@ -72,6 +73,7 @@ type SessionRecord = {
 };
 let sourceSpeechWorker: Promise<Blob> | null = null;
 let sourcePhysicsWorker: Promise<Blob> | null = null;
+let sourceDebugCaptureWorker: Promise<Blob> | null = null;
 const LINTALKER_SCRIPT_SHA256 = "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c";
 const LINTALKER_WASM_SHA256 = "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b";
 
@@ -152,6 +154,12 @@ export async function createGurgurServer(
   const physicsWorker = (await adjacentPhysicsWorker.exists())
     ? adjacentPhysicsWorker
     : await buildSourcePhysicsWorker();
+  const adjacentDebugCaptureWorker = Bun.file(
+    new URL("../../web/src/debug-capture-worker.js", import.meta.url),
+  );
+  const debugCaptureWorker = (await adjacentDebugCaptureWorker.exists())
+    ? adjacentDebugCaptureWorker
+    : await buildSourceDebugCaptureWorker();
   const lintalkerScript = Bun.file(
     new URL("../../../third_party/lintalker/wintalker.js", import.meta.url),
   );
@@ -186,6 +194,11 @@ export async function createGurgurServer(
   let shuttingDown = false;
   const pendingStateBroadcast = new Map<string, NetworkObjectState>();
   let stateBroadcastTimer: Timer | null = null;
+  type StateBroadcastBatch = {
+    worldEpoch: number;
+    states: NetworkObjectState[];
+    checkpoints: Map<string, PredictionCheckpointPacket>;
+  };
   const metrics = (): ServerMetrics => {
     const active = [...clients].filter((socket) => socket.data.playerId);
     return {
@@ -207,17 +220,19 @@ export async function createGurgurServer(
     };
   };
 
-  const flushStateBroadcast = (): void => {
-    stateBroadcastTimer = null;
-    const states = [...pendingStateBroadcast.values()];
-    pendingStateBroadcast.clear();
+  const flushStateBroadcast = (batch?: StateBroadcastBatch): void => {
+    if (!batch) stateBroadcastTimer = null;
+    const states = batch?.states ?? [...pendingStateBroadcast.values()];
+    if (!batch) pendingStateBroadcast.clear();
     if (states.length === 0 || shuttingDown) return;
+    const worldEpoch = batch?.worldEpoch ?? game.worldEpoch;
+    if (worldEpoch !== game.worldEpoch) return;
     const now = performance.now();
     for (const socket of clients) {
       if (!socket.data.playerId) continue;
       const channel = socket.data.stateChannel;
       if (channel?.readyState !== "open") continue;
-      const clusters = socket.data.replication.createClusters(game.worldEpoch, states, now);
+      const clusters = socket.data.replication.createClusters(worldEpoch, states, now);
       for (const cluster of clusters) {
         if (channel.bufferedAmount >= MAX_STATE_BUFFERED_BYTES) {
           socket.data.droppedStatePackets += 1;
@@ -230,17 +245,20 @@ export async function createGurgurServer(
           break;
         }
       }
+      const checkpoint = batch?.checkpoints.get(
+        `${socket.data.playerId.index}:${socket.data.playerId.generation}`,
+      );
       if (
-        socket.data.lastCheckpointTick !== game.serverTick &&
-        game.serverTick % Math.max(1, PHYSICS_HZ / STATE_PUBLISH_HZ) === 0 &&
+        checkpoint &&
+        socket.data.lastCheckpointTick !== checkpoint.serverTick &&
         channel.bufferedAmount < MAX_STATE_BUFFERED_BYTES
-      ) {
-        const checkpoint = game.predictionCheckpoint(socket.data.playerId);
-        if (checkpoint) {
+      )
+        try {
           channel.send(Buffer.from(encodePredictionCheckpoint(checkpoint)));
-          socket.data.lastCheckpointTick = game.serverTick;
+          socket.data.lastCheckpointTick = checkpoint.serverTick;
+        } catch {
+          socket.close(1013, "checkpoint transport failed");
         }
-      }
     }
   };
   const broadcast = (states: NetworkObjectState[]): void => {
@@ -249,6 +267,33 @@ export async function createGurgurServer(
         `${state.id.index}:${state.id.generation}`,
         cloneNetworkState(state),
       );
+    // Capture owner checkpoints from the exact same 30 Hz world sample, then
+    // perform delta encoding and data-channel writes after the simulation tick.
+    // This keeps I/O work out of Box3D's fixed-step budget without allowing an
+    // arbitrary later host tick to leak into the checkpoint.
+    if (game.serverTick % Math.max(1, PHYSICS_HZ / STATE_PUBLISH_HZ) === 0) {
+      if (stateBroadcastTimer) clearTimeout(stateBroadcastTimer);
+      stateBroadcastTimer = null;
+      const batchStates = [...pendingStateBroadcast.values()];
+      pendingStateBroadcast.clear();
+      const statesById = new Map(
+        batchStates.map((state) => [`${state.id.index}:${state.id.generation}`, state]),
+      );
+      const checkpoints = new Map<string, PredictionCheckpointPacket>();
+      for (const socket of clients) {
+        const playerId = socket.data.playerId;
+        if (!playerId || socket.data.stateChannel?.readyState !== "open") continue;
+        const checkpoint = game.predictionCheckpoint(playerId, batchStates, statesById);
+        if (checkpoint) checkpoints.set(`${playerId.index}:${playerId.generation}`, checkpoint);
+      }
+      const batch: StateBroadcastBatch = {
+        worldEpoch: game.worldEpoch,
+        states: batchStates,
+        checkpoints,
+      };
+      setTimeout(() => flushStateBroadcast(batch), 0);
+      return;
+    }
     stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 1_000 / PHYSICS_HZ);
   };
 
@@ -541,6 +586,9 @@ export async function createGurgurServer(
         headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
       }),
       "/physics-worker.js": new Response(physicsWorker, {
+        headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
+      }),
+      "/debug-capture-worker.js": new Response(debugCaptureWorker, {
         headers: { "cache-control": "no-cache", "content-type": "text/javascript" },
       }),
       "/lintalker.js": {
@@ -1084,6 +1132,20 @@ function buildSourcePhysicsWorker(): Promise<Blob> {
     return result.outputs[0];
   });
   return sourcePhysicsWorker;
+}
+
+function buildSourceDebugCaptureWorker(): Promise<Blob> {
+  sourceDebugCaptureWorker ??= Bun.build({
+    entrypoints: [new URL("../../web/src/debug-capture-worker.ts", import.meta.url).pathname],
+    target: "browser",
+    format: "esm",
+    minify: true,
+  }).then((result) => {
+    if (!result.success || !result.outputs[0])
+      throw new Error("failed to build browser debug capture worker");
+    return result.outputs[0];
+  });
+  return sourceDebugCaptureWorker;
 }
 
 async function fileHash(file: Blob): Promise<string> {

@@ -97,6 +97,15 @@ describe("source-tick proxy presentation", () => {
     expect(presentation.latestNetwork(state(1, 0).id)).toBeNull();
   });
 
+  test("observes authoritative corrections without replacing an active local body track", () => {
+    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    presentation.pushNetwork([state(1, 3)], 10);
+    presentation.pushLocal([state(2, 9)], 20);
+    presentation.pushNetwork([state(3, 5)], 30, new Set(["1:1"]));
+    expect(presentation.sample(30)[0]!.position.x).toBe(9);
+    expect(presentation.latestNetwork(state(1, 0).id)?.position.x).toBe(5);
+  });
+
   test("samples source cadence instead of compressing a late packet burst", () => {
     const presentation = new PresentationBuffer();
     presentation.updateClock(0, 0, 0);

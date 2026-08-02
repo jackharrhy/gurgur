@@ -11,8 +11,8 @@ Each browser has two execution domains:
 - the main thread samples intent, manages transport, records diagnostics, and
   renders with Three.js/WebGPU;
 - a dedicated module worker loads the same Box3D adapter and shared gameplay
-  controllers as Bun, predicts the local player and one confirmed held loose
-  prop, retains proxy history, and performs checkpoint restore/replay.
+  controllers as Bun, predicts the local player plus a bounded nearby loose-body
+  contact island, retains proxy history, and performs checkpoint restore/replay.
 
 Bun uses `werift@0.23.0`; browsers use platform WebRTC. Both load
 `box3d.js@0.0.2` as separate Wasm instances. There is no authority election or
@@ -48,14 +48,16 @@ by both authoritative and predicted adapters.
 | Prop/contraption claim                | Bun coordinator   | one claim               |
 | Local player prediction history       | local browser     | 128 commands            |
 | Confirmed held-prop prediction        | local browser     | confirmed claim         |
+| Nearby loose-body prediction set      | local browser     | one checkpoint interval |
 | Nonpredicted collision proxy/history  | each browser      | disposable              |
 | Buffered/corrected presentation       | each browser      | disposable              |
 | Persisted application state           | Bun/SQLite        | process restarts        |
 
 Prediction is a cache of Bun-owned state, not another authority. The local
-player and held prop are dynamically simulated in the browser only so commands
-can be presented immediately and replayed. No predicted result enters
-persistence, host gameplay, or an outbound state packet.
+player, held prop, and checkpoint-selected nearby loose bodies are dynamically
+simulated in the browser only so commands and reciprocal local contacts can be
+presented immediately and replayed. No predicted result enters persistence,
+host gameplay, or an outbound state packet.
 
 Joint graphs are never cloned for rollback. Jointed bodies remain kinematic
 browser proxies. Explicit contraption manipulation uses a Bun-native private

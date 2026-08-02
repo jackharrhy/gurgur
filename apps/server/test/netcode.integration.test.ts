@@ -41,6 +41,19 @@ afterEach(async () => {
 });
 
 describe("protocol-v7 real server transport", () => {
+  test("delivers owner checkpoints on the fixed 30 Hz schedule", async () => {
+    const { server } = await launch();
+    const client = await connect(server.port);
+    cleanup.push(() => close(client));
+
+    const startingTick = server.metrics().serverTick;
+    await Bun.sleep(550);
+    const ticks = [...new Set(client.checkpointTicks)].filter((tick) => tick > startingTick);
+    const gaps = ticks.slice(1).map((tick, index) => tick - ticks[index]!);
+    expect(ticks.length).toBeGreaterThanOrEqual(14);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(4);
+  });
+
   test("drives server-owned player state from bundled input and returns prediction checkpoints", async () => {
     const { server } = await launch();
     const first = await connect(server.port);
@@ -59,6 +72,7 @@ describe("protocol-v7 real server transport", () => {
       transferPolicy: "fixed",
     });
     expect((await fetch(`http://127.0.0.1:${server.port}/physics-worker.js`)).ok).toBe(true);
+    expect((await fetch(`http://127.0.0.1:${server.port}/debug-capture-worker.js`)).ok).toBe(true);
 
     const initial = first.receiver.state(first.welcome.playerId);
     if (!initial || initial.kind !== "player") throw new Error("missing player bootstrap");
@@ -347,6 +361,7 @@ type TestClient = {
   world: WorldManifestMessage;
   receiver: StateReceiver;
   acks: number;
+  checkpointTicks: number[];
   states: Array<(state: NetworkObjectState) => void>;
   ownership: Array<(message: OwnershipChangedPacket) => void>;
   checkpoints: Array<(message: PredictionCheckpointPacket) => void>;
@@ -396,6 +411,7 @@ function connect(port: number): Promise<TestClient> {
     const stateListeners: TestClient["states"] = [];
     const ownershipListeners: TestClient["ownership"] = [];
     const checkpointListeners: TestClient["checkpoints"] = [];
+    const checkpointTicks: number[] = [];
     const textListeners: TestClient["texts"] = [];
     const worldListeners: TestClient["worlds"] = [];
     let acks = 0;
@@ -410,6 +426,7 @@ function connect(port: number): Promise<TestClient> {
       get acks() {
         return acks;
       },
+      checkpointTicks,
       states: stateListeners,
       ownership: ownershipListeners,
       checkpoints: checkpointListeners,
@@ -440,6 +457,7 @@ function connect(port: number): Promise<TestClient> {
         if (typeof packet === "string") return;
         if (binaryPacketTag(packet) === PREDICTION_CHECKPOINT_TAG) {
           const checkpoint = decodePredictionCheckpoint(packet);
+          checkpointTicks.push(checkpoint.serverTick);
           for (const listener of checkpointListeners.splice(0)) listener(checkpoint);
           return;
         }
@@ -515,6 +533,7 @@ function connect(port: number): Promise<TestClient> {
         receiver.applyCluster(cluster);
       } else if (tag === PREDICTION_CHECKPOINT_TAG) {
         const checkpoint = decodePredictionCheckpoint(data);
+        checkpointTicks.push(checkpoint.serverTick);
         for (const listener of checkpointListeners.splice(0)) listener(checkpoint);
       }
       done();

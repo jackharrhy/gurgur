@@ -60,8 +60,9 @@ transitions, and deferred destruction are processed afterward.
 
 Bun dynamically simulates every player, shared prop, fixed-authority mechanism,
 MCP player, and diagnostic body. A browser worker dynamically predicts its local
-geometric player and one confirmed held loose prop. Every other shared body is a
-kinematic collision/query proxy. Ordinary contact never changes authority.
+geometric player, confirmed held loose prop, and at most four checkpoint-selected
+nearby loose props. Every other shared body is a kinematic collision/query
+proxy. Ordinary contact never changes authority.
 
 Disposable state is indexed by source simulation tick rather than receipt time.
 Browser collision proxies normally target the newest accepted authoritative
@@ -179,8 +180,9 @@ Each controller tick:
 
 Browser-side unpredicted bodies are kinematic proxies, so their local reaction
 impulse never becomes gameplay truth. Bun applies authoritative player reaction
-impulses to Bun-owned bodies. A confirmed held prop is the one shared body
-dynamically included in browser prediction and is corrected by Bun checkpoints.
+impulses to Bun-owned bodies. A checkpoint may dynamically include the held
+prop plus four nearby loose bodies so the bounded player/body contact island can
+exchange the same replay impulses before authoritative correction.
 
 A fixed-tick controller result must be finite and move no more than one metre.
 The current authority rejects a larger Box3D depenetration result, retains the
@@ -197,6 +199,11 @@ Ground is walkable through 50 degrees. The controller steps up at most 0.30 m an
 snaps down at most 0.40 m while grounded. Jumping suppresses ground snapping until
 vertical velocity becomes non-positive. Moving-platform point velocity is added
 before movement and retained through the tick.
+
+A held body is forcibly released if it becomes the player's walkable support.
+This matches Source's carried-object ground rule and prevents the grab target,
+support velocity, and player controller from feeding motion back through the
+same object.
 
 A kinematic proxy capsule follows the geometric mover after resolution. The proxy
 exists for sensors, raycasts, projectiles, and contact identity; it does not drive
@@ -220,8 +227,9 @@ shortens carry distance. The prop is a real dynamic body in the browser's local
 prediction world and is rendered from that body, never from `targetPosition`.
 
 Bun remains gameplay authority and publishes the held body as a 60 Hz hot state.
-Each checkpoint restores player, body, velocities, and grab seed before command
-replay. The browser sends neither a loose-prop transform nor a loose grab target.
+Each checkpoint restores player, held body, nearby loose contact set, velocities,
+and grab seed before command replay. The browser sends neither a loose-prop
+transform nor a loose grab target.
 
 Release is another command edge. A browser that already has a confirmed grab
 predicts that edge during command replay, while Bun remains authoritative for

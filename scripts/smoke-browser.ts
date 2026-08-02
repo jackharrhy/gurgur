@@ -1,9 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { compileWorld, PLAYER_HALF_HEIGHT } from "@gurgur/game";
 import { createGurgurServer } from "../apps/server/src/server";
+import type { PredictionTraceFrame } from "../apps/web/src/prediction-trace";
 
 type BrowserImpairment = {
   oneWayLatencyMs: number;
@@ -78,6 +80,10 @@ try {
     await contentionAndRecovery(chrome, peerChrome);
   }
   if (scenario === "all" || scenario === "contraption") await contraptionInteraction(chrome);
+  if (scenario === "capture") {
+    await resetWorld();
+    await debugPhysicsCapture(chrome);
+  }
   console.log(`protocol-v7 browser smoke passed (${scenario})`);
 } finally {
   await Promise.all([chrome.close(), peerChrome.close()]);
@@ -363,16 +369,44 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       { target: targetId, authority: initialAuthority },
     );
     const samples = await releaseTrace;
-    const maximumFrameStep = samples.slice(1).reduce((maximum, sample, index) => {
+    const releaseSteps = samples.slice(1).map((sample, index) => {
       const previous = samples[index]!;
-      return Math.max(
-        maximum,
-        Math.hypot(sample.x - previous.x, sample.y - previous.y, sample.z - previous.z),
-      );
-    }, 0);
+      return {
+        previous,
+        sample,
+        distance: Math.hypot(sample.x - previous.x, sample.y - previous.y, sample.z - previous.z),
+      };
+    });
+    const worstReleaseStep = releaseSteps.toSorted(
+      (left, right) => right.distance - left.distance,
+    )[0];
+    const maximumFrameStep = worstReleaseStep?.distance ?? 0;
     if (samples.length < 10 || maximumFrameStep >= 0.25)
       throw new Error(
-        `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step`,
+        `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step (${JSON.stringify(worstReleaseStep?.previous)} -> ${JSON.stringify(worstReleaseStep?.sample)})`,
+      );
+    const sameTickHeldErrors = await page.evaluate(() => {
+      const frames = (window as unknown as SmokeWindow).__gurgurDiagnostics.predictionTrace();
+      const authoritative = new Map<number, { x: number; y: number; z: number }>();
+      const predicted = new Map<number, { x: number; y: number; z: number }>();
+      for (const frame of frames) {
+        const host = frame.held?.authoritative;
+        const local = frame.held?.predicted;
+        if (host?.sourceTick !== null && host?.sourceTick !== undefined)
+          authoritative.set(host.sourceTick, host.position);
+        if (local?.sourceTick !== null && local?.sourceTick !== undefined)
+          predicted.set(local.sourceTick, local.position);
+      }
+      return [...predicted].flatMap(([tick, local]) => {
+        const host = authoritative.get(tick);
+        return host ? [Math.hypot(host.x - local.x, host.y - local.y, host.z - local.z)] : [];
+      });
+    });
+    sameTickHeldErrors.sort((left, right) => left - right);
+    const maximumSameTickHeldError = sameTickHeldErrors.at(-1) ?? Number.POSITIVE_INFINITY;
+    if (sameTickHeldErrors.length < 5 || maximumSameTickHeldError > 0.01)
+      throw new Error(
+        `same-tick browser/host held simulation diverged: ${sameTickHeldErrors.length} samples, ${(maximumSameTickHeldError * 100).toFixed(2)}cm maximum error`,
       );
     await assertNoDiscardedWorkerTime(page);
   } finally {
@@ -591,10 +625,45 @@ async function contraptionInteraction(browser: Browser): Promise<void> {
   }
 }
 
+async function debugPhysicsCapture(browser: Browser): Promise<void> {
+  const page = await openPage(browser, LOCAL_IMPAIRMENT, server.port, true);
+  try {
+    const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+    await page.getByRole("button", { name: "record 15s" }).click();
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+    if (!downloadPath) throw new Error("debug physics capture download has no local path");
+    const bytes = await readFile(downloadPath);
+    const json = download.suggestedFilename().endsWith(".gz") ? gunzipSync(bytes) : bytes;
+    const artifact = JSON.parse(json.toString()) as {
+      format?: unknown;
+      version?: unknown;
+      client?: { frames?: unknown[] };
+      server?: { frames?: unknown[]; complete?: unknown };
+    };
+    const clientFrames = artifact.client?.frames?.length ?? 0;
+    const serverFrames = artifact.server?.frames?.length ?? 0;
+    if (
+      artifact.format !== "gurgur-networked-physics-capture" ||
+      artifact.version !== 1 ||
+      clientFrames < 800 ||
+      serverFrames !== 900 ||
+      artifact.server?.complete !== true
+    )
+      throw new Error(
+        `debug physics capture is incomplete: ${JSON.stringify({ clientFrames, serverFrames, complete: artifact.server?.complete })}`,
+      );
+    await assertNoDiscardedWorkerTime(page);
+  } finally {
+    await page.close();
+  }
+}
+
 async function openPage(
   browser: Browser,
   impairment: BrowserImpairment,
   port = server.port,
+  debug = false,
 ): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   const errors: string[] = [];
@@ -614,6 +683,7 @@ async function openPage(
   });
   const url = new URL(`http://127.0.0.1:${port}/`);
   url.searchParams.set("test", "1");
+  if (debug) url.searchParams.set("debug", "1");
   url.searchParams.set("simulatedLatencyMs", String(impairment.oneWayLatencyMs));
   url.searchParams.set("simulatedJitterMs", String(impairment.jitterMs));
   url.searchParams.set("simulatedLossRate", String(impairment.lossRate));
@@ -826,6 +896,7 @@ type SmokeWindow = {
     physics(): {
       discardedCatchUpSeconds: number;
     };
+    predictionTrace(): PredictionTraceFrame[];
     stallPhysicsWorker(durationMs: number): void;
   };
 };

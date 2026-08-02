@@ -12,6 +12,7 @@ import {
   PLAYER_CAPSULE_RADIUS,
   PLAYER_CROUCHED_HALF_SEGMENT,
   PLAYER_HALF_HEIGHT,
+  PLAYER_WALKABLE_NORMAL_Y,
   type PlayerControllerState,
 } from "./controller";
 import type { GameEngine } from "./engine-api";
@@ -29,6 +30,7 @@ import type { PersistedPlayerState } from "./state";
 import type { WorldBundle } from "./world";
 
 const PLAYER_INDEX_BASE = 0x8000_0000;
+const MAX_ACTION_EDGES_PER_SERVER_TICK = 4;
 
 export type PlayerIntent = Pick<
   InputCommand,
@@ -279,7 +281,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     if (save) engine.requestSave();
   };
 
-  const tryGrab = (player: Player): void => {
+  const tryGrab = (player: Player, intent: PlayerIntent = player.input): void => {
     if (player.grab) {
       dropGrab(player, true);
       return;
@@ -287,7 +289,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     const anchor = playerChest(player.state.position);
     const hit = engine.raycast(
       anchor,
-      scale(playerViewDirection(player.input.lookYaw, player.input.lookPitch), PLAYER_GRAB_REACH),
+      scale(playerViewDirection(intent.lookYaw, intent.lookPitch), PLAYER_GRAB_REACH),
     );
     if (!hit) return;
     const target = hit.body;
@@ -305,18 +307,47 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     if (!stepPropGrab(engine, grab, grabPose(player))) dropGrab(player, true);
   };
 
-  const tryUse = (player: Player, target: RuntimeId | null): void => {
+  const dropSupportedGrab = (player: Player): void => {
+    if (!player.grab) return;
+    const halfHeight =
+      PLAYER_CAPSULE_RADIUS +
+      (player.state.crouched ? PLAYER_CROUCHED_HALF_SEGMENT : PLAYER_CAPSULE_HALF_SEGMENT);
+    const support = engine.raycast(
+      player.state.position,
+      { x: 0, y: -(halfHeight + 0.15), z: 0 },
+      { ignoreBodies: [player.proxy] },
+    );
+    if (
+      support &&
+      support.normal.y >= PLAYER_WALKABLE_NORMAL_Y &&
+      sameId(support.body, player.grab.target)
+    )
+      dropGrab(player, true);
+  };
+
+  const tryUse = (
+    player: Player,
+    target: RuntimeId | null,
+    intent: PlayerIntent = player.input,
+  ): void => {
     if (!target) return;
     use(
       target,
       playerChest(player.state.position),
-      scale(playerViewDirection(player.input.lookYaw, player.input.lookPitch), 3),
+      scale(playerViewDirection(intent.lookYaw, intent.lookPitch), 3),
     );
   };
 
   const step = (): void => {
     for (const player of players()) {
-      const pending = player.inputQueue.shift() ?? null;
+      // Input commands are a sampled intent stream, not a reliable work queue. If
+      // delivery stalls, Bun has already advanced by repeating the last intent;
+      // replaying every late sample would apply that elapsed time twice and leave
+      // the server permanently behind a 60 Hz producer. Consume the newest sample
+      // and retain older samples only long enough to recover action-counter edges.
+      const received = player.inputQueue;
+      const pending = received.at(-1) ?? null;
+      player.inputQueue = [];
       if (pending) {
         const { sequence, ...intent } = pending;
         player.input = intent;
@@ -340,14 +371,26 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       } else {
         engine.updatePlayerProxy(player.proxy, player.state.position, player.state.yaw);
       }
-      if (player.input.interactCounter !== player.lastInteractCounter) {
-        player.lastInteractCounter = player.input.interactCounter;
-        tryUse(player, player.input.interactTarget);
+      for (const command of received) {
+        const interactEdges = boundedCounterAdvance(
+          player.lastInteractCounter,
+          command.interactCounter,
+        );
+        player.lastInteractCounter = command.interactCounter;
+        for (let edge = 0; edge < interactEdges; edge += 1)
+          tryUse(player, command.interactTarget, command);
+
+        const primaryEdges = boundedCounterAdvance(
+          player.lastPrimaryCounter,
+          command.primaryCounter,
+        );
+        player.lastPrimaryCounter = command.primaryCounter;
+        for (let edge = 0; edge < primaryEdges; edge += 1) tryGrab(player, command);
       }
-      if (player.input.primaryCounter !== player.lastPrimaryCounter) {
-        player.lastPrimaryCounter = player.input.primaryCounter;
-        tryGrab(player);
-      }
+      // A carried body cannot also be the player's ground entity. Source drops
+      // this case for the same reason: otherwise the grab controller, support
+      // velocity, and player movement form a positive feedback loop.
+      dropSupportedGrab(player);
       updateGrab(player);
       player.stateSequence = (player.stateSequence + 1) & 0xffff;
       player.sourceTick = (engine.tick + 1) >>> 0;
@@ -587,6 +630,11 @@ function scale(value: Vec3, amount: number): Vec3 {
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {
   return a.index === b.index && a.generation === b.generation;
+}
+
+function boundedCounterAdvance(previous: number, next: number): number {
+  const advance = (next - previous) >>> 0;
+  return Math.min(advance, MAX_ACTION_EDGES_PER_SERVER_TICK);
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

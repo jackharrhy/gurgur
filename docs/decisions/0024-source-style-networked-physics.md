@@ -3,7 +3,9 @@
 Status: accepted, 2026-08-02. Supersedes the browser-player authority portion
 of [0019](0019-object-ownership-netcode.md), the player/proxy and loose-grab
 parts of [0022](0022-centralized-shared-rigidbody-physics.md), and the mesh-only
-speculation selected by [0023](0023-client-feel-presentation.md).
+speculation selected by [0023](0023-client-feel-presentation.md). The
+one-held-body contact boundary is refined by
+[0025](0025-bounded-contact-island-prediction.md).
 
 ## Decision
 

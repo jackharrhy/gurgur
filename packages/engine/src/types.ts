@@ -150,6 +150,12 @@ export type PredictionCheckpointPacket = {
   serverTick: number;
   lastProcessedInputSequence: number | null;
   player: NetworkPlayerState;
+  /**
+   * Authoritative states for the bounded loose-body contact island which the
+   * owner is allowed to replay. The server remains authoritative for every
+   * entry; omission means the browser must represent that body as a proxy.
+   */
+  nearbyBodies: NetworkBodyState[];
   held: PredictionHeldBody | null;
 };
 

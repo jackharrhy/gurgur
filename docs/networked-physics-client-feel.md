@@ -14,7 +14,8 @@ The first architecture described here was selected by
 [decision 0023](decisions/0023-client-feel-presentation.md), then rejected after
 play showed that a target-following mesh was not a plausible physical view.
 [Decision 0024](decisions/0024-source-style-networked-physics.md) records the
-replacement.
+replacement; [decision 0025](decisions/0025-bounded-contact-island-prediction.md)
+records the contact-island refinement found by paired gameplay traces.
 
 ## 2026-08-02 answer
 
@@ -26,12 +27,16 @@ physical simulation. The walk-over glitch came from rendering, collision, and
 Bun authority using different delayed poses.
 
 Protocol v7 therefore makes Bun authoritative for players as well as shared
-bodies, predicts the local player and one confirmed held loose prop through the
-same fixed-tick Box3D controllers on both peers, and reconciles from checkpoints
-by replaying unacknowledged commands. Nearby interaction bodies use newest
-collision state and collision-aligned presentation; distant objects remain
-buffered. This is the bounded “full Source mode” appropriate to Gurgur. It does
-not attempt full-world rollback or clone joint graphs.
+bodies, predicts the local player and confirmed held loose prop through the same
+fixed-tick Box3D controllers on both peers, and reconciles from checkpoints by
+replaying unacknowledged commands. Paired captures subsequently proved that
+nearby loose contacts also need the same replay role: Bun now checkpoints at
+most four eligible loose bodies within six metres as a stable bounded dynamic
+contact island. The player's support and the held body's live contact graph take
+priority, retained members and then distance fill remaining slots; distant and
+jointed objects remain proxies. This is the bounded
+“full Source mode” appropriate to Gurgur; it does not attempt full-world rollback
+or clone joint graphs.
 
 Clean `main` is still an important feel oracle: it proves that the existing
 controller, grab policy, and Box3D integration can feel good when the player and

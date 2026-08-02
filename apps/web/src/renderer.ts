@@ -495,6 +495,7 @@ export class WorldRenderer {
   >();
   readonly #interactionPresented = new Map<string, BodySnapshot>();
   readonly #predictionInteractionIds = new Set<string>();
+  readonly #predictedBodyIds = new Set<string>();
   #outlinedTarget: THREE.Object3D | null = null;
   #pickupPlayerPosition: THREE.Vector3 | null = null;
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
@@ -589,6 +590,7 @@ export class WorldRenderer {
     this.#interactionPresentationTransitions.clear();
     this.#interactionPresented.clear();
     this.#predictionInteractionIds.clear();
+    this.#predictedBodyIds.clear();
     this.#outlinedTarget = null;
     this.#pickupPlayerPosition = null;
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
@@ -699,6 +701,7 @@ export class WorldRenderer {
       this.#interactionPresentationActive.delete(identity);
       this.#interactionPresentationTransitions.delete(identity);
       this.#interactionPresented.delete(identity);
+      this.#predictedBodyIds.delete(identity);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         if (this.#heldTarget === mesh) this.#heldTarget = null;
@@ -779,7 +782,7 @@ export class WorldRenderer {
     states: readonly NetworkObjectState[],
     receivedAtMs = performance.now(),
   ): void {
-    this.#presentation.pushNetwork(states, receivedAtMs);
+    this.#presentation.pushNetwork(states, receivedAtMs, this.#predictedBodyIds);
     this.applyNetworkInteractionState(states);
   }
 
@@ -789,8 +792,14 @@ export class WorldRenderer {
     reconciled = false,
   ): void {
     this.#presentation.pushLocal(states, receivedAtMs);
+    this.#predictedBodyIds.clear();
+    for (const state of states)
+      if (state.kind === "body") this.#predictedBodyIds.add(idKey(state.id));
     const player = states.find((state) => state.kind === "player");
     if (player && reconciled) this.#queuePredictionCorrection(player, false);
+    if (reconciled)
+      for (const state of states)
+        if (state.kind === "body") this.#queuePredictionCorrection(state, true);
     const held = states.find(
       (state) => state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0,
     );
@@ -804,21 +813,26 @@ export class WorldRenderer {
     } else if (states.some((state) => state.kind === "player") && this.#predictedHeldId) {
       const id = this.#predictedHeldId;
       const mesh = this.#meshes.get(idKey(id));
-      const authoritative = this.#presentation.latestNetwork(id);
-      if (mesh && authoritative) this.#queuePredictionCorrection(authoritative, true);
-      else if (mesh)
-        this.#predictionCorrections.set(idKey(id), {
-          id: { ...id },
-          position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
-          rotation: {
-            x: mesh.quaternion.x,
-            y: mesh.quaternion.y,
-            z: mesh.quaternion.z,
-            w: mesh.quaternion.w,
-          },
-          startedAtMs: null,
-          relative: false,
-        });
+      const remainsPredicted = states.some(
+        (state) => state.kind === "body" && idKey(state.id) === idKey(id),
+      );
+      if (!remainsPredicted) {
+        const authoritative = this.#presentation.latestNetwork(id);
+        if (mesh && authoritative) this.#queuePredictionCorrection(authoritative, true);
+        else if (mesh)
+          this.#predictionCorrections.set(idKey(id), {
+            id: { ...id },
+            position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+            rotation: {
+              x: mesh.quaternion.x,
+              y: mesh.quaternion.y,
+              z: mesh.quaternion.z,
+              w: mesh.quaternion.w,
+            },
+            startedAtMs: null,
+            relative: false,
+          });
+      }
       this.#heldTarget = null;
       this.#predictedHeldId = null;
     }
@@ -846,6 +860,12 @@ export class WorldRenderer {
     } else if (this.#heldTarget === mesh) {
       this.#heldTarget = null;
     }
+    this.applyNetworkInteractionState([state]);
+  }
+
+  releaseLocalState(state: NetworkObjectState, receivedAtMs = performance.now()): void {
+    this.#queuePredictionCorrection(state, true);
+    this.#presentation.replaceReliable(state, receivedAtMs, false);
     this.applyNetworkInteractionState([state]);
   }
 
@@ -1633,7 +1653,7 @@ export class WorldRenderer {
     return bodies.map((body) => {
       const identity = idKey(body.id);
       if (identity === idKey(local.id)) return body;
-      if (this.#predictedHeldId && identity === idKey(this.#predictedHeldId)) return body;
+      if (this.#predictedBodyIds.has(identity)) return body;
       // Remote players are presentation-only and must keep their buffered motion.
       // Interaction presentation is for shared rigid bodies whose collision pose
       // can directly affect the locally predicted player or held prop.
