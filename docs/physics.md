@@ -31,6 +31,9 @@ points. Its shape callback is deliberately disabled upstream, and its mass
 transform callback is not safe in this release, so neither is presented as
 available. `?debug` polls a cached current frame at 10 Hz; this diagnostic JSON is
 separate from gameplay replication and never serializes Wasm pointers or IDs.
+Its 15-second capture mode records only generation-bearing gameplay runtime IDs,
+plain physics state, bounded nearby bodies, and mapped contacts/support. It never
+retains raw Box3D handles in the downloadable artifact.
 
 ## Resource ownership
 

@@ -26,13 +26,21 @@ function sample(sequence: number): PredictionTraceFrame {
   const pose = {
     position: { x: sequence, y: 2, z: 3 },
     rotation: { x: 0, y: 0, z: 0, w: 1 },
+    linearVelocity: { x: 1, y: 0, z: 0 },
+    angularVelocity: { x: 0, y: 0, z: 0 },
+    sourceTick: sequence + 100,
+    stateSequence: sequence,
+    flags: 0,
   };
   return {
     atMs: sequence * 16,
+    worldEpoch: 4,
     inputSequence: sequence,
     serverTick: sequence + 100,
     acknowledgment: sequence - 1,
     replayCount: 2,
+    reconciled: true,
+    command: null,
     contactIds: [{ index: 7, generation: 1 }],
     supportIds: [{ index: 8, generation: 1 }],
     player: {
@@ -42,5 +50,6 @@ function sample(sequence: number): PredictionTraceFrame {
       rendered: pose,
     },
     held: null,
+    relevant: [],
   };
 }

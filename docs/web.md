@@ -29,6 +29,7 @@ apps/web/
   ownership-client.ts   prediction lifecycle and worker message bridge
   physics-worker.ts     60 Hz prediction, replay, and collision proxies
   prediction-trace.ts   bounded four-timeline feel diagnostics
+  debug-capture.ts      versioned 15-second client/server trace artifact
   presentation.ts       local-step and buffered remote interpolation
   renderer.ts           Three.js scene, camera, objects, render loop
   input.ts              keyboard, pointer lock, gamepad, touch intent
@@ -187,6 +188,17 @@ interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls Bun's current Box3D debug frame at 10 Hz and draws broad-phase bounds,
 joints, and contact points above the scene. The overlay is diagnostic only and
 does not replace coordinator validation of ownership and reliable interactions.
+The same overlay includes a **record 15s** button; `F8` is the in-game shortcut.
+Recording starts a bounded Bun trace for the local player and resets the browser
+prediction recorder at the same time. After 15 seconds the browser combines both
+timelines into a versioned `gurgur-physics-*.json.gz` artifact and downloads it
+(plain JSON is the fallback when browser gzip is unavailable).
+The panel retains a download button in case the automatic download is blocked.
+The artifact contains full commands, acknowledgements, replay counts,
+contact/support identities, the local player and nearby-body authoritative,
+collision, predicted, and rendered states, and Bun's authoritative per-tick
+player/input/body/contact/support state. Capture endpoints and controls exist only
+on non-production servers. They do not alter simulation or protocol behavior.
 The test diagnostics also expose cumulative browser-worker fixed-step time
 discarded by the four-tick catch-up cap. Seeded disposable latency, jitter, and
 loss are available only through the test harness query parameters; reliable
@@ -283,6 +295,7 @@ The server exposes a deliberately small surface:
 | `/readyz`                                   | map, Box3D, and SQLite readiness       |
 | `/metrics`                                  | simulation and send-queue metrics      |
 | `/debug/physics`                            | bounded current Box3D debug frame      |
+| `/debug/network-trace`                      | bounded 15-second physics capture      |
 | `/debug/client-capabilities`                | development client presentation gates  |
 | `/world.bin`                                | immutable compiled map bundle          |
 | `/box3d.wasm`                               | Box3D diagnostic/runtime artifact      |

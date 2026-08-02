@@ -19,6 +19,7 @@ export type PhysicsWorkerRequest =
       world: WorldMessage;
       states: NetworkObjectState[];
       localPlayerId: RuntimeId;
+      traceEnabled: boolean;
     }
   | { type: "input"; command: InputCommand }
   | { type: "network-states"; states: NetworkObjectState[] }
@@ -34,6 +35,7 @@ export type PhysicsWorkerResponse =
   | {
       type: "local-states";
       states: NetworkObjectState[];
+      collisionStates: NetworkObjectState[];
       producedAtMs: number;
       discardedCatchUpSeconds: number;
       reconciled: boolean;
@@ -42,6 +44,7 @@ export type PhysicsWorkerResponse =
       replayCount: number;
       contactIds: RuntimeId[];
       supportIds: RuntimeId[];
+      command: InputCommand | null;
     }
   | { type: "input-command"; command: InputCommand }
   | { type: "manipulation-request"; message: ManipulationRequestMessage }
@@ -66,26 +69,31 @@ export type OwnershipClient = {
   dispose(): void;
 };
 
-export function createOwnershipClient(callbacks: {
-  localStates(
-    states: NetworkObjectState[],
-    producedAtMs: number,
-    discardedCatchUpSeconds: number,
-    reconciled: boolean,
-    trace: {
-      inputSequence: number;
-      acknowledgment: number | null;
-      replayCount: number;
-      contactIds: RuntimeId[];
-      supportIds: RuntimeId[];
-    },
-  ): void;
-  inputCommand(command: InputCommand): void;
-  manipulationRequest(message: ManipulationRequestMessage): void;
-  manipulationState(message: ManipulationStatePacket): void;
-  manipulationDrop(message: ManipulationDropMessage): void;
-  error(message: string): void;
-}): OwnershipClient {
+export function createOwnershipClient(
+  callbacks: {
+    localStates(
+      states: NetworkObjectState[],
+      producedAtMs: number,
+      discardedCatchUpSeconds: number,
+      reconciled: boolean,
+      trace: {
+        inputSequence: number;
+        acknowledgment: number | null;
+        replayCount: number;
+        contactIds: RuntimeId[];
+        supportIds: RuntimeId[];
+        command: InputCommand | null;
+        collisionStates: NetworkObjectState[];
+      },
+    ): void;
+    inputCommand(command: InputCommand): void;
+    manipulationRequest(message: ManipulationRequestMessage): void;
+    manipulationState(message: ManipulationStatePacket): void;
+    manipulationDrop(message: ManipulationDropMessage): void;
+    error(message: string): void;
+  },
+  options: { traceEnabled?: boolean } = {},
+): OwnershipClient {
   const worker = new Worker("/physics-worker.js", {
     type: "module",
     name: "gurgur-owner-physics",
@@ -109,6 +117,8 @@ export function createOwnershipClient(callbacks: {
           replayCount: message.replayCount,
           contactIds: message.contactIds,
           supportIds: message.supportIds,
+          command: message.command,
+          collisionStates: message.collisionStates,
         },
       );
     } else if (message.type === "input-command") {
@@ -133,7 +143,13 @@ export function createOwnershipClient(callbacks: {
         waiters.push(resolve);
         ready.set(world.worldEpoch, waiters);
       });
-      post({ type: "world", world, states, localPlayerId });
+      post({
+        type: "world",
+        world,
+        states,
+        localPlayerId,
+        traceEnabled: options.traceEnabled === true,
+      });
       return promise;
     },
     pushInput: (command) => post({ type: "input", command }),

@@ -114,6 +114,13 @@ The browser exposes a bounded diagnostic trace containing input sequence,
 server tick, acknowledgement, replay count, contact/support IDs, and
 authoritative, collision, predicted, and rendered transforms.
 
+On development servers, `?debug` can pair that browser trace with a 15-second,
+900-tick Bun capture for the local player. Bun records its consumed/queued input,
+authoritative player and nearby-body states, contact edges/hits, and support ray
+for each fixed tick. The browser downloads both halves as one JSON artifact.
+`/debug/network-trace` is a development-only HTTP diagnostic surface: it is not
+protocol v7, is never consumed by gameplay, and is unavailable in production.
+
 ## Protocol v7
 
 Reliable WebSocket traffic carries hello/welcome, WebRTC signaling, world

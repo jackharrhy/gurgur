@@ -36,7 +36,7 @@ import {
   type WorldManifestMessage,
 } from "@gurgur/engine";
 import { encodeWorldBundle, type WorldBundle, type WorldMessage } from "@gurgur/game";
-import { WorldHost } from "./game";
+import { NETWORK_TRACE_DURATION_SECONDS, WorldHost } from "./game";
 import {
   loadAssetManifest,
   loadAudioAsset,
@@ -303,7 +303,7 @@ export async function createGurgurServer(
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN ?? "";
   let physicsDebugCache: { serverTick: number; body: string } | null = null;
   const physicsDebugResponse = (request: Request): Response => {
-    if (new URL(request.url).searchParams.get("test") !== "1")
+    if (!devClientEnabled || new URL(request.url).searchParams.get("test") !== "1")
       return new Response("not found", { status: 404 });
     if (physicsDebugCache?.serverTick !== game.serverTick) {
       physicsDebugCache = {
@@ -318,11 +318,61 @@ export async function createGurgurServer(
       },
     });
   };
+  const physicsTraceResponse = (request: Request): Response => {
+    if (!devClientEnabled) return devUnavailable();
+    const url = new URL(request.url);
+    if (url.searchParams.get("test") !== "1") return devUnavailable();
+    if (request.method === "POST") {
+      const playerId = parseRuntimeId(url.searchParams.get("player"));
+      if (!playerId) return new Response("invalid player", { status: 400 });
+      try {
+        const capture = game.startPhysicsTrace(playerId);
+        return Response.json(
+          {
+            id: capture.id,
+            worldEpoch: capture.worldEpoch,
+            mapRevision: capture.mapRevision,
+            playerId: capture.playerId,
+            startedAtServerTick: capture.startedAtServerTick,
+            endingAtServerTick: capture.endingAtServerTick,
+            durationSeconds: NETWORK_TRACE_DURATION_SECONDS,
+          },
+          { headers: { "cache-control": "no-store" } },
+        );
+      } catch (error) {
+        return new Response(error instanceof Error ? error.message : "trace unavailable", {
+          status: 409,
+        });
+      }
+    }
+    const id = url.searchParams.get("id");
+    const status = id ? game.physicsTraceStatus(id) : null;
+    if (!status || !id) return new Response("trace not found", { status: 404 });
+    if (!status.complete)
+      return Response.json(
+        {
+          id,
+          complete: false,
+          startedAtServerTick: status.startedAtServerTick,
+          endingAtServerTick: status.endingAtServerTick,
+          latestServerTick: game.serverTick,
+          frameCount: status.frameCount,
+        },
+        { status: 202, headers: { "cache-control": "no-store" } },
+      );
+    const capture = game.physicsTrace(id);
+    if (!capture) return new Response("trace not found", { status: 404 });
+    return Response.json(capture, { headers: { "cache-control": "no-store" } });
+  };
   const devUnavailable = (): Response => new Response("not found", { status: 404 });
   const devClientCapabilityResponse = (): Response =>
     devClientEnabled
       ? Response.json(
-          { followCamera: true },
+          {
+            followCamera: true,
+            physicsCapture: true,
+            physicsCaptureSeconds: NETWORK_TRACE_DURATION_SECONDS,
+          },
           {
             headers: { "cache-control": "no-store" },
           },
@@ -482,6 +532,7 @@ export async function createGurgurServer(
       }),
       "/metrics": { GET: () => Response.json(metrics()) },
       "/debug/physics": { GET: physicsDebugResponse },
+      "/debug/network-trace": { GET: physicsTraceResponse, POST: physicsTraceResponse },
       "/debug/client-capabilities": { GET: devClientCapabilityResponse },
       "/box3d.wasm": new Response(box3dWasm, {
         headers: { "content-type": "application/wasm" },
@@ -1047,6 +1098,23 @@ function persistentIdForToken(token: string): string {
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {
   return a.index === b.index && a.generation === b.generation;
+}
+
+function parseRuntimeId(value: string | null): RuntimeId | null {
+  const match = /^(\d+):(\d+)$/.exec(value ?? "");
+  if (!match) return null;
+  const index = Number(match[1]);
+  const generation = Number(match[2]);
+  if (
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index > 0xffff_ffff ||
+    !Number.isSafeInteger(generation) ||
+    generation < 0 ||
+    generation > 0xffff_ffff
+  )
+    return null;
+  return { index, generation };
 }
 
 function readRtcPortRange(): [number, number] | undefined {

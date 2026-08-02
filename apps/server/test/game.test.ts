@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { compileWorld, type WorldBundle } from "@gurgur/game";
 import {
   PHYSICS_DT,
+  PHYSICS_HZ,
   NETWORK_FLAG_ACTIVE,
   NETWORK_FLAG_HELD,
   PROTOCOL_VERSION,
@@ -11,7 +12,7 @@ import {
   type NetworkPlayerState,
   type RuntimeId,
 } from "@gurgur/engine";
-import { WorldHost } from "../src/game";
+import { NETWORK_TRACE_DURATION_SECONDS, WorldHost } from "../src/game";
 import { WorldStore } from "../src/store";
 
 const fixtures = [
@@ -84,6 +85,47 @@ describe("per-object authority host", () => {
       expect(afterAction.player.lastJumpCounter).toBe(1);
       game.advance(PHYSICS_DT);
       expect(game.predictionCheckpoint(player)!.player.lastJumpCounter).toBe(1);
+    } finally {
+      game.stop();
+      store.close();
+    }
+  });
+
+  test("records a bounded 15-second authoritative physics timeline for one player", async () => {
+    const bundle = await fixture("network-push-corridor");
+    const store = new WorldStore(":memory:");
+    const game = await WorldHost.create(
+      store,
+      () => {},
+      () => {},
+      { worldBundle: bundle },
+    );
+    try {
+      const player = game.connectPlayer("physics-trace-player");
+      const started = game.startPhysicsTrace(player);
+      const durationTicks = NETWORK_TRACE_DURATION_SECONDS * PHYSICS_HZ;
+      for (let tick = 0; tick < durationTicks; tick += 1) {
+        game.acceptInput(player, input(game, tick));
+        game.advance(PHYSICS_DT);
+      }
+      const capture = game.physicsTrace(started.id)!;
+      expect(game.physicsTraceStatus(started.id)).toEqual({
+        complete: true,
+        startedAtServerTick: capture.startedAtServerTick,
+        endingAtServerTick: capture.endingAtServerTick,
+        completedAtServerTick: capture.endingAtServerTick,
+        frameCount: durationTicks,
+      });
+      expect(capture.complete).toBe(true);
+      expect(capture.endReason).toBe("duration");
+      expect(capture.frames).toHaveLength(durationTicks);
+      expect(capture.frames[0]!.serverTick).toBe(capture.startedAtServerTick);
+      expect(capture.frames.at(-1)!.serverTick).toBe(capture.endingAtServerTick);
+      expect(capture.frames.at(-1)!.input.lastProcessedInputSequence).toBe(durationTicks - 1);
+      expect(capture.frames.every((frame) => frame.bodies.length <= 32)).toBe(true);
+      expect(capture.frames.every((frame) => frame.player.kind === "player")).toBe(true);
+      capture.frames[0]!.player.position.x = 999;
+      expect(game.physicsTrace(started.id)!.frames[0]!.player.position.x).not.toBe(999);
     } finally {
       game.stop();
       store.close();

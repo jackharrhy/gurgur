@@ -4,6 +4,7 @@ import {
   PLAYER_HALF_HEIGHT,
   stepPlayerController,
   type GameEngine,
+  type GamePlayerTrace,
   type GameSimulation,
   type HostMechanismEngine,
   type WorldBundle,
@@ -27,6 +28,7 @@ import {
   type ManipulationStatePacket,
   type NetworkBodyState,
   type NetworkObjectState,
+  type NetworkPlayerState,
   type OwnershipChangedPacket,
   type PhysicsDebugFrame,
   type PredictionCheckpointPacket,
@@ -77,6 +79,45 @@ type DevPlayer = {
 };
 
 const RELEASE_HOT_STATE_TICKS = PHYSICS_HZ / 2;
+export const NETWORK_TRACE_DURATION_SECONDS = 15;
+const NETWORK_TRACE_DURATION_TICKS = NETWORK_TRACE_DURATION_SECONDS * PHYSICS_HZ;
+const NETWORK_TRACE_RADIUS_METRES = 6;
+const NETWORK_TRACE_MAX_BODIES = 32;
+const NETWORK_TRACE_MAX_CAPTURES = 4;
+
+export type ServerPhysicsTraceContact = {
+  kind: "begin" | "end" | "hit";
+  a: RuntimeId | null;
+  b: RuntimeId | null;
+  point?: Vec3;
+  normal?: Vec3;
+  approachSpeed?: number;
+};
+
+export type ServerPhysicsTraceFrame = {
+  serverTick: number;
+  recordedAtMs: number;
+  player: NetworkPlayerState;
+  input: GamePlayerTrace;
+  support: { id: RuntimeId | null; point: Vec3; normal: Vec3; fraction: number } | null;
+  bodies: NetworkBodyState[];
+  contacts: ServerPhysicsTraceContact[];
+};
+
+export type ServerPhysicsTraceCapture = {
+  format: "gurgur-server-physics-trace";
+  version: 1;
+  id: string;
+  worldEpoch: number;
+  mapRevision: string;
+  playerId: RuntimeId;
+  startedAtServerTick: number;
+  endingAtServerTick: number;
+  completedAtServerTick: number | null;
+  complete: boolean;
+  endReason: "duration" | "world-reset" | "player-missing" | "server-stop" | null;
+  frames: ServerPhysicsTraceFrame[];
+};
 
 export class WorldHost {
   readonly #physics: PhysicsWorld;
@@ -104,6 +145,7 @@ export class WorldHost {
   readonly #lastPublishedBodies = new Map<string, NetworkBodyState>();
   readonly #hotBodyUntilTick = new Map<string, number>();
   readonly #manipulationVersions = new Map<string, number>();
+  readonly #networkTraces = new Map<string, ServerPhysicsTraceCapture>();
 
   private constructor(
     physics: PhysicsWorld,
@@ -184,6 +226,54 @@ export class WorldHost {
       serverTick: this.#serverTick,
       ...this.#physics.debugDraw(maxPrimitives),
     };
+  }
+  startPhysicsTrace(playerId: RuntimeId): ServerPhysicsTraceCapture {
+    if (!this.#simulation.players.trace(playerId)) throw new Error("trace player is unavailable");
+    for (const [id, capture] of this.#networkTraces) {
+      if (this.#networkTraces.size < NETWORK_TRACE_MAX_CAPTURES) break;
+      if (capture.complete) this.#networkTraces.delete(id);
+    }
+    if (this.#networkTraces.size >= NETWORK_TRACE_MAX_CAPTURES)
+      throw new Error("too many active physics traces");
+    const startedAtServerTick = this.#serverTick + 1;
+    const capture: ServerPhysicsTraceCapture = {
+      format: "gurgur-server-physics-trace",
+      version: 1,
+      id: crypto.randomUUID(),
+      worldEpoch: this.#worldEpoch,
+      mapRevision: this.#bundle.mapRevision,
+      playerId: { ...playerId },
+      startedAtServerTick,
+      endingAtServerTick: startedAtServerTick + NETWORK_TRACE_DURATION_TICKS - 1,
+      completedAtServerTick: null,
+      complete: false,
+      endReason: null,
+      frames: [],
+    };
+    this.#networkTraces.set(capture.id, capture);
+    return structuredClone(capture);
+  }
+  physicsTrace(id: string): ServerPhysicsTraceCapture | null {
+    const capture = this.#networkTraces.get(id);
+    return capture ? structuredClone(capture) : null;
+  }
+  physicsTraceStatus(id: string): {
+    complete: boolean;
+    startedAtServerTick: number;
+    endingAtServerTick: number;
+    completedAtServerTick: number | null;
+    frameCount: number;
+  } | null {
+    const capture = this.#networkTraces.get(id);
+    return capture
+      ? {
+          complete: capture.complete,
+          startedAtServerTick: capture.startedAtServerTick,
+          endingAtServerTick: capture.endingAtServerTick,
+          completedAtServerTick: capture.completedAtServerTick,
+          frameCount: capture.frames.length,
+        }
+      : null;
   }
   playerPosition(id: RuntimeId): Vec3 | null {
     return this.#simulation.players.position(id);
@@ -620,6 +710,7 @@ export class WorldHost {
       const events = this.#physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
       this.#processPostPhysics(events);
       this.#serverTick += 1;
+      this.#recordPhysicsTraces(events);
       this.#accumulator -= PHYSICS_DT;
       steps += 1;
       if (this.#serverTick % STATE_PUBLISH_INTERVAL_TICKS === 0) {
@@ -703,6 +794,7 @@ export class WorldHost {
   }
 
   reset(): Snapshot {
+    this.#finishPhysicsTraces("world-reset");
     this.#clearDevPlayers();
     this.#physics.recreate();
     this.#physics.createStaticMesh({
@@ -751,6 +843,7 @@ export class WorldHost {
   }
 
   stop(): void {
+    this.#finishPhysicsTraces("server-stop");
     if (this.#timer) clearInterval(this.#timer);
     this.#timer = null;
     this.#clearDevPlayers();
@@ -842,6 +935,124 @@ export class WorldHost {
 
   #processPostPhysics(events: PhysicsStepEvents): void {
     this.#simulation.processSensorEvents(events.sensorBegin, events.sensorEnd);
+  }
+
+  #recordPhysicsTraces(events: PhysicsStepEvents): void {
+    const captures = [...this.#networkTraces.values()].filter((capture) => !capture.complete);
+    if (captures.length === 0) return;
+
+    const playerStates = this.#simulation.players.networkStates();
+    const playerViews = this.#simulation.players.views();
+    const playerProxies = this.#simulation.players.proxies();
+    const runtimeIdByPhysicsHandle = new Map<string, RuntimeId>();
+    for (const body of this.#runtimeBodies)
+      runtimeIdByPhysicsHandle.set(key(body.handle), { ...body.id });
+    for (let index = 0; index < playerViews.length; index += 1) {
+      const proxy = playerProxies[index];
+      const player = playerViews[index];
+      if (proxy && player) runtimeIdByPhysicsHandle.set(key(proxy), { ...player.id });
+    }
+
+    for (const capture of captures) {
+      if (capture.worldEpoch !== this.#worldEpoch) {
+        this.#completePhysicsTrace(capture, "world-reset");
+        continue;
+      }
+      const input = this.#simulation.players.trace(capture.playerId);
+      const player = playerStates.find((candidate) => sameId(candidate.id, capture.playerId));
+      const playerIndex = playerViews.findIndex((candidate) =>
+        sameId(candidate.id, capture.playerId),
+      );
+      const playerProxy = playerIndex < 0 ? null : (playerProxies[playerIndex] ?? null);
+      if (!input || !player || !playerProxy) {
+        this.#completePhysicsTrace(capture, "player-missing");
+        continue;
+      }
+
+      const bodies = this.#runtimeBodies
+        .map((body) => ({
+          distanceSquared: vec3DistanceSquared(
+            player.position,
+            this.#physics.state(body.handle).position,
+          ),
+          body,
+        }))
+        .filter(
+          ({ distanceSquared, body }) =>
+            distanceSquared <= NETWORK_TRACE_RADIUS_METRES * NETWORK_TRACE_RADIUS_METRES ||
+            (input.grabTarget !== null && sameId(input.grabTarget, body.id)),
+        )
+        .toSorted((a, b) => a.distanceSquared - b.distanceSquared)
+        .slice(0, NETWORK_TRACE_MAX_BODIES)
+        .map(({ body }) => this.#networkBodyState(body, false));
+      const relevantIds = new Set([key(capture.playerId), ...bodies.map((body) => key(body.id))]);
+      const traceId = (handle: RuntimeId): RuntimeId | null => {
+        const id = runtimeIdByPhysicsHandle.get(key(handle));
+        return id ? { ...id } : null;
+      };
+      const isRelevant = (id: RuntimeId | null): boolean => id !== null && relevantIds.has(key(id));
+      const contacts: ServerPhysicsTraceContact[] = [];
+      const appendContact = (
+        kind: ServerPhysicsTraceContact["kind"],
+        event: { a: RuntimeId; b: RuntimeId; point?: Vec3; normal?: Vec3; approachSpeed?: number },
+      ): void => {
+        const a = traceId(event.a);
+        const b = traceId(event.b);
+        if (!isRelevant(a) && !isRelevant(b)) return;
+        contacts.push({
+          kind,
+          a,
+          b,
+          ...(event.point ? { point: { ...event.point } } : {}),
+          ...(event.normal ? { normal: { ...event.normal } } : {}),
+          ...(event.approachSpeed === undefined ? {} : { approachSpeed: event.approachSpeed }),
+        });
+      };
+      for (const event of events.contactBegin) appendContact("begin", event);
+      for (const event of events.contactEnd) appendContact("end", event);
+      for (const event of events.contactHit) appendContact("hit", event);
+
+      const supportHit = this.#physics.raycastClosest(
+        player.position,
+        { x: 0, y: -(PLAYER_HALF_HEIGHT + 0.15), z: 0 },
+        { ignoreBodies: [playerProxy] },
+      );
+      capture.frames.push({
+        serverTick: this.#serverTick,
+        recordedAtMs: performance.now(),
+        player: cloneNetworkState(player) as NetworkPlayerState,
+        input: structuredClone(input),
+        support: supportHit
+          ? {
+              id: traceId(supportHit.body),
+              point: { ...supportHit.point },
+              normal: { ...supportHit.normal },
+              fraction: supportHit.fraction,
+            }
+          : null,
+        bodies: bodies.map((body) => cloneNetworkState(body) as NetworkBodyState),
+        contacts,
+      });
+      if (this.#serverTick >= capture.endingAtServerTick)
+        this.#completePhysicsTrace(capture, "duration");
+    }
+  }
+
+  #finishPhysicsTraces(
+    reason: Exclude<ServerPhysicsTraceCapture["endReason"], "duration" | null>,
+  ): void {
+    for (const capture of this.#networkTraces.values()) {
+      if (!capture.complete) this.#completePhysicsTrace(capture, reason);
+    }
+  }
+
+  #completePhysicsTrace(
+    capture: ServerPhysicsTraceCapture,
+    reason: Exclude<ServerPhysicsTraceCapture["endReason"], null>,
+  ): void {
+    capture.complete = true;
+    capture.endReason = reason;
+    capture.completedAtServerTick = this.#serverTick;
   }
 
   #body(id: RuntimeId): RuntimeBody | null {
@@ -960,6 +1171,13 @@ function key(id: RuntimeId): string {
 
 function sameId(a: RuntimeId, b: RuntimeId): boolean {
   return a.index === b.index && a.generation === b.generation;
+}
+
+function vec3DistanceSquared(a: Vec3, b: Vec3): number {
+  const x = a.x - b.x;
+  const y = a.y - b.y;
+  const z = a.z - b.z;
+  return x * x + y * y + z * z;
 }
 
 function nextVersion(version: number): number {

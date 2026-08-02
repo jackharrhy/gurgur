@@ -16,6 +16,13 @@ import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
 import { installSpeechChat, type SpeechChat } from "./speech-chat";
 import { SpeechSynthesizer } from "./speech-synthesis";
 import { PredictionTraceRecorder, type PredictionTracePose } from "./prediction-trace";
+import {
+  DEBUG_PHYSICS_CAPTURE_SECONDS,
+  buildDebugPhysicsCapture,
+  downloadDebugPhysicsCapture,
+  type DebugPhysicsCaptureArtifact,
+  type ServerPhysicsCaptureStart,
+} from "./debug-capture";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
@@ -139,6 +146,7 @@ let currentWorld: WorldMessage | null = null;
 let workerDiscardedCatchUpSeconds = 0;
 const predictionTrace = new PredictionTraceRecorder();
 const authoritativeStates = new Map<string, NetworkObjectState>();
+let lastDebugPhysicsCapture: DebugPhysicsCaptureArtifact | null = null;
 
 const diagnosticBodies = new Map<
   string,
@@ -203,6 +211,7 @@ if (testEnabled) {
         discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
       }),
       predictionTrace: () => predictionTrace.frames(),
+      lastPhysicsCapture: () => structuredClone(lastDebugPhysicsCapture),
       stallPhysicsWorker: (durationMs: number) => owner.stallForTest(durationMs),
     }),
   });
@@ -217,11 +226,12 @@ const renderer = new WorldRenderer(
     if (!followCamera) document.body.dataset.playerViewReady = "true";
   },
   (body) => {
-    if (!testEnabled) return;
+    if (!testEnabled && !debugEnabled) return;
     presentedStates.set(`${body.id.index}:${body.id.generation}`, {
       position: { ...body.position },
       rotation: { ...body.rotation },
     });
+    if (!testEnabled) return;
     const diagnostic = diagnosticBodies.get(`${body.id.index}:${body.id.generation}`);
     if (diagnostic)
       diagnostic.rendered = {
@@ -306,86 +316,132 @@ const pose = (state: NetworkObjectState | null): PredictionTracePose | null =>
     ? {
         position: { ...state.position },
         rotation: { ...state.rotation },
+        linearVelocity: { ...state.linearVelocity },
+        angularVelocity: { ...state.angularVelocity },
+        sourceTick: state.sourceTick,
+        stateSequence: state.stateSequence,
+        flags: state.flags,
       }
     : null;
-const owner = createOwnershipClient({
-  localStates(states, producedAtMs, discardedCatchUpSeconds, reconciled, trace) {
-    workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
-    document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
-    document.body.dataset.ownerStateAt = String(performance.now());
-    renderer.applyLocalStates(states, producedAtMs, reconciled);
-    renderer.setPredictionInteractions([...trace.contactIds, ...trace.supportIds]);
-    const predictedBody = states.find((state) => state.kind === "body") ?? null;
-    predictedBodyKey = predictedBody
-      ? `${predictedBody.id.index}:${predictedBody.id.generation}`
-      : null;
-    updateObservedStates(states);
-    const predictedPlayer = states.find((state) => state.kind === "player") ?? null;
-    if (predictedPlayer) {
-      const playerKey = `${predictedPlayer.id.index}:${predictedPlayer.id.generation}`;
-      const renderedPlayer = presentedStates.get(playerKey) ?? null;
-      const authoritativePlayer = authoritativeStates.get(playerKey) ?? null;
-      const heldKey = predictedBody
+const renderedPose = (
+  state: (typeof presentedStates extends Map<string, infer T> ? T : never) | null,
+): PredictionTracePose | null =>
+  state
+    ? {
+        position: { ...state.position },
+        rotation: { ...state.rotation },
+        linearVelocity: null,
+        angularVelocity: null,
+        sourceTick: null,
+        stateSequence: null,
+        flags: null,
+      }
+    : null;
+const owner = createOwnershipClient(
+  {
+    localStates(states, producedAtMs, discardedCatchUpSeconds, reconciled, trace) {
+      workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
+      document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
+      document.body.dataset.ownerStateAt = String(performance.now());
+      renderer.applyLocalStates(states, producedAtMs, reconciled);
+      renderer.setPredictionInteractions([...trace.contactIds, ...trace.supportIds]);
+      const predictedBody = states.find((state) => state.kind === "body") ?? null;
+      predictedBodyKey = predictedBody
         ? `${predictedBody.id.index}:${predictedBody.id.generation}`
         : null;
-      const authoritativeHeld = heldKey ? (authoritativeStates.get(heldKey) ?? null) : null;
-      const renderedHeld = heldKey ? (presentedStates.get(heldKey) ?? null) : null;
-      predictionTrace.record({
-        atMs: producedAtMs,
-        inputSequence: trace.inputSequence,
-        serverTick: predictedPlayer.sourceTick,
-        acknowledgment: trace.acknowledgment,
-        replayCount: trace.replayCount,
-        contactIds: trace.contactIds,
-        supportIds: trace.supportIds,
-        player: {
-          authoritative: pose(authoritativePlayer),
-          collision: pose(predictedPlayer),
-          predicted: pose(predictedPlayer),
-          rendered: renderedPlayer ? structuredClone(renderedPlayer) : null,
-        },
-        held: predictedBody
-          ? {
-              authoritative: pose(authoritativeHeld),
-              collision: pose(predictedBody),
-              predicted: pose(predictedBody),
-              rendered: renderedHeld ? structuredClone(renderedHeld) : null,
-            }
-          : null,
-      });
-    }
+      updateObservedStates(states);
+      const predictedPlayer = states.find((state) => state.kind === "player") ?? null;
+      if (predictedPlayer && (debugEnabled || testEnabled)) {
+        const predictedById = new Map(
+          states.map((state) => [`${state.id.index}:${state.id.generation}`, state]),
+        );
+        const collisionById = new Map(
+          trace.collisionStates.map((state) => [`${state.id.index}:${state.id.generation}`, state]),
+        );
+        const playerKey = `${predictedPlayer.id.index}:${predictedPlayer.id.generation}`;
+        const renderedPlayer = presentedStates.get(playerKey) ?? null;
+        const authoritativePlayer = authoritativeStates.get(playerKey) ?? null;
+        const collisionPlayer = collisionById.get(playerKey) ?? null;
+        const heldKey = predictedBody
+          ? `${predictedBody.id.index}:${predictedBody.id.generation}`
+          : null;
+        const authoritativeHeld = heldKey ? (authoritativeStates.get(heldKey) ?? null) : null;
+        const renderedHeld = heldKey ? (presentedStates.get(heldKey) ?? null) : null;
+        const collisionHeld = heldKey ? (collisionById.get(heldKey) ?? null) : null;
+        predictionTrace.record({
+          atMs: producedAtMs,
+          worldEpoch: currentWorld?.worldEpoch ?? 0,
+          inputSequence: trace.inputSequence,
+          serverTick: predictedPlayer.sourceTick,
+          acknowledgment: trace.acknowledgment,
+          replayCount: trace.replayCount,
+          reconciled,
+          command: trace.command ? structuredClone(trace.command) : null,
+          contactIds: trace.contactIds,
+          supportIds: trace.supportIds,
+          player: {
+            authoritative: pose(authoritativePlayer),
+            collision: pose(collisionPlayer),
+            predicted: pose(predictedPlayer),
+            rendered: renderedPose(renderedPlayer),
+          },
+          held: predictedBody
+            ? {
+                authoritative: pose(authoritativeHeld),
+                collision: pose(collisionHeld),
+                predicted: pose(predictedBody),
+                rendered: renderedPose(renderedHeld),
+              }
+            : null,
+          relevant: trace.collisionStates.map((collision) => {
+            const identity = `${collision.id.index}:${collision.id.generation}`;
+            return {
+              id: { ...collision.id },
+              kind: collision.kind,
+              timelines: {
+                authoritative: pose(authoritativeStates.get(identity) ?? null),
+                collision: pose(collision),
+                predicted: pose(predictedById.get(identity) ?? null),
+                rendered: renderedPose(presentedStates.get(identity) ?? null),
+              },
+            };
+          }),
+        });
+      }
+    },
+    inputCommand(command) {
+      const sent = session.sendInput(command);
+      if (testEnabled) {
+        document.body.dataset.predictedInputSequence = String(command.sequence);
+        document.body.dataset.predictedInputSent = String(sent);
+      }
+    },
+    manipulationRequest(message) {
+      session.requestManipulation(message);
+    },
+    manipulationState(message) {
+      const sent = session.sendManipulationState(message);
+      if (testEnabled) {
+        document.body.dataset.manipulationStateAt = String(performance.now());
+        document.body.dataset.manipulationStateCount = String(
+          Number(document.body.dataset.manipulationStateCount ?? 0) + 1,
+        );
+        document.body.dataset.manipulationStateSent = String(sent);
+        document.body.dataset.manipulationState = JSON.stringify(message);
+        document.body.dataset.speculativeManipulation = "false";
+      }
+    },
+    manipulationDrop(message) {
+      session.dropManipulation(message);
+    },
+    error(message) {
+      document.body.dataset.ownerPhysics = "error";
+      document.body.dataset.ownerPhysicsError = message;
+      console.error(`owner physics: ${message}`);
+    },
   },
-  inputCommand(command) {
-    const sent = session.sendInput(command);
-    if (testEnabled) {
-      document.body.dataset.predictedInputSequence = String(command.sequence);
-      document.body.dataset.predictedInputSent = String(sent);
-    }
-  },
-  manipulationRequest(message) {
-    session.requestManipulation(message);
-  },
-  manipulationState(message) {
-    const sent = session.sendManipulationState(message);
-    if (testEnabled) {
-      document.body.dataset.manipulationStateAt = String(performance.now());
-      document.body.dataset.manipulationStateCount = String(
-        Number(document.body.dataset.manipulationStateCount ?? 0) + 1,
-      );
-      document.body.dataset.manipulationStateSent = String(sent);
-      document.body.dataset.manipulationState = JSON.stringify(message);
-      document.body.dataset.speculativeManipulation = "false";
-    }
-  },
-  manipulationDrop(message) {
-    session.dropManipulation(message);
-  },
-  error(message) {
-    document.body.dataset.ownerPhysics = "error";
-    document.body.dataset.ownerPhysicsError = message;
-    console.error(`owner physics: ${message}`);
-  },
-});
+  { traceEnabled: debugEnabled || testEnabled },
+);
 const sendUseOnEdge = (command: InputCommand): void => {
   if (command.interactCounter === lastUseCounter) return;
   lastUseCounter = command.interactCounter;
@@ -602,12 +658,174 @@ speechChat = installSpeechChat({
 
 let debugPoll: number | null = null;
 let debugRequest: AbortController | null = null;
+let debugCaptureRequest: AbortController | null = null;
+let debugCaptureActive = false;
+let debugHotkey: ((event: KeyboardEvent) => void) | null = null;
 if (debugEnabled) {
   document.body.dataset.debug = "true";
-  const panel = document.createElement("output");
+  const panel = document.createElement("section");
   panel.id = "debug-status";
-  panel.textContent = "debug · waiting for host physics";
+  const physicsStatus = document.createElement("output");
+  physicsStatus.textContent = "debug · waiting for host physics";
+  const captureStatus = document.createElement("output");
+  captureStatus.textContent = "physics capture ready · play normally, then press F8";
+  const controls = document.createElement("div");
+  const recordButton = document.createElement("button");
+  recordButton.type = "button";
+  recordButton.textContent = "record 15s (F8)";
+  const downloadButton = document.createElement("button");
+  downloadButton.type = "button";
+  downloadButton.textContent = "download last trace";
+  downloadButton.hidden = true;
+  controls.append(recordButton, downloadButton);
+  panel.append(physicsStatus, captureStatus, controls);
   document.body.append(panel);
+
+  const startPhysicsCapture = async (): Promise<void> => {
+    if (debugCaptureActive) return;
+    const playerId = localPlayerId;
+    const world = currentWorld;
+    if (!playerId || !world || document.body.dataset.inputReady !== "true") {
+      captureStatus.textContent = "capture unavailable · wait for the game to finish connecting";
+      return;
+    }
+    debugCaptureActive = true;
+    recordButton.disabled = true;
+    downloadButton.disabled = true;
+    document.body.dataset.debugCapture = "starting";
+    predictionTrace.reset();
+    const startedAtIso = new Date().toISOString();
+    const clientStartedAtMs = performance.now();
+    debugCaptureRequest = new AbortController();
+    let countdown: number | null = null;
+    try {
+      const response = await fetch(
+        `/debug/network-trace?test=1&player=${playerId.index}:${playerId.generation}`,
+        {
+          method: "POST",
+          cache: "no-store",
+          signal: debugCaptureRequest.signal,
+        },
+      );
+      if (!response.ok) throw new Error(`physics capture could not start (${response.status})`);
+      const serverStart = (await response.json()) as ServerPhysicsCaptureStart;
+      if (
+        typeof serverStart.id !== "string" ||
+        serverStart.durationSeconds !== DEBUG_PHYSICS_CAPTURE_SECONDS
+      )
+        throw new Error("physics capture returned invalid metadata");
+
+      const updateCountdown = (): void => {
+        const remaining = Math.max(
+          0,
+          DEBUG_PHYSICS_CAPTURE_SECONDS - (performance.now() - clientStartedAtMs) / 1_000,
+        );
+        captureStatus.textContent = `recording server + client physics · ${remaining.toFixed(1)}s remaining`;
+        document.body.dataset.debugCapture = "recording";
+      };
+      updateCountdown();
+      countdown = window.setInterval(updateCountdown, 100);
+      const remainingMs = Math.max(
+        0,
+        DEBUG_PHYSICS_CAPTURE_SECONDS * 1_000 - (performance.now() - clientStartedAtMs),
+      );
+      await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
+      if (countdown !== null) clearInterval(countdown);
+      countdown = null;
+      captureStatus.textContent = "recording complete · collecting server timeline";
+      document.body.dataset.debugCapture = "collecting";
+
+      let serverCapture: unknown = null;
+      const collectionDeadline = performance.now() + 10_000;
+      while (performance.now() < collectionDeadline) {
+        const captureResponse = await fetch(
+          `/debug/network-trace?test=1&id=${encodeURIComponent(serverStart.id)}`,
+          { cache: "no-store", signal: debugCaptureRequest.signal },
+        );
+        if (captureResponse.status === 202) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+          continue;
+        }
+        if (!captureResponse.ok)
+          throw new Error(`server capture could not be collected (${captureResponse.status})`);
+        serverCapture = await captureResponse.json();
+        break;
+      }
+      if (!serverCapture) throw new Error("server capture did not finish in time");
+
+      const completedAtIso = new Date().toISOString();
+      const clientCompletedAtMs = performance.now();
+      lastDebugPhysicsCapture = buildDebugPhysicsCapture({
+        capturedAt: {
+          startedAtIso,
+          completedAtIso,
+          clientPerformanceTimeOriginMs: performance.timeOrigin,
+          clientStartedAtMs,
+          clientCompletedAtMs,
+        },
+        context: {
+          url: location.href,
+          userAgent: navigator.userAgent,
+          mapRevision: world.bundle.mapRevision,
+          worldEpoch: world.worldEpoch,
+          localPlayerId: { ...playerId },
+          network: {
+            rttMs: finiteDatasetNumber(document.body.dataset.rttMs),
+            jitterMs: finiteDatasetNumber(document.body.dataset.jitterMs),
+            transport: document.body.dataset.transport ?? null,
+            simulatedLatencyMs: finiteSearchNumber(searchParams, "simulatedLatencyMs", 0),
+            simulatedJitterMs: finiteSearchNumber(searchParams, "simulatedJitterMs", 0),
+            simulatedLossRate: finiteSearchNumber(searchParams, "simulatedLossRate", 0),
+            simulatedSeed: finiteSearchNumber(searchParams, "simulatedSeed", 0x67757267),
+          },
+        },
+        client: {
+          discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
+          feel: renderer.clientFeelDiagnostics(),
+          frames: predictionTrace.frames(),
+        },
+        server: serverCapture,
+      });
+      Object.defineProperty(window, "__gurgurLastPhysicsCapture", {
+        configurable: true,
+        value: lastDebugPhysicsCapture,
+      });
+      await downloadDebugPhysicsCapture(lastDebugPhysicsCapture);
+      const serverFrameCount = Array.isArray((serverCapture as { frames?: unknown }).frames)
+        ? (serverCapture as { frames: unknown[] }).frames.length
+        : 0;
+      document.body.dataset.debugCaptureClientFrames = String(
+        lastDebugPhysicsCapture.client.frames.length,
+      );
+      document.body.dataset.debugCaptureServerFrames = String(serverFrameCount);
+      captureStatus.textContent = `capture ready · ${lastDebugPhysicsCapture.client.frames.length} client / ${serverFrameCount} server frames`;
+      document.body.dataset.debugCapture = "complete";
+      downloadButton.hidden = false;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        captureStatus.textContent =
+          error instanceof Error ? `capture failed · ${error.message}` : "capture failed";
+        document.body.dataset.debugCapture = "error";
+      }
+    } finally {
+      if (countdown !== null) clearInterval(countdown);
+      debugCaptureRequest = null;
+      debugCaptureActive = false;
+      recordButton.disabled = false;
+      downloadButton.disabled = false;
+    }
+  };
+  recordButton.addEventListener("click", () => void startPhysicsCapture());
+  downloadButton.addEventListener("click", () => {
+    if (lastDebugPhysicsCapture) void downloadDebugPhysicsCapture(lastDebugPhysicsCapture);
+  });
+  debugHotkey = (event): void => {
+    if (event.code !== "F8" || event.repeat) return;
+    event.preventDefault();
+    void startPhysicsCapture();
+  };
+  addEventListener("keydown", debugHotkey);
+
   const pollPhysics = async (): Promise<void> => {
     if (debugRequest) return;
     debugRequest = new AbortController();
@@ -620,10 +838,10 @@ if (debugEnabled) {
       const frame = (await response.json()) as PhysicsDebugFrame;
       renderer.applyPhysicsDebugFrame(frame);
       document.body.dataset.physicsDebugPrimitives = String(frame.primitives.length);
-      panel.textContent = `debug · server tick ${frame.serverTick} · ${frame.primitives.length} physics primitives${frame.truncated ? " · truncated" : ""}`;
+      physicsStatus.textContent = `debug · server tick ${frame.serverTick} · ${frame.primitives.length} physics primitives${frame.truncated ? " · truncated" : ""}`;
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
-        panel.textContent =
+        physicsStatus.textContent =
           error instanceof Error ? `debug · ${error.message}` : "debug · unavailable";
       }
     } finally {
@@ -645,6 +863,8 @@ addEventListener("keydown", unlockAudio, { capture: true });
 addEventListener("pagehide", () => {
   if (debugPoll !== null) clearInterval(debugPoll);
   debugRequest?.abort();
+  debugCaptureRequest?.abort();
+  if (debugHotkey) removeEventListener("keydown", debugHotkey);
   session.close();
   speechChat?.dispose();
   speechSynthesizer.dispose();
@@ -655,3 +875,15 @@ addEventListener("pagehide", () => {
   worldAudio.dispose();
   renderer.dispose();
 });
+
+function finiteDatasetNumber(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return value !== undefined && Number.isFinite(parsed) ? parsed : null;
+}
+
+function finiteSearchNumber(parameters: URLSearchParams, name: string, fallback: number): number {
+  const value = parameters.get(name);
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}

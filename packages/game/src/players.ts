@@ -30,7 +30,7 @@ import type { WorldBundle } from "./world";
 
 const PLAYER_INDEX_BASE = 0x8000_0000;
 
-type PlayerIntent = Pick<
+export type PlayerIntent = Pick<
   InputCommand,
   | "moveX"
   | "moveZ"
@@ -86,6 +86,15 @@ export type GamePlayerPrediction = {
   grab: PropGrab | null;
 };
 
+export type GamePlayerTrace = {
+  lastReceivedInputSequence: number;
+  lastProcessedInputSequence: number;
+  queuedInputSequences: number[];
+  input: PlayerIntent;
+  grabVersion: number;
+  grabTarget: RuntimeId | null;
+};
+
 export type GamePlayers = {
   views(): GamePlayerView[];
   proxies(): RuntimeId[];
@@ -96,6 +105,7 @@ export type GamePlayers = {
   grabbedTarget(id: RuntimeId): RuntimeId | null;
   releaseGrab(id: RuntimeId): RuntimeId | null;
   prediction(id: RuntimeId): GamePlayerPrediction | null;
+  trace(id: RuntimeId): GamePlayerTrace | null;
   canResume(persistentId: string): boolean;
   connect(persistentId?: string, initial?: { position: Vec3; yaw: number }): RuntimeId;
   disconnect(id: RuntimeId, options?: { persist?: boolean }): boolean;
@@ -405,6 +415,21 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
               targetRotation: { ...player.grab.targetRotation },
             }
           : null,
+      };
+    },
+    trace(id) {
+      const player = resolve(id)?.player;
+      if (!player) return null;
+      return {
+        lastReceivedInputSequence: player.lastSequence,
+        lastProcessedInputSequence: player.lastProcessedInputSequence,
+        queuedInputSequences: player.inputQueue.map((command) => command.sequence),
+        input: {
+          ...player.input,
+          interactTarget: player.input.interactTarget ? { ...player.input.interactTarget } : null,
+        },
+        grabVersion: player.grabVersion,
+        grabTarget: player.grab ? { ...player.grab.target } : null,
       };
     },
     canResume: (persistentId) => dormant.has(persistentId),

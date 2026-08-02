@@ -1,6 +1,6 @@
 # Testing
 
-`bun run check` runs format verification, lint, TypeScript, 174 unit/simulation/
+`bun run check` runs format verification, lint, TypeScript, 176 unit/simulation/
 integration tests, persistence/content tests, and real protocol-v7 server
 transport tests.
 
@@ -52,7 +52,9 @@ different claims and require different oracles.
 8. Presentation tests prove source-tick interpolation, per-track adaptive delay,
    no extrapolation, and monotonic delay changes. The prediction trace recorder
    retains input/ack/replay/contact/support metadata plus authoritative,
-   collision, predicted, and rendered poses.
+   collision, predicted, and rendered poses. A server recorder independently
+   captures 900 authoritative 60 Hz frames and stops cleanly on world reset,
+   player loss, or shutdown.
 9. Real Chrome tests exercise production Wasm, workers, input, reconciliation,
    WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. A main
    thread stall must not discard worker time; a worker stall must be measured.
@@ -84,6 +86,24 @@ Browser behavior gates require:
 Run localhost, Typical, and Adverse profiles at 60 and 120 Hz when changing
 prediction or presentation policy. Inspect the four-timeline trace for any
 walk-over or correction regression.
+
+## Capturing a real feel failure
+
+Open the development game with `?debug`, wait until input is ready, then click
+**record 15s** or press `F8`. Reproduce one problem at a time during the entire
+countdown. The page automatically downloads `gurgur-physics-*.json.gz`; attach that
+file with a screen recording and a short note naming the action and approximate
+time of the failure. If automatic download is blocked, use **download last
+trace** in the debug panel.
+
+The artifact is the correlation oracle, not a passing test by itself. Compare
+frames by server/source tick and input acknowledgement. For each relevant object,
+inspect authoritative → collision → predicted → rendered divergence in that
+order. A server/client mismatch implicates shared simulation or command replay;
+collision/render separation implicates interaction presentation; a correction
+spike with growing replay count implicates transport/checkpoint recovery. The
+capture includes the page URL and user agent plus gameplay inputs/transforms, so
+review it before sharing outside the project.
 
 ## Physics replacement gate
 

@@ -7,6 +7,7 @@ import {
   PHYSICS_SUBSTEPS,
   PROTOCOL_VERSION,
   NETWORK_FLAG_ACTIVE,
+  NETWORK_FLAG_AWAKE,
   NETWORK_FLAG_REVERSED,
   NETWORK_FLAG_HELD,
   PhysicsWorld,
@@ -80,6 +81,9 @@ type LocalGravityField = {
   visitors: Map<string, number>;
 };
 
+const TRACE_RADIUS_METRES = 6;
+const TRACE_MAX_NEARBY_OBJECTS = 32;
+
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let physics: PhysicsWorld | null = null;
 let bundle: WorldBundle | null = null;
@@ -122,11 +126,17 @@ let worldBarrier = Promise.resolve();
 let respawnPosition = { x: 0, y: 0, z: 0 };
 let respawnYaw = 0;
 let voidY = -10_000;
+let traceEnabled = false;
 
 scope.addEventListener("message", (event: MessageEvent<PhysicsWorkerRequest>) => {
   const message = event.data;
   if (message.type === "world") {
-    worldBarrier = setWorld(message.world, message.states, message.localPlayerId).catch(report);
+    worldBarrier = setWorld(
+      message.world,
+      message.states,
+      message.localPlayerId,
+      message.traceEnabled,
+    ).catch(report);
   } else if (message.type === "input") {
     input = message.command;
     void worldBarrier.then(processInputEdges);
@@ -155,6 +165,7 @@ async function setWorld(
   message: WorldMessage,
   states: NetworkObjectState[],
   playerId: RuntimeId,
+  enableTrace: boolean,
 ): Promise<void> {
   if (timer !== null) clearInterval(timer);
   timer = null;
@@ -165,6 +176,7 @@ async function setWorld(
   });
   bundle = message.bundle;
   worldEpoch = message.worldEpoch;
+  traceEnabled = enableTrace;
   localPlayerId = { ...playerId };
   localPlayer = null;
   localPlayerProxy = null;
@@ -273,9 +285,11 @@ function tick(): void {
   if (steps === 0) return;
   const localStates = localPredictedStates();
   const contacts = predictionContacts();
+  const command = predictionHistory.at(-1)?.command ?? null;
   post({
     type: "local-states",
     states: localStates,
+    collisionStates: traceEnabled ? clientCollisionStates(contacts) : [],
     producedAtMs: now,
     discardedCatchUpSeconds,
     reconciled: false,
@@ -284,6 +298,7 @@ function tick(): void {
     replayCount: 0,
     contactIds: contacts.contactIds,
     supportIds: contacts.supportIds,
+    command: command ? structuredClone(command) : null,
   });
   if (manipulation) {
     manipulation.stateSequence = (manipulation.stateSequence + 1) & 0xffff;
@@ -496,9 +511,11 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
   const newestSequence = pending.at(-1)?.sequence ?? acknowledged;
   nextInputSequence = Math.max(nextInputSequence, newestSequence + 1);
   const contacts = predictionContacts();
+  const command = predictionHistory.at(-1)?.command ?? null;
   post({
     type: "local-states",
     states: localPredictedStates(),
+    collisionStates: traceEnabled ? clientCollisionStates(contacts) : [],
     producedAtMs: performance.now(),
     discardedCatchUpSeconds,
     reconciled: true,
@@ -507,7 +524,70 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
     replayCount: pending.length,
     contactIds: contacts.contactIds,
     supportIds: contacts.supportIds,
+    command: command ? structuredClone(command) : null,
   });
+}
+
+function clientCollisionStates(contacts: {
+  contactIds: RuntimeId[];
+  supportIds: RuntimeId[];
+}): NetworkObjectState[] {
+  if (!physics || !localPlayer || !localPlayerProxy) return [];
+  const playerPhysics = physics.state(localPlayerProxy);
+  const player: NetworkPlayerState = {
+    ...clonePlayer(localPlayer),
+    position: { ...playerPhysics.position },
+    rotation: { ...playerPhysics.rotation },
+    linearVelocity: { ...playerPhysics.linearVelocity },
+    angularVelocity: { ...playerPhysics.angularVelocity },
+  };
+  const forced = new Set([...contacts.contactIds, ...contacts.supportIds].map((id) => key(id)));
+  if (predictedGrab) forced.add(key(predictedGrab.grab.target));
+  const radiusSquared = TRACE_RADIUS_METRES * TRACE_RADIUS_METRES;
+  const candidates: Array<{ distanceSquared: number; state: NetworkObjectState }> = [];
+  for (const body of bodies.values()) {
+    const bodyPhysics = physics.state(body.handle);
+    const distanceSquared = vec3DistanceSquared(playerPhysics.position, bodyPhysics.position);
+    if (distanceSquared > radiusSquared && !forced.has(key(body.networkId))) continue;
+    candidates.push({
+      distanceSquared,
+      state: {
+        ...cloneBody(body.state),
+        sourceTick:
+          predictedGrab && sameId(predictedGrab.grab.target, body.networkId)
+            ? localPlayer.sourceTick
+            : body.state.sourceTick,
+        position: { ...bodyPhysics.position },
+        rotation: { ...bodyPhysics.rotation },
+        linearVelocity: { ...bodyPhysics.linearVelocity },
+        angularVelocity: { ...bodyPhysics.angularVelocity },
+        flags:
+          (body.state.flags & ~NETWORK_FLAG_AWAKE) | (bodyPhysics.awake ? NETWORK_FLAG_AWAKE : 0),
+      },
+    });
+  }
+  for (const remote of remotePlayers.values()) {
+    const remotePhysics = physics.state(remote.handle);
+    const distanceSquared = vec3DistanceSquared(playerPhysics.position, remotePhysics.position);
+    if (distanceSquared > radiusSquared && !forced.has(key(remote.networkId))) continue;
+    candidates.push({
+      distanceSquared,
+      state: {
+        ...clonePlayer(remote.state),
+        position: { ...remotePhysics.position },
+        rotation: { ...remotePhysics.rotation },
+        linearVelocity: { ...remotePhysics.linearVelocity },
+        angularVelocity: { ...remotePhysics.angularVelocity },
+      },
+    });
+  }
+  return [
+    player,
+    ...candidates
+      .toSorted((a, b) => a.distanceSquared - b.distanceSquared)
+      .slice(0, TRACE_MAX_NEARBY_OBJECTS)
+      .map(({ state }) => state),
+  ];
 }
 
 function releasePredictedGrab(): void {
@@ -1143,6 +1223,16 @@ function sameId(a: RuntimeId, b: RuntimeId): boolean {
 
 function key(id: RuntimeId): string {
   return `${id.index}:${id.generation}`;
+}
+
+function vec3DistanceSquared(
+  a: NetworkBodyState["position"],
+  b: NetworkBodyState["position"],
+): number {
+  const x = a.x - b.x;
+  const y = a.y - b.y;
+  const z = a.z - b.z;
+  return x * x + y * y + z * z;
 }
 
 function post(message: PhysicsWorkerResponse): void {

@@ -54,6 +54,9 @@ The automated surface now includes:
   contraption scenarios;
 - a bounded trace with command/ack/replay/contact/support data and
   authoritative, collision, predicted, and rendered transforms;
+- a `?debug`/`F8` 15-second capture pairs that browser trace with 900 Bun
+  authoritative frames and downloads one versioned JSON artifact for real
+  gameplay bug reports;
 - the 16-player/128-body real transport matrix and existing fixed-step/tick,
   state-age, traffic, underrun, and analytic-presentation budgets.
 
@@ -61,7 +64,7 @@ The automated surface now includes:
 
 Automated implementation gate, 2026-08-02:
 
-- `bun run check` passes formatting, lint, TypeScript, and all 174 tests;
+- `bun run check` passes formatting, lint, TypeScript, and all 176 tests;
 - `bun run test:browser` passes movement, physical pickup/release, first-wins
   contention/recovery, and server-only contraption scenarios; the adverse
   pickup path also passed three consecutive isolated runs;
