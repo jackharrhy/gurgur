@@ -2,167 +2,181 @@
 
 ## Selected model
 
-Gurgur uses per-object authority modeled on s&box network objects. A network
-object owned by another peer is a proxy and is not locally simulated; an
-unowned object is simulated by the host. The primary pinned reference is
-[sbox-public `GameObject.Network.cs` at `2053455`](https://github.com/Facepunch/sbox-public/blob/2053455813f24165d614cdeaf561082eecc86990/engine/Sandbox.Engine/Scene/GameObject/GameObject.Network.cs#L895-L961).
+Gurgur keeps explicit per-object authority modeled on s&box network objects,
+but centralizes every shared rigid body in Bun. A browser owns only its
+geometric player controller. Bun dynamically simulates every shared prop,
+mechanism, mover, and diagnostic body in one Box3D world. Browsers represent
+those objects with non-simulating proxies.
 
+The pinned authority reference is
+[sbox-public `GameObject.Network.cs` at `2053455`](https://github.com/Facepunch/sbox-public/blob/2053455813f24165d614cdeaf561082eecc86990/engine/Sandbox.Engine/Scene/GameObject/GameObject.Network.cs#L895-L961).
 [Facepunch/sandbox's pinned physgun `GrabState`](https://github.com/Facepunch/sandbox/blob/1cee1dd28b6de82b21afdcecdbc3f34c0047152c/Code/Weapons/PhysGun/Physgun.cs#L20-L68)
-is the fixed-authority contraption-manipulation reference. Gurgur retains its
-centre-of-mass, obstruction-aware controller for leased loose props, while
-fixed contraptions capture the selected hit offset and are pulled by a
-host-created control joint.
+is the target-control reference. Loose props use a centre-of-mass anchor;
+contraptions use the selected hit offset. Both are pulled by a Bun-created
+control joint without transferring authority.
 
 ## Authority registry
 
-Every runtime descriptor contains `ownerPlayerId`, `authorityVersion`, and
-`transferPolicy`.
+Every runtime descriptor contains `ownerPlayerId`, `authorityVersion`, and the
+single protocol-v6 transfer policy `fixed`.
 
-| Object                            | Initial authority | Transfer policy |
-| --------------------------------- | ----------------- | --------------- |
-| Network player                    | its browser       | `fixed`         |
-| Dynamic grabbable map/stress prop | Bun               | `grab-lease`    |
-| Unheld prop                       | Bun               | `grab-lease`    |
-| Mechanism, trigger, mover, sensor | Bun               | `fixed`         |
-| Joint-connected body/contraption  | Bun               | `fixed`         |
-| MCP/diagnostic actor              | Bun               | `fixed`         |
+| Object                            | Authority   | Transfer policy |
+| --------------------------------- | ----------- | --------------- |
+| Network player                    | its browser | `fixed`         |
+| Held or unheld loose prop         | Bun         | `fixed`         |
+| Mechanism, trigger, mover, sensor | Bun         | `fixed`         |
+| Joint-connected body/contraption  | Bun         | `fixed`         |
+| MCP/diagnostic actor              | Bun         | `fixed`         |
 
-Exactly one peer simulates each object. Ordinary contact does not change the
-registry.
+Exactly one peer dynamically simulates each object. Ordinary contact never
+changes the registry. A browser-authored body state is invalid protocol input.
 
-## Fixed simulation and presentation
+## Fixed simulation, time, and presentation
 
 Bun and each browser physics worker run the Box3D adapter at 60 Hz with four
-substeps. A browser runs its own geometric player controller and any granted
-held prop. Bun runs unheld dynamic bodies, mechanisms, and MCP players.
+substeps. A browser runs only its own geometric player controller. Bun runs all
+shared dynamic bodies, mechanisms, and MCP players.
 
-Nonowners drive kinematic collision proxies from the newest accepted network
-transform. Rendering is independent of proxy collision state:
+Every network object state carries an unsigned 32-bit `sourceTick`.
+Bun-produced state uses `serverTick`. Bun maps browser-player ticks onto its
+clock once per player authority version with an immutable epoch offset. Packet
+delay can neither stretch nor compress the mapped source cadence. A mapped tick
+may lead the current host tick by at most twelve ticks to absorb a lower-delay
+packet after the initial anchor; backwards or larger future jumps are rejected.
+Tick rollover is unwrapped against each object's existing timeline.
 
-- local owner states are interpolated one fixed tick behind consecutive worker
-  steps;
-- remote states are rendered from a 100 ms interpolation buffer;
+Nonowners buffer source-tick samples. At each fixed step they move collision
+proxies through Box3D kinematic target transforms, including rotation, from a
+eight-tick host timeline. Bun applies the same delayed timeline to externally
+owned player proxies before shared-body contacts. Packet callbacks do not
+teleport ordinary collision proxies.
+
+Rendering is separate from collision state:
+
+- local player states are interpolated one fixed tick behind worker steps;
+- ordinary remote render tracks adapt independently between four and eight
+  source ticks from recent late-arrival and underrun evidence;
+- delay rises without moving the render timeline backwards and falls slowly
+  after a two-second underrun hold;
 - presentation never extrapolates beyond the newest state;
-- there is no input prediction, replay, reconciliation, or correction.
+- reliable respawn, reset, and authority discontinuities replace the timeline;
+- there is no gameplay input prediction, replay, reconciliation, or rigid-body
+  extrapolation;
+- after a reliable loose-prop claim grant, only the claimant's rendered mesh may
+  follow the local 60 Hz target speculatively and reconcile visually on release.
 
-## Protocol v5
+The fixed eight-tick browser collision track and Bun player-proxy track never
+read the adaptive render delay or the speculative held view. The latter cannot
+enter collision queries, trigger decisions, persistence, use validation, or an
+outbound body-state packet.
+
+The player/body contract is deliberately one-way. The browser's geometric
+player treats remote bodies as kinematic collision geometry. Bun's delayed
+kinematic player proxy can push Bun-owned bodies. A future requirement for
+reciprocal authoritative player/body response requires a different,
+Source-style server-player authority and prediction decision.
+
+## Protocol v6
 
 Reliable WebSocket traffic carries:
 
 - hello/welcome and WebRTC signaling;
 - world manifest and complete binary bootstrap;
 - lifecycle create/remove;
-- ownership request, grant/denial, drop, and reliable owner discontinuity;
-- fixed-authority manipulation request, grant/denial, and drop;
+- reliable player authority assignment and owner discontinuity;
+- fixed-authority prop manipulation request, grant/denial, and drop;
 - use requests, reset/world replacement, speech, and ping/pong.
 
 Disposable unordered WebRTC traffic uses two channels:
 
-- `gurgur-owner-v5`: browser `OwnedState`, recipient `StateAck`, and fixed
-  51-byte `ManipulationState` targets;
-- `gurgur-state-v5`: Bun-relayed `StateCluster`.
+- `gurgur-owner-v6`: browser player `OwnedState`, recipient `StateAck`, and
+  fixed 51-byte `ManipulationState` targets;
+- `gurgur-state-v6`: Bun-relayed `StateCluster`.
 
 Binary state uses fixed tags, float32 transforms/controller values, presence
-masks, uint16 object sequences, and generation-bearing IDs. A disposable cluster
-is at most 1,200 bytes. One owner packet contains at most four objects. Bun
-publishes at 30 Hz, sends only changed sequence values, splits larger updates,
-coalesces obsolete pending broadcasts, and drops current-state output under
-backpressure instead of queueing it reliably.
+masks, uint16 object sequences, uint32 source ticks, and generation-bearing
+IDs. A disposable cluster is at most 1,200 bytes. Bun accepts exactly one
+browser-owned state: the sending browser's player. Ordinary Bun state publishes
+at 30 Hz; a currently manipulated body is a 60 Hz hot state. Replication sends
+only changed sequence values, splits larger updates, coalesces obsolete pending
+broadcasts, and drops current-state output under backpressure instead of
+queueing it reliably.
 
-There is no spatial interest management in protocol v5. Every peer receives all
+There is no spatial interest management in protocol v6. Every peer receives all
 current objects.
 
-Joint definitions, conveyor classnames, and gravity-volume overlap state are not
-protocol concepts. Jointed bodies replicate through the existing body state as
-fixed-authority kinematic proxies. Conveyors reserve the body-state `active` and
-`reversed` flags; reliable bootstrap and ordinary body deltas carry those flags,
-and a device-state change advances that object's sequence. Browser workers use
-the compiled generic surface velocity plus flags for local player and held-prop
-contacts. Gravity volumes are immutable compiled world data and are evaluated
-locally by the current physics authority.
+Joint definitions, mapper classnames, and gravity-volume overlap state are not
+protocol concepts. Jointed bodies replicate as ordinary fixed-authority body
+state. Conveyors reserve the body-state `active` and `reversed` flags. Browser
+workers evaluate immutable conveyor and gravity capabilities for their player;
+Bun evaluates them for every shared body.
 
 ## Delta baselines and acknowledgements
 
 Each recipient has an acknowledged baseline per object. A cluster contains only
 fields changed from that baseline. Acknowledgements identify object, authority
-version, and state sequence. Unacknowledged state may be sent again after 250 ms;
-newer current state supersedes older pending state.
+version, and state sequence. Unacknowledged state may be sent again after
+250 ms; newer current state supersedes older pending state.
 
-Bootstrap, lifecycle creation, authority changes, release, respawn, and teleport
-include complete reliable state. Disposable correctness never depends on a delta
-arriving before its baseline.
+Bootstrap, lifecycle creation, player authority change, respawn, and teleport
+include complete reliable state. Disposable correctness never depends on a
+delta arriving before its baseline.
 
-State older than a receiver's authority version or uint16 sequence is discarded.
-The same rule applies when disposable state crosses a reliable authority or
-respawn message in flight.
+State older than a receiver's authority version or uint16 sequence is
+discarded. `authorityVersion`, `stateSequence`, `sourceTick`, `worldEpoch`,
+`mapRevision`, and persistence version remain independent.
 
-## Grab lease
+## Fixed-authority prop manipulation
 
-Pickup sends a reliable request containing target ID, current authority version,
-hold distance, and captured relative rotation. Bun validates:
+Every `func_physics` remains dynamically simulated by Bun while held. A primary
+press sends a reliable request containing target identity, current authority
+version, body-local anchor, and hold distance. A loose `grab` uses the centre of
+mass and derives stable distance from compiled extent. A `manipulate`
+interaction uses the selected hit offset.
 
-- current `worldEpoch`;
-- generation-bearing target identity;
-- `grab-lease` policy and no current owner;
-- exact authority version;
-- bounded finite hold values;
-- distance from the latest accepted player proxy.
-
-The first valid request changes owner and authority version atomically and
-includes complete prop state. The browser converts its proxy to a dynamic body
-and starts the shared carry controller.
-
-Release sends one reliable complete pose plus linear/angular velocity. The
-browser immediately converts back to a proxy. Bun applies the final state,
-increments authority version, resumes dynamic simulation, and broadcasts the
-atomic change. Held props cannot be stolen.
-
-## Fixed-authority manipulation claim
-
-A `func_physics` with `grabbable 0` and `manipulable 1` remains unowned and
-dynamically simulated by Bun, including when it belongs to a joint graph. A
-primary press sends a reliable request containing target identity, current
-authority version, captured body-local hit point, and hold distance. Bun
-validates epoch, exact version, fixed policy, compiled capability, finite
+Bun validates epoch, exact version, fixed policy, compiled capability, finite
 values, reach, and claim availability. One player and one body may participate
 in at most one claim; the first valid request wins.
 
-The browser never publishes a body transform for this path. At 30 Hz it sends a
-51-byte disposable target containing the claim version, uint16 target sequence,
-desired world anchor, and desired rotation. Bun accepts it only from the
-claiming player at the current object/claim versions, rejects duplicate or old
-sequences across wrap, and applies it to a private native control joint. The
-ordinary host-owned body state remains the only replicated physics result.
+The browser never publishes a body transform. At 60 Hz while claimed it sends a disposable
+target containing claim version, uint16 target sequence, desired world anchor,
+and desired rotation. Bun accepts it only from the claimant at the current
+object and claim versions, then applies it to a private native control joint.
+The Bun-owned body state is the only replicated physics result and is published
+as a 60 Hz hot state for the duration of manipulation.
 
-Release is reliable and removes the control joint without an authority or body
-type change. Missing target state times out after 1.5 seconds. Transport loss,
-respawn, lifecycle removal, and reset also release immediately. An active claim
-uses the existing held network flag for interaction availability, but claim
-version is independent of `authorityVersion`.
+Release is reliable and removes the control joint without an authority, body
+type, or solver change. Existing velocity continues in the same world. Missing
+target state times out after 1.5 seconds. Transport loss, respawn, lifecycle
+removal, and reset release immediately. The held flag controls interaction
+availability; claim version is independent of `authorityVersion`. A claimant's
+presentation-only loose-prop view retains its last visual offset at release and
+converges to the authoritative render track with correction capped at 2 m/s and
+2π rad/s; this is not a physics handoff.
 
 ## Validation and recovery
 
-Owner datagrams are accepted only from the current owner and exact authority
-version. Values must be finite and within the 10 km world envelope; velocity is
-bounded before host use. Codecs cap message size and object count, the control
-WebSocket caps payloads, and owner traffic is limited to 120 datagrams per
-second per connection.
+Owner datagrams are accepted only for the sending browser's player at the exact
+authority version. Values must be finite and within the 10 km world envelope.
+Codecs cap message size and object count, the control WebSocket caps payloads,
+and owner traffic is limited to 120 datagrams per second per connection.
 
-On transport loss Bun immediately reclaims every held prop from its last
-accepted state. The disconnected player proxy remains frozen for the ten-second
-session grace. Reconnect assigns the same player a new authority version.
-Grace expiry despawns and persists the player.
+On transport loss Bun removes that player's manipulation claim; no body
+takeover or handoff occurs. The disconnected player proxy remains frozen for
+the ten-second session grace. Reconnect assigns the same player a new authority
+version. Grace expiry despawns and persists the player.
 
-Falling below the world void respawns in the owner worker and sends a reliable
-complete owner commit. Global reset increments `worldEpoch`, revokes leases,
+Falling below the void respawns in the owner worker and sends a reliable
+complete owner commit. Global reset increments `worldEpoch`, revokes claims,
 rebuilds all physics worlds, and reassigns connected players.
 
 ## Host coordination
 
 Spawning, deletion, mechanisms, persistence, session identity, speech identity,
-use validation, and reset are host-coordinated. Reliable `use` requests are
-validated against the latest accepted player position and target reach.
+use validation, manipulation claims, and reset are host-coordinated. Reliable
+`use` requests are validated against the latest accepted player position and
+target reach.
 
-Gurgur trusts the current owner as gameplay truth. Validation prevents malformed,
-stale, unowned, oversized, or grossly out-of-world state; it is not competitive
-anti-cheat.
+Gurgur trusts browser player state as cooperative gameplay truth. Validation
+prevents malformed, stale, unowned, oversized, or grossly out-of-world state;
+it is not a competitive anti-cheat boundary.

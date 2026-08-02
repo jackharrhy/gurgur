@@ -477,7 +477,7 @@ export function createGameSimulation(options: GameSimulationOptions): GameSimula
     if (
       !body ||
       entity?.kind !== "physics-prop" ||
-      entity.interaction !== "manipulate" ||
+      (entity.interaction !== "grab" && entity.interaction !== "manipulate") ||
       entity.body.kind !== "dynamic-brush" ||
       !Object.values(localAnchor).every(Number.isFinite)
     )

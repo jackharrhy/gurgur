@@ -14,26 +14,30 @@ Route work through the canonical document for the subsystem:
 
 Keep these invariants:
 
-- Authority belongs to one peer per network object. A browser owns its player and
-  a prop held under a granted lease; Bun owns every object without a browser
-  owner plus mechanisms, triggers, movers, and diagnostic actors.
+- Authority belongs to one peer per network object. A browser owns its player;
+  Bun owns every shared rigid body plus mechanisms, triggers, movers, and
+  diagnostic actors.
 - Only an object's current authority runs its controller or dynamic simulation.
   Every nonowner represents it as a non-simulating collision proxy.
-- Ownership, lifecycle, persistence, mechanisms, spawning, deletion, and global
-  reset remain coordinated by Bun.
+- Player authority, manipulation claims, lifecycle, persistence, mechanisms,
+  spawning, deletion, and global reset remain coordinated by Bun.
 - Every physics authority advances Box3D at 60 Hz with four substeps. Never step
   physics by render time or a remote peer's clock.
-- There is no movement prediction, input replay, reconciliation, extrapolation,
-  or collision-based authority transfer.
+- There is no gameplay movement prediction, input replay, reconciliation,
+  rigid-body extrapolation, or collision-based authority transfer. After Bun
+  confirms a loose-prop claim, the holder may run an isolated speculative
+  rendered view; it never feeds physics, queries, transport, or persistence.
 - Reliable lifecycle/authority and disposable owner state use separate transport
   semantics. Never put current-state clusters behind an ordered reliable queue.
-- `authorityVersion`, per-object state sequence, `worldEpoch`, `mapRevision`, and
-  persistence version are separate.
+- `authorityVersion`, per-object state sequence, source tick, `worldEpoch`,
+  `mapRevision`, and persistence version are separate.
 - TrenchBroom Valve 220 maps and the TypeScript entity schema are authored truth.
-- Joint-connected bodies are fixed to Bun and cannot receive grab leases.
+- Joint-connected and loose dynamic bodies are fixed to Bun and never transfer
+  authority to a browser.
 - A browser may hold an exclusive manipulation claim on one fixed-authority
-  body. Bun keeps the complete joint graph dynamic and applies the browser's
-  disposable target state through a native control joint; this is not ownership.
+  body. Bun applies the browser's disposable target through a native control
+  joint and keeps every shared contact in one dynamic solver; this is not
+  ownership.
 
 Canonical documents state selected behavior. Put TODOs, sequencing, and
 completion status only in `docs/work.md`. Preserve durable rationale in a

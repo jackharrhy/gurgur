@@ -4,6 +4,7 @@ import {
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
+  type ManipulationStatePacket,
   type NetworkObjectState,
   type CompiledRenderBatch,
   type PhysicsDebugFrame,
@@ -39,6 +40,7 @@ import {
 } from "./camera";
 import { createPresentationLight, VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 import { PresentationBuffer } from "./presentation";
+import { SpeculativeHeldPresenter } from "./speculative-presentation";
 
 type MaterialTextureInfo = {
   url: string;
@@ -439,7 +441,7 @@ export class WorldRenderer {
   readonly #scene = new THREE.Scene();
   readonly #realityScene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
-  readonly #presentation = new PresentationBuffer();
+  readonly #presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
   readonly #meshes = new Map<string, THREE.Object3D>();
   #constraintVisuals: ConstraintVisual[] = [];
   readonly #materials = new Map<string, THREE.Material>();
@@ -461,6 +463,7 @@ export class WorldRenderer {
   #realityLightRoot = new THREE.Group();
   #cameraCollisionRoot = new THREE.Group();
   readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
+  readonly #speculativeHeld = new SpeculativeHeldPresenter();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
   #heldTarget: THREE.Object3D | null = null;
@@ -549,6 +552,7 @@ export class WorldRenderer {
     this.#constraintVisuals = [];
     this.#cameraCollisionBodies.clear();
     this.#presentation.reset([], performance.now());
+    this.#speculativeHeld.reset();
     this.#interactionCandidate = null;
     this.#heldTarget = null;
     this.#outlinedTarget = null;
@@ -602,6 +606,7 @@ export class WorldRenderer {
       if (!origin) continue;
       const group = new THREE.Group();
       group.name = `${entity.kind}.${runtime.entityIndex}`;
+      group.userData.grabbable = entity.interaction === "grab";
       for (const brushIndex of brushIndices) {
         const brush = message.bundle.brushes[brushIndex];
         if (!brush) continue;
@@ -655,6 +660,7 @@ export class WorldRenderer {
       const identity = idKey(id);
       this.#stopSpeech(identity, 0);
       this.#presentation.remove(id);
+      this.#speculativeHeld.remove(id);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         if (this.#heldTarget === mesh) this.#heldTarget = null;
@@ -742,6 +748,10 @@ export class WorldRenderer {
     this.applyNetworkInteractionState(states);
   }
 
+  updateClock(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void {
+    this.#presentation.updateClock(serverTick, receivedAtMs, oneWayDelayMs);
+  }
+
   applyOwnershipState(
     state: NetworkObjectState,
     local: boolean,
@@ -759,9 +769,38 @@ export class WorldRenderer {
 
   applyManipulationState(target: RuntimeId, local: boolean): void {
     const mesh = this.#meshes.get(idKey(target)) ?? null;
-    if (local) this.#heldTarget = mesh;
-    else if (this.#heldTarget === mesh) this.#heldTarget = null;
+    if (local) {
+      this.#heldTarget = mesh;
+      if (mesh?.userData.grabbable)
+        this.#speculativeHeld.begin(
+          target,
+          {
+            position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+            rotation: {
+              x: mesh.quaternion.x,
+              y: mesh.quaternion.y,
+              z: mesh.quaternion.z,
+              w: mesh.quaternion.w,
+            },
+          },
+          performance.now(),
+        );
+    } else if (this.#heldTarget === mesh) {
+      this.#heldTarget = null;
+      this.#speculativeHeld.end(target, performance.now());
+    }
     this.#updateInteractionOutline();
+  }
+
+  applyLocalManipulationTarget(message: ManipulationStatePacket): boolean {
+    return this.#speculativeHeld.target(
+      message.target,
+      {
+        position: message.targetPosition,
+        rotation: message.targetRotation,
+      },
+      performance.now(),
+    );
   }
 
   applyNetworkInteractionState(bodies: readonly BodySnapshot[]): void {
@@ -856,6 +895,13 @@ export class WorldRenderer {
     };
   }
 
+  clientFeelDiagnostics() {
+    return {
+      presentation: this.#presentation.diagnostics(),
+      speculative: this.#speculativeHeld.diagnostics(),
+    };
+  }
+
   speechDiagnostics(): {
     listenerAttached: boolean;
     contextState: AudioContextState | "absent";
@@ -945,7 +991,7 @@ export class WorldRenderer {
       const now = performance.now();
       const bodies = this.#presentation.sample(now);
       if (bodies.length > 0) {
-        this.#apply(bodies);
+        this.#apply(bodies, now);
         const localPresentation = this.#localPlayer
           ? (bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!)) ?? null)
           : null;
@@ -1350,7 +1396,7 @@ export class WorldRenderer {
     return texture;
   }
 
-  #apply(bodies: BodySnapshot[]): void {
+  #apply(bodies: BodySnapshot[], nowMs: number): void {
     for (const body of bodies) {
       const mesh = this.#meshes.get(idKey(body.id));
       const cameraCollision = this.#cameraCollisionBodies.get(idKey(body.id));
@@ -1364,20 +1410,26 @@ export class WorldRenderer {
         );
       }
       if (!mesh) continue;
-      mesh.position.set(body.position.x, body.position.y, body.position.z);
+      const presented = this.#speculativeHeld.present(body, nowMs);
+      mesh.position.set(presented.position.x, presented.position.y, presented.position.z);
       if (!mesh.userData.billboard)
-        mesh.quaternion.set(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
+        mesh.quaternion.set(
+          presented.rotation.x,
+          presented.rotation.y,
+          presented.rotation.z,
+          presented.rotation.w,
+        );
       const texture = mesh.userData.ownedTexture;
       if (mesh.userData.playerBillboard && texture instanceof THREE.Texture) {
-        const yaw = 2 * Math.atan2(body.rotation.y, body.rotation.w);
+        const yaw = 2 * Math.atan2(presented.rotation.y, presented.rotation.w);
         const direction = playerBillboardView(
           yaw,
           this.#camera.position.x,
           this.#camera.position.y,
           this.#camera.position.z,
-          body.position.x,
-          body.position.y,
-          body.position.z,
+          presented.position.x,
+          presented.position.y,
+          presented.position.z,
           playerBillboardLayout.views,
         );
         if (mesh.userData.playerDirection !== direction) {
@@ -1386,7 +1438,7 @@ export class WorldRenderer {
           mesh.userData.playerDirection = direction;
         }
       }
-      this.#onBodyPresentation(body);
+      this.#onBodyPresentation(presented);
     }
     this.#updateInteractionOutline();
   }

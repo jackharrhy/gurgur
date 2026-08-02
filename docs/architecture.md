@@ -8,10 +8,11 @@ persists accepted state through `bun:sqlite`.
 
 Each browser runs two execution domains:
 
-- the main thread samples input, manages the session, buffers presentation, and
-  renders with Three.js/WebGPU;
-- a dedicated module worker loads the same Box3D adapter as Bun and simulates
-  objects owned by that browser.
+- the main thread samples input, manages the session, buffers role-specific
+  presentation, and renders with Three.js/WebGPU;
+- a dedicated module worker loads the same Box3D adapter as Bun, simulates the
+  browser's geometric player controller, and advances source-timed collision
+  proxies.
 
 Bun uses `werift@0.23.0`; browsers use the platform WebRTC implementation.
 `box3d.js@0.0.2` is loaded as separate Wasm in Bun and in the physics worker.
@@ -40,8 +41,8 @@ content/
 
 DOM and Three.js stay out of packages. SQLite, filesystem, administration, and
 server sockets stay in the server app. The engine never knows mapper classnames.
-Player and prop controllers live in `packages/game` so the browser authority and
-Bun's MCP/host authorities use the same fixed-step policy.
+Player and target controllers live in `packages/game`; only Bun receives the
+capability that turns a browser target into force on a shared body.
 
 ## State ownership
 
@@ -49,42 +50,47 @@ Bun's MCP/host authorities use the same fixed-step policy.
 | ------------------------------------------- | --------------------- | --------------------------- |
 | Authored geometry/defaults                  | compiled world bundle | one `mapRevision`           |
 | Browser network player                      | that browser          | connected player assignment |
-| Held prop                                   | lease-holding browser | one grab lease              |
-| Unheld prop                                 | Bun host              | until a lease grant         |
+| Every held or unheld shared prop            | Bun host              | one `worldEpoch`            |
 | Mechanism, trigger, mover, diagnostic actor | Bun host              | one `worldEpoch`            |
 | Joint graph                                 | Bun host              | one `worldEpoch`            |
-| Contraption manipulation claim              | Bun coordinator       | one press/claim             |
+| Prop manipulation claim                     | Bun coordinator       | one press/claim             |
 | Ownership/lifecycle registry                | Bun coordinator       | one `worldEpoch`            |
 | Nonowned collision proxy                    | each nonowner         | disposable                  |
 | Buffered presentation                       | each browser          | disposable                  |
+| Confirmed loose-prop speculative view       | claiming browser      | one confirmed claim         |
 | Latest accepted durable state               | Bun/SQLite            | process restarts            |
 
 Only the current authority simulates an object dynamically. Other peers keep a
-kinematic or motion-disabled proxy for collision and queries and render from a
-separate interpolation buffer.
+kinematic or motion-disabled proxy for collision and queries. Collision proxies
+and rendering sample the replicated source-tick timeline independently. The
+claiming browser may present a speculative loose-prop transform after a reliable
+grant, but that transform is not a physics body, query input, network state, or
+persisted state.
 
 Generic body/query/control access and host mechanism construction are separate
 game capabilities. Only Bun receives the capability that creates native joints
 or mutates a mechanism's surface velocity. Browser workers evaluate immutable
-conveyors and gravity fields for their owned player or held prop, but never
-construct a joint graph.
-For direct contraption manipulation, the worker owns only target smoothing and
-publishing. Bun creates a private kinematic control body and native motor joint,
-keeps the complete graph dynamic in one Box3D world, and destroys that temporary
-constraint on release, timeout, disconnect, respawn, or reset.
+conveyors and gravity fields for their player, but never construct a joint graph
+or dynamically simulate a shared body. For every prop manipulation, the worker
+owns only target smoothing and 60 Hz publishing. Bun creates a private kinematic
+control body and native motor joint, keeps every shared contact dynamic in one
+Box3D world, and destroys that temporary constraint on release, timeout,
+disconnect, respawn, or reset. Bun prioritizes a currently manipulated body's
+disposable result at 60 Hz; ordinary state remains 30 Hz.
 
 ## Identity and versioning
 
-| Concept                 | Meaning                                       |
-| ----------------------- | --------------------------------------------- |
-| `authoredId`            | stable persistence key for a map entity       |
-| `{ index, generation }` | runtime identity safe against slot reuse      |
-| `ownerPlayerId`         | nullable current browser owner                |
-| `authorityVersion`      | monotonic ownership-assignment generation     |
-| `stateSequence`         | uint16 per-object disposable-state sequence   |
-| `mapRevision`           | SHA-256 compiled bundle identity              |
-| `worldEpoch`            | global reset/reload generation                |
-| `protocolVersion`       | exact wire compatibility version; currently 5 |
+| Concept                 | Meaning                                        |
+| ----------------------- | ---------------------------------------------- |
+| `authoredId`            | stable persistence key for a map entity        |
+| `{ index, generation }` | runtime identity safe against slot reuse       |
+| `ownerPlayerId`         | nullable current browser owner                 |
+| `authorityVersion`      | monotonic ownership-assignment generation      |
+| `stateSequence`         | uint16 per-object disposable-state sequence    |
+| `sourceTick`            | uint32 sample tick on the mapped host timeline |
+| `mapRevision`           | SHA-256 compiled bundle identity               |
+| `worldEpoch`            | global reset/reload generation                 |
+| `protocolVersion`       | exact wire compatibility version; currently 6  |
 
 These values are independent. Runtime IDs, Box3D handles, and Wasm pointers are
 never persistence keys.
@@ -92,10 +98,9 @@ never persistence keys.
 ## Persistence
 
 SQLite stores typed application state using WAL mode, prepared statements, and
-tick-boundary transactions. Bun persists its own Box3D state and the latest state
-it accepted from browser owners. A normal release supplies a reliable final prop
-state; transport loss causes immediate host takeover from the last accepted
-state.
+tick-boundary transactions. Bun persists its Box3D state plus accepted
+browser-player state. A prop release has no persistence or takeover transaction
+because the prop never leaves Bun's solver.
 
 A save writes world metadata, bodies, players, and strictly validated gameplay
 state atomically. Startup restores only a matching `mapRevision`. Ownership is
@@ -103,7 +108,7 @@ not durable across process startup: restored props begin host-owned.
 
 ## Reset transaction
 
-Global reset increments `worldEpoch`, revokes every lease, recreates Bun's Box3D
+Global reset increments `worldEpoch`, revokes every claim, recreates Bun's Box3D
 world, rebuilds every connected browser worker, respawns and reassigns connected
 players with new authority versions, persists the authored baseline, and sends a
 reliable world bootstrap. Old-epoch control and state are rejected.

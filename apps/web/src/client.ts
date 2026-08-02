@@ -3,6 +3,7 @@ import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createOwnershipClient } from "./ownership-client";
 import { WorldAudio } from "./audio";
+import { PROTOCOL_VERSION } from "@gurgur/engine";
 import type {
   InputCommand,
   NetworkObjectState,
@@ -134,7 +135,7 @@ const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
 });
 let localPlayerId: RuntimeId | null = null;
 let currentWorld: WorldMessage | null = null;
-let lastOwnershipDrop: NetworkObjectState | null = null;
+let workerDiscardedCatchUpSeconds = 0;
 
 const diagnosticBodies = new Map<
   string,
@@ -178,6 +179,7 @@ if (testEnabled) {
           ...structuredClone(body),
         })),
       camera: () => renderer.cameraDiagnostics(),
+      clientFeel: () => renderer.clientFeelDiagnostics(),
       speech: () => renderer.speechDiagnostics(),
       presentation: () =>
         [...presentedStates.entries()].map(([runtimeId, state]) => ({
@@ -194,7 +196,10 @@ if (testEnabled) {
           runtimeId,
           ...structuredClone(value),
         })),
-      lastOwnershipDrop: () => (lastOwnershipDrop ? structuredClone(lastOwnershipDrop) : null),
+      physics: () => ({
+        discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
+      }),
+      stallPhysicsWorker: (durationMs: number) => owner.stallForTest(durationMs),
     }),
   });
 }
@@ -299,7 +304,9 @@ const updateObservedStates = (states: readonly NetworkObjectState[]): void => {
   }
 };
 const owner = createOwnershipClient({
-  localStates(states, producedAtMs) {
+  localStates(states, producedAtMs, discardedCatchUpSeconds) {
+    workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
+    document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
     document.body.dataset.ownerStateAt = String(performance.now());
     renderer.applyLocalStates(states, producedAtMs);
     updateObservedStates(states);
@@ -307,17 +314,11 @@ const owner = createOwnershipClient({
   ownerStates(states) {
     session.sendOwnerStates(states);
   },
-  ownershipRequest(message) {
-    session.requestOwnership(message);
-  },
-  ownershipDrop(message) {
-    lastOwnershipDrop = structuredClone(message.state);
-    session.dropOwnership(message);
-  },
   manipulationRequest(message) {
     session.requestManipulation(message);
   },
   manipulationState(message) {
+    const speculative = renderer.applyLocalManipulationTarget(message);
     const sent = session.sendManipulationState(message);
     if (testEnabled) {
       document.body.dataset.manipulationStateAt = String(performance.now());
@@ -326,6 +327,7 @@ const owner = createOwnershipClient({
       );
       document.body.dataset.manipulationStateSent = String(sent);
       document.body.dataset.manipulationState = JSON.stringify(message);
+      document.body.dataset.speculativeManipulation = String(speculative);
     }
   },
   manipulationDrop(message) {
@@ -346,7 +348,7 @@ const sendUseOnEdge = (command: InputCommand): void => {
   if (!command.interactTarget) return;
   const message: UseRequestMessage = {
     type: "use-request",
-    protocolVersion: 5,
+    protocolVersion: PROTOCOL_VERSION,
     worldEpoch: command.worldEpoch,
     requestId: nextUseRequestId++,
     target: { ...command.interactTarget },
@@ -370,6 +372,7 @@ const input = createPlayerInput(
     sendUseOnEdge(command);
   },
   (yaw, pitch) => {
+    if (testEnabled) document.body.dataset.lookAt = String(performance.now());
     if (!followCamera) renderer.setViewAngles(yaw, pitch);
   },
   () => {
@@ -404,7 +407,6 @@ session = new GameSession(
       renderer.setWorld(message);
       worldAudio.setWorld(message.bundle);
       currentWorld = message;
-      lastOwnershipDrop = null;
       loadedWorldEpoch = message.worldEpoch;
       ownerPhysicsReady = false;
       ownerWorldGeneration += 1;
@@ -461,7 +463,7 @@ session = new GameSession(
         states.filter((state) => !isLocallyOwned(state.id)),
         receivedAtMs,
       );
-      owner.pushNetworkStates(states);
+      owner.pushNetworkStates(states, receivedAtMs);
       updateObservedStates(states);
       document.body.dataset.worldEpoch = String(loadedWorldEpoch ?? "");
     },
@@ -483,9 +485,6 @@ session = new GameSession(
       owner.ownershipChanged(message);
       updateObservedStates([message.state]);
     },
-    ownershipDenied(message) {
-      owner.ownershipDenied(message);
-    },
     manipulation(message) {
       const local =
         localPlayerId !== null &&
@@ -501,8 +500,10 @@ session = new GameSession(
     manipulationDenied(message) {
       owner.manipulationDenied(message);
     },
-    clock(serverTick) {
+    clock(serverTick, receivedAtMs, oneWayDelayMs) {
       document.body.dataset.serverTick = String(serverTick);
+      renderer.updateClock(serverTick, receivedAtMs, oneWayDelayMs);
+      owner.updateClock(serverTick, receivedAtMs, oneWayDelayMs);
     },
     network(rttMs, jitterMs) {
       document.body.dataset.rttMs = rttMs.toFixed(1);
@@ -524,6 +525,9 @@ session = new GameSession(
   },
   {
     simulatedLatencyMs: Number(searchParams.get("simulatedLatencyMs") ?? 0),
+    simulatedJitterMs: Number(searchParams.get("simulatedJitterMs") ?? 0),
+    simulatedLossRate: Number(searchParams.get("simulatedLossRate") ?? 0),
+    simulatedSeed: Number(searchParams.get("simulatedSeed") ?? 0x67757267),
   },
 );
 const speechForm = document.querySelector<HTMLFormElement>("#speech-chat");

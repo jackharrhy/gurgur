@@ -18,5 +18,11 @@ Accepted technology choices and compact evidence summaries live in
 [`decisions/`](decisions/). Superseded plans and one-off experiments are removed
 once their durable conclusions have been recorded.
 
+Background research lives in the
+[networked-physics deep dive](networked-physics-deep-dive.md). Its focused
+[client-feel follow-up](networked-physics-client-feel.md) compares the remaining
+owner-facing latency gap with s&box, Source, and Gaffer's models without changing
+the selected canonical contract.
+
 When evidence changes a decision, update its decision record and the canonical
 document in the same change. A task is not architecture.

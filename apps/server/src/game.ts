@@ -18,8 +18,11 @@ import {
   NETWORK_FLAG_AWAKE,
   NETWORK_FLAG_HELD,
   STATE_PUBLISH_INTERVAL_TICKS,
+  SourceTickMapper,
+  accumulateFixedStepTime,
   cloneNetworkState,
   isNewerSequence16,
+  unwrapTick32,
   type InputCommand,
   type ManipulationChangedMessage,
   type ManipulationDropMessage,
@@ -28,8 +31,6 @@ import {
   type NetworkBodyState,
   type NetworkObjectState,
   type OwnershipChangedPacket,
-  type OwnershipDropPacket,
-  type OwnershipRequestMessage,
   type PhysicsDebugFrame,
   type Quat,
   type RuntimeId,
@@ -89,6 +90,7 @@ export class WorldHost {
   #saveRequested = false;
   readonly #tickDurationsMs: number[] = [];
   #discardedOverloadSeconds = 0;
+  #maxStateAgeMs = 0;
   #worldEpoch: number;
   #serverTick: number;
   #accumulator = 0;
@@ -101,6 +103,7 @@ export class WorldHost {
   #devBodySequence = 0;
   readonly #lastPublishedBodies = new Map<string, NetworkBodyState>();
   readonly #manipulationVersions = new Map<string, number>();
+  readonly #ownerSourceTicks = new Map<string, SourceTickMapper>();
 
   private constructor(
     physics: PhysicsWorld,
@@ -190,6 +193,7 @@ export class WorldHost {
     tickP99Ms: number;
     tickMaxMs: number;
     discardedOverloadSeconds: number;
+    maxStateAgeMs: number;
   } {
     const sorted = [...this.#tickDurationsMs].toSorted((a, b) => a - b);
     const percentile = (amount: number): number =>
@@ -199,6 +203,7 @@ export class WorldHost {
       tickP99Ms: percentile(0.99),
       tickMaxMs: sorted.at(-1) ?? 0,
       discardedOverloadSeconds: this.#discardedOverloadSeconds,
+      maxStateAgeMs: this.#maxStateAgeMs,
     };
   }
 
@@ -213,6 +218,9 @@ export class WorldHost {
   }
 
   disconnectPlayer(id: RuntimeId): boolean {
+    const prefix = `${key(id)}:`;
+    for (const mapperKey of this.#ownerSourceTicks.keys())
+      if (mapperKey.startsWith(prefix)) this.#ownerSourceTicks.delete(mapperKey);
     return this.#simulation.players.disconnect(id);
   }
 
@@ -227,28 +235,58 @@ export class WorldHost {
     ];
   }
 
+  networkHotStates(advanceHostSequences = false): NetworkObjectState[] {
+    return this.#runtimeBodies
+      .filter((body) => this.#simulation.manipulationOwner(body.id) !== null)
+      .map((body) => this.#networkBodyState(body, advanceHostSequences));
+  }
+
   bootstrapStates(): NetworkObjectState[] {
     return this.networkStates(false).map(cloneNetworkState);
   }
 
-  acceptOwnedStates(owner: RuntimeId, states: readonly NetworkObjectState[]): boolean {
-    if (states.length === 0 || states.length > 4) return false;
-    if (states.some((state) => !this.#canAcceptOwnedState(owner, state))) return false;
-    for (const state of states) {
-      if (state.kind === "player") {
-        if (!this.#simulation.players.applyOwnedState(owner, state)) return false;
-        continue;
-      }
-      const body = this.#body(state.id)!;
-      body.stateSequence = state.stateSequence;
-      this.#physics.setBodyTransform(body.handle, state.position, state.rotation);
-      this.#physics.setBodyVelocity(
-        body.handle,
-        boundedVelocity(state.linearVelocity),
-        boundedVelocity(state.angularVelocity),
+  acceptOwnedStates(
+    owner: RuntimeId,
+    states: readonly NetworkObjectState[],
+    discontinuity = false,
+  ): NetworkObjectState[] | null {
+    if (
+      states.length !== 1 ||
+      states.some((state) => !this.#canAcceptOwnedState(owner, state, discontinuity))
+    )
+      return null;
+    let mapped: NetworkObjectState[];
+    try {
+      mapped = states.map((state) => {
+        const mapperKey = `${key(owner)}:${key(state.id)}:${state.authorityVersion}`;
+        let mapper = this.#ownerSourceTicks.get(mapperKey);
+        if (!mapper) {
+          mapper = new SourceTickMapper();
+          this.#ownerSourceTicks.set(mapperKey, mapper);
+        }
+        return {
+          ...cloneNetworkState(state),
+          sourceTick: mapper.map(state.sourceTick, this.#serverTick),
+        } as NetworkObjectState;
+      });
+    } catch {
+      return null;
+    }
+    for (const state of mapped) {
+      if (
+        state.kind !== "player" ||
+        !this.#simulation.players.applyOwnedState(owner, state, discontinuity)
+      )
+        return null;
+    }
+    for (const state of mapped) {
+      const sourceTick = unwrapTick32(state.sourceTick, this.#serverTick);
+      this.#maxStateAgeMs = Math.max(
+        this.#maxStateAgeMs,
+        (Math.max(0, this.#serverTick - sourceTick) / PHYSICS_HZ) * 1_000,
       );
     }
-    return true;
+    return mapped;
   }
 
   requestManipulation(
@@ -263,7 +301,7 @@ export class WorldHost {
     if (
       body.transferPolicy !== "fixed" ||
       entity?.kind !== "physics-prop" ||
-      entity.interaction !== "manipulate" ||
+      (entity.interaction !== "grab" && entity.interaction !== "manipulate") ||
       !Number.isFinite(request.holdDistance) ||
       request.holdDistance < 0.25 ||
       request.holdDistance > 10
@@ -308,98 +346,6 @@ export class WorldHost {
     return claims.flatMap((claim) => {
       const body = this.#body(claim.target);
       return body ? [this.#manipulationChanged(body, null, claim.claimVersion, null)] : [];
-    });
-  }
-
-  requestOwnership(
-    owner: RuntimeId,
-    request: OwnershipRequestMessage,
-  ): OwnershipChangedPacket | "stale" | "unavailable" | "out-of-range" {
-    if (request.worldEpoch !== this.#worldEpoch) return "stale";
-    if (
-      !Number.isFinite(request.holdDistance) ||
-      request.holdDistance < 0.25 ||
-      request.holdDistance > 10 ||
-      ![
-        request.relativeRotation.x,
-        request.relativeRotation.y,
-        request.relativeRotation.z,
-        request.relativeRotation.w,
-      ].every(Number.isFinite)
-    )
-      return "unavailable";
-    const body = this.#body(request.target);
-    if (!body || body.transferPolicy !== "grab-lease") return "unavailable";
-    if (body.authorityVersion !== request.authorityVersion || body.ownerPlayerId !== null)
-      return "stale";
-    const playerPosition = this.playerPosition(owner);
-    const bodyPosition = this.#physics.state(body.handle).position;
-    if (!playerPosition || distance(playerPosition, bodyPosition) > 4.25) return "out-of-range";
-    body.ownerPlayerId = { ...owner };
-    body.authorityVersion = nextVersion(body.authorityVersion);
-    body.stateSequence = 0;
-    this.#physics.setBodyType(body.handle, "kinematic");
-    this.#physics.setBodyAwake(body.handle, true);
-    const state = this.#networkBodyState(body, false);
-    this.#lastPublishedBodies.set(key(body.id), cloneNetworkState(state) as NetworkBodyState);
-    this.#saveRequested = true;
-    return {
-      worldEpoch: this.#worldEpoch,
-      requestId: request.requestId,
-      id: { ...body.id },
-      ownerPlayerId: { ...owner },
-      authorityVersion: body.authorityVersion,
-      state,
-    };
-  }
-
-  dropOwnership(owner: RuntimeId, packet: OwnershipDropPacket): OwnershipChangedPacket | null {
-    if (packet.worldEpoch !== this.#worldEpoch) return null;
-    const body = this.#body(packet.id);
-    if (
-      !body ||
-      !body.ownerPlayerId ||
-      !sameId(body.ownerPlayerId, owner) ||
-      packet.authorityVersion !== body.authorityVersion ||
-      packet.state.authorityVersion !== body.authorityVersion ||
-      !validOwnedState(packet.state)
-    )
-      return null;
-    this.#physics.setBodyTransform(body.handle, packet.state.position, packet.state.rotation);
-    this.#physics.setBodyVelocity(
-      body.handle,
-      boundedVelocity(packet.state.linearVelocity),
-      boundedVelocity(packet.state.angularVelocity),
-    );
-    body.ownerPlayerId = null;
-    body.authorityVersion = nextVersion(body.authorityVersion);
-    body.stateSequence = 0;
-    this.#physics.setBodyType(body.handle, "dynamic");
-    this.#physics.setBodyAwake(body.handle, true);
-    const state = this.#networkBodyState(body, false);
-    this.#lastPublishedBodies.set(key(body.id), cloneNetworkState(state) as NetworkBodyState);
-    this.#saveRequested = true;
-    return {
-      worldEpoch: this.#worldEpoch,
-      requestId: null,
-      id: { ...body.id },
-      ownerPlayerId: null,
-      authorityVersion: body.authorityVersion,
-      state,
-    };
-  }
-
-  reclaimOwnedBy(owner: RuntimeId): OwnershipChangedPacket[] {
-    return this.#runtimeBodies.flatMap((body) => {
-      if (!body.ownerPlayerId || !sameId(body.ownerPlayerId, owner)) return [];
-      return [
-        this.dropOwnership(owner, {
-          worldEpoch: this.#worldEpoch,
-          id: { ...body.id },
-          authorityVersion: body.authorityVersion,
-          state: this.#networkBodyState(body, false),
-        })!,
-      ];
     });
   }
 
@@ -669,10 +615,9 @@ export class WorldHost {
   }
 
   advance(elapsedSeconds: number): void {
-    const accumulated = this.#accumulator + Math.max(0, elapsedSeconds);
-    const maximum = PHYSICS_DT * MAX_CATCH_UP_TICKS;
-    if (accumulated > maximum) this.#discardedOverloadSeconds += accumulated - maximum;
-    this.#accumulator = Math.min(accumulated, maximum);
+    const accumulated = accumulateFixedStepTime(this.#accumulator, elapsedSeconds);
+    this.#accumulator = accumulated.accumulatorSeconds;
+    this.#discardedOverloadSeconds += accumulated.discardedSeconds;
     let steps = 0;
     while (this.#accumulator >= PHYSICS_DT && steps < MAX_CATCH_UP_TICKS) {
       const tickStartedAt = performance.now();
@@ -690,8 +635,12 @@ export class WorldHost {
       this.#serverTick += 1;
       this.#accumulator -= PHYSICS_DT;
       steps += 1;
-      if (this.#serverTick % STATE_PUBLISH_INTERVAL_TICKS === 0)
+      if (this.#serverTick % STATE_PUBLISH_INTERVAL_TICKS === 0) {
         this.#onState(this.networkStates(true));
+      } else {
+        const hotStates = this.networkHotStates(true);
+        if (hotStates.length > 0) this.#onState(hotStates);
+      }
       if (this.#saveRequested) {
         this.#saveRequested = false;
         this.save();
@@ -774,6 +723,8 @@ export class WorldHost {
     this.#devBodyKeys.clear();
     this.#lastPublishedBodies.clear();
     this.#manipulationVersions.clear();
+    this.#ownerSourceTicks.clear();
+    this.#maxStateAgeMs = 0;
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
@@ -865,7 +816,7 @@ export class WorldHost {
         this.#physics.raycastClosest(origin, displacement, options),
       createPlayerProxy: (position, shape) => this.#physics.createPlayerProxy(position, shape),
       updatePlayerProxy: (id, position, yaw) =>
-        this.#physics.setBodyTransform(id, position, yawRotation(yaw)),
+        this.#physics.setKinematicTargetTransform(id, position, yawRotation(yaw), PHYSICS_DT),
       destroyBody: (id) => {
         this.#physics.destroy(id);
       },
@@ -914,6 +865,7 @@ export class WorldHost {
       id: { ...body.id },
       authorityVersion: body.authorityVersion,
       stateSequence: body.stateSequence,
+      sourceTick: this.#serverTick >>> 0,
       flags:
         (body.ownerPlayerId || this.#simulation.manipulationOwner(body.id)
           ? NETWORK_FLAG_HELD
@@ -952,7 +904,11 @@ export class WorldHost {
     };
   }
 
-  #canAcceptOwnedState(owner: RuntimeId, state: NetworkObjectState): boolean {
+  #canAcceptOwnedState(
+    owner: RuntimeId,
+    state: NetworkObjectState,
+    allowEqualSequence: boolean,
+  ): boolean {
     if (!validOwnedState(state)) return false;
     if (state.kind === "player") {
       const current = this.#simulation.players
@@ -961,7 +917,7 @@ export class WorldHost {
       return (
         sameId(owner, state.id) &&
         current !== undefined &&
-        (state.stateSequence === current.stateSequence ||
+        ((allowEqualSequence && state.stateSequence === current.stateSequence) ||
           isNewerSequence16(state.stateSequence, current.stateSequence)) &&
         this.#simulation.players
           .runtimeRefs()
@@ -973,14 +929,7 @@ export class WorldHost {
           )
       );
     }
-    const body = this.#body(state.id);
-    return Boolean(
-      body?.ownerPlayerId &&
-      sameId(body.ownerPlayerId, owner) &&
-      body.authorityVersion === state.authorityVersion &&
-      (state.stateSequence === body.stateSequence ||
-        isNewerSequence16(state.stateSequence, body.stateSequence)),
-    );
+    return false;
   }
 
   #submitDevPlayerInputs(): void {
@@ -1045,19 +994,6 @@ function sameId(a: RuntimeId, b: RuntimeId): boolean {
 function nextVersion(version: number): number {
   const next = (version + 1) >>> 0;
   return next === 0 ? 1 : next;
-}
-
-function distance(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-function boundedVelocity(value: Vec3): Vec3 {
-  const maximum = 1_000;
-  return {
-    x: Math.max(-maximum, Math.min(maximum, value.x)),
-    y: Math.max(-maximum, Math.min(maximum, value.y)),
-    z: Math.max(-maximum, Math.min(maximum, value.z)),
-  };
 }
 
 function validOwnedState(state: NetworkObjectState): boolean {

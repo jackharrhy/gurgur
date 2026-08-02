@@ -6,7 +6,6 @@ import type {
   OwnedStatePacket,
   OwnerCommitPacket,
   OwnershipChangedPacket,
-  OwnershipDropPacket,
   Quat,
   RuntimeId,
   StateAckPacket,
@@ -20,7 +19,6 @@ export const STATE_CLUSTER_TAG = 17;
 export const STATE_ACK_TAG = 18;
 export const BOOTSTRAP_STATE_TAG = 19;
 export const OWNERSHIP_CHANGED_TAG = 20;
-export const OWNERSHIP_DROP_TAG = 21;
 export const OWNER_COMMIT_TAG = 22;
 export const MANIPULATION_STATE_TAG = 23;
 
@@ -49,6 +47,7 @@ export function fullStateDelta(state: NetworkObjectState): StateDelta {
     id: { ...state.id },
     authorityVersion: state.authorityVersion,
     stateSequence: state.stateSequence,
+    sourceTick: state.sourceTick,
     baselineSequence: null,
     fieldMask: state.kind === "player" ? PLAYER_STATE_FIELDS : BODY_STATE_FIELDS,
     position: { ...state.position },
@@ -89,6 +88,7 @@ export function createStateDelta(
     id: { ...state.id },
     authorityVersion: state.authorityVersion,
     stateSequence: state.stateSequence,
+    sourceTick: state.sourceTick,
     baselineSequence: baseline.stateSequence,
     fieldMask,
   };
@@ -173,6 +173,7 @@ export function applyStateDelta(
     id: { ...delta.id },
     authorityVersion: delta.authorityVersion,
     stateSequence: delta.stateSequence,
+    sourceTick: delta.sourceTick,
     position,
     rotation,
     linearVelocity,
@@ -382,40 +383,6 @@ export function decodeOwnershipChanged(
   return packet;
 }
 
-export function encodeOwnershipDrop(packet: OwnershipDropPacket): ArrayBuffer {
-  if (
-    !sameId(packet.id, packet.state.id) ||
-    packet.authorityVersion !== packet.state.authorityVersion
-  ) {
-    throw new Error("ownership drop state does not match its object");
-  }
-  const writer = new Writer();
-  writer.u8(OWNERSHIP_DROP_TAG);
-  writer.u32(packet.worldEpoch);
-  writeId(writer, packet.id);
-  writer.u32(packet.authorityVersion);
-  writeDelta(writer, fullStateDelta(packet.state));
-  return writer.finish();
-}
-
-export function decodeOwnershipDrop(bytes: ArrayBuffer | ArrayBufferView): OwnershipDropPacket {
-  const reader = new Reader(bytes);
-  reader.tag(OWNERSHIP_DROP_TAG);
-  const worldEpoch = reader.u32();
-  const id = readId(reader);
-  const authorityVersion = reader.u32();
-  const state = applyStateDelta(null, readDelta(reader));
-  reader.done();
-  if (
-    state.kind !== "body" ||
-    !sameId(id, state.id) ||
-    authorityVersion !== state.authorityVersion
-  ) {
-    throw new Error("ownership drop state does not match its object");
-  }
-  return { worldEpoch, id, authorityVersion, state };
-}
-
 export function encodeManipulationState(packet: ManipulationStatePacket): ArrayBuffer {
   if (
     !Number.isSafeInteger(packet.worldEpoch) ||
@@ -533,6 +500,7 @@ function writeDelta(writer: Writer, delta: StateDelta): void {
   writeId(writer, delta.id);
   writer.u32(delta.authorityVersion);
   writer.u16(delta.stateSequence);
+  writer.u32(delta.sourceTick);
   writer.u8(delta.baselineSequence === null ? 0 : 1);
   if (delta.baselineSequence !== null) writer.u16(delta.baselineSequence);
   writer.u8(delta.fieldMask);
@@ -558,6 +526,7 @@ function readDelta(reader: Reader): StateDelta {
   const id = readId(reader);
   const authorityVersion = reader.u32();
   const stateSequence = reader.u16();
+  const sourceTick = reader.u32();
   const hasBaseline = reader.u8();
   if (hasBaseline > 1) throw new Error("invalid state baseline marker");
   const baselineSequence = hasBaseline === 1 ? reader.u16() : null;
@@ -569,6 +538,7 @@ function readDelta(reader: Reader): StateDelta {
     id,
     authorityVersion,
     stateSequence,
+    sourceTick,
     baselineSequence,
     fieldMask,
   };
@@ -602,6 +572,7 @@ function validateDelta(delta: StateDelta): void {
   requireUint(delta.id.generation, 0xffff_ffff, "runtime generation");
   requireUint(delta.authorityVersion, 0xffff_ffff, "authority version");
   requireUint(delta.stateSequence, 0xffff, "state sequence");
+  requireUint(delta.sourceTick, 0xffff_ffff, "source tick");
   if (delta.baselineSequence !== null)
     requireUint(delta.baselineSequence, 0xffff, "state baseline sequence");
   const permitted = delta.kind === "player" ? PLAYER_STATE_FIELDS : BODY_STATE_FIELDS;

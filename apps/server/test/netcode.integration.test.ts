@@ -20,10 +20,8 @@ import {
   encodeManipulationState,
   encodeOwnerCommit,
   encodeOwnedState,
-  encodeOwnershipDrop,
   encodeStateAck,
   type BootstrapStatePacket,
-  type NetworkBodyState,
   type NetworkObjectState,
   type OwnershipChangedPacket,
   type RuntimeId,
@@ -39,7 +37,7 @@ afterEach(async () => {
   for (const dispose of cleanup.splice(0).toReversed()) await dispose();
 });
 
-describe("protocol-v5 real server transport", () => {
+describe("protocol-v6 real server transport", () => {
   test("relays browser-owned state over unordered WebRTC from a reliable bootstrap", async () => {
     const { server } = await launch();
     const first = await connect(server.port);
@@ -78,13 +76,33 @@ describe("protocol-v5 real server transport", () => {
     );
     const relayed = await relayedPromise;
     expect(relayed.position.x).toBeCloseTo(published.position.x, 5);
+    const delayed = {
+      ...published,
+      stateSequence: (published.stateSequence + 1) & 0xffff,
+      sourceTick: (published.sourceTick + 2) >>> 0,
+      position: { ...published.position, x: published.position.x + 0.25 },
+    };
+    const delayedPromise = waitForState(
+      observer,
+      (state) =>
+        state.kind === "player" &&
+        same(state.id, first.welcome.playerId) &&
+        state.stateSequence === delayed.stateSequence,
+    );
+    await Bun.sleep(100);
+    first.owner.send(
+      Buffer.from(encodeOwnedState({ worldEpoch: first.world.worldEpoch, states: [delayed] })),
+    );
+    const mappedDelayed = await delayedPromise;
+    expect((mappedDelayed.sourceTick - relayed.sourceTick) >>> 0).toBe(2);
     expect(observer.acks).toBeGreaterThan(0);
     expect(server.metrics().stateTransportClients).toBe(2);
 
     const committed = {
-      ...published,
-      stateSequence: (published.stateSequence + 1) & 0xffff,
-      position: { ...published.position, y: published.position.y + 0.25 },
+      ...delayed,
+      stateSequence: (delayed.stateSequence + 1) & 0xffff,
+      sourceTick: (delayed.sourceTick + 1) >>> 0,
+      position: { ...delayed.position, y: delayed.position.y + 0.25 },
     };
     const commitPromise = waitForOwnership(
       observer,
@@ -103,7 +121,7 @@ describe("protocol-v5 real server transport", () => {
     expect(commit.state.position.y).toBeCloseTo(committed.position.y, 5);
   });
 
-  test("serializes first-grabber-wins, owner publication, and velocity-preserving drop", async () => {
+  test("keeps a loose grab host-owned across exclusive claim, targets, and release", async () => {
     const path = "content/maps/fixtures/network-push-corridor.map";
     const bundle = compileWorld(await Bun.file(path).text(), path);
     const prop = bundle.entities.find(
@@ -128,67 +146,108 @@ describe("protocol-v5 real server transport", () => {
     const initial = first.receiver.state(target.id);
     if (!initial || initial.kind !== "body") throw new Error("missing prop bootstrap");
 
+    expect(target).toMatchObject({ ownerPlayerId: null, transferPolicy: "fixed" });
+    first.owner.send(
+      Buffer.from(
+        encodeOwnedState({
+          worldEpoch: first.world.worldEpoch,
+          states: [
+            {
+              ...initial,
+              stateSequence: (initial.stateSequence + 1) & 0xffff,
+              position: { x: 9_000, y: 9_000, z: 9_000 },
+            },
+          ],
+        }),
+      ),
+    );
+    await Bun.sleep(100);
+    expect(first.receiver.state(target.id)?.position.x).not.toBeCloseTo(9_000, 1);
+
     const request = {
-      type: "ownership-request" as const,
+      type: "manipulation-request" as const,
       protocolVersion: PROTOCOL_VERSION,
       worldEpoch: first.world.worldEpoch,
       requestId: 10,
       target: target.id,
       authorityVersion: initial.authorityVersion,
+      localAnchor: { x: 0, y: 0, z: 0 },
       holdDistance: 2,
-      relativeRotation: { x: 0, y: 0, z: 0, w: 1 },
     };
-    const grantPromise = waitForOwnership(first, (message) => same(message.id, target.id));
-    const denialPromise = waitForText(second, "ownership-denied");
+    const grantPromise = waitForText(first, "manipulation-changed");
+    const denialPromise = waitForText(second, "manipulation-denied");
     first.socket.send(JSON.stringify(request));
     second.socket.send(JSON.stringify({ ...request, requestId: 11 }));
     const grant = await grantPromise;
-    expect(grant.ownerPlayerId).toEqual(first.welcome.playerId);
-    expect(grant.state.flags & NETWORK_FLAG_HELD).toBe(NETWORK_FLAG_HELD);
+    expect(grant.manipulatorPlayerId).toEqual(first.welcome.playerId);
+    expect(grant.authorityVersion).toBe(initial.authorityVersion);
     const denial = await denialPromise;
-    expect(denial).toMatchObject({ requestId: 11, reason: "stale" });
+    expect(denial).toMatchObject({ requestId: 11, reason: "busy" });
 
-    const finalState: NetworkBodyState = {
-      ...(grant.state as NetworkBodyState),
-      stateSequence: 4,
-      position: { ...grant.state.position, y: grant.state.position.y + 0.5 },
-      linearVelocity: { x: 2.5, y: 0, z: 0 },
-    };
-    const relayedPromise = waitForState(
+    const movedPromise = waitForState(
       second,
       (state) =>
         state.kind === "body" &&
         same(state.id, target.id) &&
-        state.stateSequence === finalState.stateSequence,
+        state.position.y > initial.position.y + 0.05,
     );
-    first.owner.send(
-      Buffer.from(
-        encodeOwnedState({
-          worldEpoch: first.world.worldEpoch,
-          states: [finalState],
-        }),
-      ),
-    );
-    await relayedPromise;
-    const droppedPromise = waitForOwnership(
-      second,
-      (message) =>
-        same(message.id, target.id) &&
-        message.ownerPlayerId === null &&
-        message.authorityVersion > grant.authorityVersion,
-    );
+    const hotSourceTicks: number[] = [];
+    let collectHotStates = true;
+    const collectHotState = (state: NetworkObjectState): void => {
+      if (state.kind === "body" && same(state.id, target.id)) hotSourceTicks.push(state.sourceTick);
+      if (collectHotStates) second.states.push(collectHotState);
+    };
+    second.states.push(collectHotState);
+    const claimVersion = Number(grant.claimVersion);
+    for (let sequence = 1; sequence <= 12; sequence += 1) {
+      first.owner.send(
+        Buffer.from(
+          encodeManipulationState({
+            worldEpoch: first.world.worldEpoch,
+            target: target.id,
+            authorityVersion: initial.authorityVersion,
+            claimVersion,
+            stateSequence: sequence,
+            targetPosition: {
+              x: initial.position.x,
+              y: initial.position.y + 0.8,
+              z: initial.position.z,
+            },
+            targetRotation: initial.rotation,
+          }),
+        ),
+      );
+      await Bun.sleep(16);
+    }
+    const moved = await movedPromise;
+    await Bun.sleep(100);
+    collectHotStates = false;
+    const pendingCollector = second.states.indexOf(collectHotState);
+    if (pendingCollector >= 0) second.states.splice(pendingCollector, 1);
+    expect(hotSourceTicks.length).toBeGreaterThanOrEqual(5);
+    expect(
+      hotSourceTicks
+        .slice(1)
+        .some((sourceTick, index) => sourceTick - (hotSourceTicks[index] as number) === 1),
+    ).toBeTrue();
+    expect(moved.flags & NETWORK_FLAG_HELD).toBe(NETWORK_FLAG_HELD);
+    expect(moved.authorityVersion).toBe(initial.authorityVersion);
+    const droppedPromise = waitForText(second, "manipulation-changed");
     first.socket.send(
-      encodeOwnershipDrop({
+      JSON.stringify({
+        type: "manipulation-drop",
+        protocolVersion: PROTOCOL_VERSION,
         worldEpoch: first.world.worldEpoch,
-        id: target.id,
-        authorityVersion: grant.authorityVersion,
-        state: finalState,
+        target: target.id,
+        authorityVersion: initial.authorityVersion,
+        claimVersion,
       }),
     );
     const dropped = await droppedPromise;
-    expect(dropped.state.linearVelocity.x).toBeCloseTo(2.5, 5);
+    expect(dropped.manipulatorPlayerId).toBeNull();
+    expect(target.ownerPlayerId).toBeNull();
 
-    const resetWorld = waitForWorld(first, grant.worldEpoch + 1);
+    const resetWorld = waitForWorld(first, first.world.worldEpoch + 1);
     const reset = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
       method: "POST",
       headers: { authorization: `Bearer ${adminToken}` },
@@ -327,8 +386,8 @@ async function launch(
     playerSpawn?: NonNullable<Parameters<typeof createGurgurServer>[0]>["playerSpawn"];
   } = {},
 ): Promise<{ server: GurgurServer; directory: string; adminToken: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "gurgur-v5-"));
-  const adminToken = "protocol-v5-test";
+  const directory = await mkdtemp(join(tmpdir(), "gurgur-v6-"));
+  const adminToken = "protocol-v6-test";
   const server = await createGurgurServer({
     port: 0,
     hostname: "127.0.0.1",
@@ -348,7 +407,7 @@ function connect(port: number): Promise<TestClient> {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/game`);
     socket.binaryType = "arraybuffer";
     const peer = new RTCPeerConnection({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-    const owner = peer.createDataChannel("gurgur-owner-v5", {
+    const owner = peer.createDataChannel("gurgur-owner-v6", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -381,7 +440,7 @@ function connect(port: number): Promise<TestClient> {
       texts: textListeners,
       worlds: worldListeners,
     });
-    const timeout = setTimeout(() => reject(new Error("timed out connecting v5 client")), 7_500);
+    const timeout = setTimeout(() => reject(new Error("timed out connecting v6 client")), 7_500);
     const done = (): void => {
       if (!state || !welcome || !world || !bootstrap || !ownerOpen || !stateOpen) return;
       clearTimeout(timeout);
@@ -392,7 +451,7 @@ function connect(port: number): Promise<TestClient> {
       done();
     });
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v5" || state) {
+      if (channel.label !== "gurgur-state-v6" || state) {
         channel.close();
         return;
       }
@@ -476,7 +535,7 @@ function connect(port: number): Promise<TestClient> {
       }
       done();
     });
-    socket.addEventListener("error", () => reject(new Error("v5 websocket failed")));
+    socket.addEventListener("error", () => reject(new Error("v6 websocket failed")));
   });
 }
 

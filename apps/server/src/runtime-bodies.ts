@@ -85,7 +85,7 @@ export function createRuntimeProp(
           ...material,
         });
   physics.setGravityScale(handle, entity.body.gravityScale);
-  return networkBody(handle, entityIndex, authoredId, "grab-lease");
+  return networkBody(handle, entityIndex, authoredId, "fixed");
 }
 
 function createAuthoredBodies(
@@ -166,14 +166,7 @@ function createAuthoredBodies(
       physics.setBodyAwake(handle, saved.awake);
     }
     if (spec.kind === "dynamic-brush") physics.setGravityScale(handle, spec.gravityScale);
-    bodies.push(
-      networkBody(
-        handle,
-        entityIndex,
-        authoredId,
-        spec.kind === "dynamic-brush" && entity.interaction === "grab" ? "grab-lease" : "fixed",
-      ),
-    );
+    bodies.push(networkBody(handle, entityIndex, authoredId, "fixed"));
   }
   return bodies;
 }
@@ -221,7 +214,7 @@ function createStressBodies(
           restitution: templateEntity.body.restitution,
         });
     physics.setGravityScale(handle, templateEntity.body.gravityScale);
-    return networkBody(handle, entityIndex, authoredId, "grab-lease");
+    return networkBody(handle, entityIndex, authoredId, "fixed");
   });
 }
 

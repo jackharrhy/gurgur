@@ -5,11 +5,11 @@ import {
   NETWORK_FLAG_ACTIVE,
   NETWORK_FLAG_HELD,
   PROTOCOL_VERSION,
+  SourceTickMapper,
   type InputCommand,
   type ManipulationRequestMessage,
   type NetworkBodyState,
   type NetworkPlayerState,
-  type OwnershipRequestMessage,
   type RuntimeId,
 } from "@gurgur/engine";
 import { WorldHost } from "../src/game";
@@ -77,16 +77,40 @@ describe("per-object authority host", () => {
         position: { x: initial.position.x + 3, y: initial.position.y, z: initial.position.z },
         yaw: 0.75,
       };
-      expect(game.acceptOwnedStates(player, [published])).toBe(true);
+      expect(game.acceptOwnedStates(player, [published, published])).toBeNull();
+      expect(game.acceptOwnedStates(player, [published])).not.toBeNull();
       expect(game.playerPosition(player)).toEqual(published.position);
-      expect(game.acceptOwnedStates(player, [{ ...published, stateSequence: 0 }])).toBe(false);
+      expect(game.acceptOwnedStates(player, [published])).toBeNull();
+      expect(game.acceptOwnedStates(player, [published], true)).not.toBeNull();
+      expect(game.acceptOwnedStates(player, [{ ...published, stateSequence: 0 }])).toBeNull();
+
+      for (let tick = 0; tick < 10; tick += 1) game.advance(PHYSICS_DT);
+      expect(
+        game.acceptOwnedStates(player, [
+          {
+            ...published,
+            stateSequence: 2,
+            sourceTick: (published.sourceTick + 2) >>> 0,
+          },
+        ]),
+      ).not.toBeNull();
+      expect(game.metrics().maxStateAgeMs).toBeGreaterThan(100);
+      expect(
+        game.acceptOwnedStates(player, [
+          {
+            ...published,
+            stateSequence: 3,
+            sourceTick: published.sourceTick + SourceTickMapper.MAX_FUTURE_LEAD_TICKS + 1_000,
+          },
+        ]),
+      ).toBeNull();
     } finally {
       game.stop();
       store.close();
     }
   });
 
-  test("gives a grab lease to the first valid requester and contact never transfers it", async () => {
+  test("keeps every loose prop Bun-owned and rejects browser-authored body state", async () => {
     const bundle = await fixture("network-push-corridor");
     const store = new WorldStore(":memory:");
     const game = await WorldHost.create(
@@ -96,79 +120,99 @@ describe("per-object authority host", () => {
       { worldBundle: bundle },
     );
     try {
-      const first = game.connectPlayer("first-grabber");
-      const second = game.connectPlayer("second-grabber");
+      const player = game.connectPlayer("body-state-attacker");
       const target = runtimeId(game, "corridor.light");
       const targetState = bodyState(game, target);
-      placePlayer(game, first, targetState.position, 1);
-      placePlayer(game, second, targetState.position, 1);
-
-      const request = ownershipRequest(game, target, targetState.authorityVersion);
-      const granted = game.requestOwnership(first, request);
-      expect(typeof granted).not.toBe("string");
-      if (typeof granted === "string") throw new Error(granted);
-      expect(granted.ownerPlayerId).toEqual(first);
-      expect(granted.authorityVersion).toBe(targetState.authorityVersion + 1);
-      expect(game.requestOwnership(second, { ...request, requestId: 2 })).toBe("stale");
-
-      const heldPosition = { ...granted.state.position };
+      expect(descriptorFor(game, target).transferPolicy).toBe("fixed");
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
+      expect(
+        game.acceptOwnedStates(player, [
+          {
+            ...targetState,
+            stateSequence: targetState.stateSequence + 1,
+            position: { x: 9_000, y: 9_000, z: 9_000 },
+          },
+        ]),
+      ).toBeNull();
       for (let tick = 0; tick < 120; tick += 1) game.advance(PHYSICS_DT);
-      const descriptor = descriptorFor(game, target);
-      expect(descriptor.ownerPlayerId).toEqual(first);
-      expect(bodyState(game, target).position).toEqual(heldPosition);
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
+      expect(descriptorFor(game, target).authorityVersion).toBe(targetState.authorityVersion);
+      expect(bodyState(game, target).position.x).not.toBe(9_000);
     } finally {
       game.stop();
       store.close();
     }
   });
 
-  test("rejects stale-owner state and preserves release velocity through host takeover", async () => {
+  test("drives a loose grab through one host control claim without authority transfer", async () => {
     const bundle = await fixture("network-push-corridor");
     const store = new WorldStore(":memory:");
+    const published: NetworkBodyState[][] = [];
     const game = await WorldHost.create(
       store,
-      () => {},
+      (states) =>
+        published.push(states.filter((state): state is NetworkBodyState => state.kind === "body")),
       () => {},
       { worldBundle: bundle },
     );
     try {
-      const player = game.connectPlayer("release-player");
+      const player = game.connectPlayer("host-grabber");
+      const competitor = game.connectPlayer("competing-grabber");
       const target = runtimeId(game, "corridor.light");
       const initial = bodyState(game, target);
       placePlayer(game, player, initial.position, 1);
-      const grant = game.requestOwnership(
-        player,
-        ownershipRequest(game, target, initial.authorityVersion),
+      placePlayer(game, competitor, initial.position, 1);
+      const request = manipulationRequest(game, target, initial.authorityVersion, 7);
+      const granted = game.requestManipulation(player, request);
+      if (typeof granted === "string") throw new Error(granted);
+      expect(game.requestManipulation(competitor, { ...request, requestId: 8 })).toBe("busy");
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
+      expect(descriptorFor(game, target).authorityVersion).toBe(initial.authorityVersion);
+      expect(
+        game.acceptManipulationState(player, {
+          worldEpoch: game.worldEpoch,
+          target,
+          authorityVersion: initial.authorityVersion,
+          claimVersion: granted.claimVersion,
+          stateSequence: 1,
+          targetPosition: {
+            x: initial.position.x,
+            y: initial.position.y + 1,
+            z: initial.position.z,
+          },
+          targetRotation: initial.rotation,
+        }),
+      ).toBe(true);
+      for (let tick = 0; tick < 4; tick += 1) game.advance(PHYSICS_DT);
+      const hotTicks = published.flatMap((states) =>
+        states.filter((state) => key(state.id) === key(target)).map((state) => state.sourceTick),
       );
-      if (typeof grant === "string") throw new Error(grant);
-      if (grant.state.kind !== "body") throw new Error("prop grant returned player state");
-      const owned: NetworkBodyState = {
-        ...grant.state,
-        stateSequence: 7,
-        position: { x: initial.position.x, y: initial.position.y + 1, z: initial.position.z },
-        linearVelocity: { x: 3, y: 0, z: 0 },
-      };
-      expect(game.acceptOwnedStates(player, [owned])).toBe(true);
-      const changed = game.dropOwnership(player, {
+      expect(hotTicks).toHaveLength(4);
+      expect(new Set(hotTicks).size).toBe(4);
+      for (let tick = 0; tick < 30; tick += 1) game.advance(PHYSICS_DT);
+      const controlled = bodyState(game, target);
+      expect(controlled.position.y).toBeGreaterThan(initial.position.y);
+      const changed = game.dropManipulation(player, {
+        type: "manipulation-drop",
+        protocolVersion: PROTOCOL_VERSION,
         worldEpoch: game.worldEpoch,
-        id: target,
-        authorityVersion: grant.authorityVersion,
-        state: owned,
+        target,
+        authorityVersion: granted.authorityVersion,
+        claimVersion: granted.claimVersion,
       });
       expect(changed).not.toBeNull();
-      expect(changed!.ownerPlayerId).toBeNull();
-      expect(changed!.state.linearVelocity.x).toBeCloseTo(3, 5);
-      expect(game.acceptOwnedStates(player, [{ ...owned, stateSequence: 8 }])).toBe(false);
-      const releasedX = changed!.state.position.x;
+      expect(changed!.manipulatorPlayerId).toBeNull();
+      const releasedY = controlled.position.y;
       game.advance(PHYSICS_DT);
-      expect(bodyState(game, target).position.x).toBeGreaterThan(releasedX);
+      expect(bodyState(game, target).position.y).not.toBe(releasedY);
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
     } finally {
       game.stop();
       store.close();
     }
   });
 
-  test("reclaims a held prop on disconnect and permits a new first-wins lease", async () => {
+  test("ends a loose-prop claim on disconnect and permits a new first-wins claim", async () => {
     const bundle = await fixture("network-push-corridor");
     const store = new WorldStore(":memory:");
     const game = await WorldHost.create(
@@ -184,22 +228,23 @@ describe("per-object authority host", () => {
       const initial = bodyState(game, target);
       placePlayer(game, disconnected, initial.position, 1);
       placePlayer(game, successor, initial.position, 1);
-      const grant = game.requestOwnership(
+      const grant = game.requestManipulation(
         disconnected,
-        ownershipRequest(game, target, initial.authorityVersion),
+        manipulationRequest(game, target, initial.authorityVersion, 10),
       );
       if (typeof grant === "string") throw new Error(grant);
 
-      const reclaimed = game.reclaimOwnedBy(disconnected);
+      const reclaimed = game.endManipulationsForPlayer(disconnected);
       expect(reclaimed).toHaveLength(1);
-      expect(reclaimed[0]!.ownerPlayerId).toBeNull();
-      const takeover = game.requestOwnership(
+      expect(reclaimed[0]!.manipulatorPlayerId).toBeNull();
+      const takeover = game.requestManipulation(
         successor,
-        ownershipRequest(game, target, reclaimed[0]!.authorityVersion),
+        manipulationRequest(game, target, initial.authorityVersion, 11),
       );
       expect(typeof takeover).not.toBe("string");
       if (typeof takeover === "string") throw new Error(takeover);
-      expect(takeover.ownerPlayerId).toEqual(successor);
+      expect(takeover.manipulatorPlayerId).toEqual(successor);
+      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
     } finally {
       game.stop();
       store.close();
@@ -223,7 +268,7 @@ describe("per-object authority host", () => {
         game.acceptOwnedStates(player, [
           { ...initial, stateSequence: 1, authorityVersion: initial.authorityVersion },
         ]),
-      ).toBe(false);
+      ).toBeNull();
 
       const oldEpoch = game.worldEpoch;
       game.reset();
@@ -252,13 +297,11 @@ describe("per-object authority host", () => {
         (entity) => entity.kind === "world-entity",
       );
       for (const descriptor of bodyDescriptors) {
-        const entity = bundle.entities[descriptor.entityIndex]!;
-        if (entity.kind === "physics-prop" && entity.interaction === "grab") continue;
         expect(descriptor.transferPolicy).toBe("fixed");
       }
       expect(
         descriptorFor(game, runtimeId(game, "fixture.trebuchet.projectile")).transferPolicy,
-      ).toBe("grab-lease");
+      ).toBe("fixed");
       const conveyor = runtimeId(game, "fixture.conveyor");
       expect(bodyState(game, conveyor).flags & NETWORK_FLAG_ACTIVE).toBe(NETWORK_FLAG_ACTIVE);
       for (let tick = 0; tick < 180; tick += 1) game.advance(PHYSICS_DT);
@@ -415,20 +458,21 @@ describe("per-object authority host", () => {
   });
 });
 
-function ownershipRequest(
+function manipulationRequest(
   game: WorldHost,
   target: RuntimeId,
   authorityVersion: number,
-): OwnershipRequestMessage {
+  requestId: number,
+): ManipulationRequestMessage {
   return {
-    type: "ownership-request",
+    type: "manipulation-request",
     protocolVersion: PROTOCOL_VERSION,
     worldEpoch: game.worldEpoch,
-    requestId: 1,
+    requestId,
     target: { ...target },
     authorityVersion,
     holdDistance: 2,
-    relativeRotation: { x: 0, y: 0, z: 0, w: 1 },
+    localAnchor: { x: 0, y: 0, z: 0 },
   };
 }
 
@@ -466,7 +510,7 @@ function placePlayer(
         position: { ...position },
       },
     ]),
-  ).toBe(true);
+  ).not.toBeNull();
 }
 
 function playerState(game: WorldHost, id: RuntimeId): NetworkPlayerState {

@@ -10,7 +10,6 @@ import {
   STATE_MAX_RETRANSMITS,
   OWNED_STATE_TAG,
   MANIPULATION_STATE_TAG,
-  OWNERSHIP_DROP_TAG,
   OWNER_COMMIT_TAG,
   STATE_ACK_TAG,
   StateReplicationPeer,
@@ -18,7 +17,6 @@ import {
   cloneNetworkState,
   decodeOwnedState,
   decodeManipulationState,
-  decodeOwnershipDrop,
   decodeOwnerCommit,
   decodeStateAck,
   decodeClientControl,
@@ -202,7 +200,6 @@ export async function createGurgurServer(
         (sum, socket) => sum + (socket.data.stateChannel?.bufferedAmount ?? 0),
         0,
       ),
-      maxStateAgeMs: 0,
       stateTransportClients: active.filter(
         (socket) => socket.data.stateChannel?.readyState === "open",
       ).length,
@@ -241,7 +238,7 @@ export async function createGurgurServer(
         `${state.id.index}:${state.id.generation}`,
         cloneNetworkState(state),
       );
-    stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 1_000 / STATE_PUBLISH_HZ);
+    stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 1_000 / PHYSICS_HZ);
   };
 
   const broadcastOwnership = (message: OwnershipChangedPacket): void => {
@@ -337,12 +334,9 @@ export async function createGurgurServer(
         socket.data.ownerStatePacketCount += 1;
         if (socket.data.ownerStatePacketCount > 120) return true;
         const ownerState = decodeOwnedState(packet);
-        if (
-          ownerState.worldEpoch === game.worldEpoch &&
-          socket.data.playerId !== null &&
-          game.acceptOwnedStates(socket.data.playerId, ownerState.states)
-        ) {
-          broadcast(ownerState.states);
+        if (ownerState.worldEpoch === game.worldEpoch && socket.data.playerId !== null) {
+          const accepted = game.acceptOwnedStates(socket.data.playerId, ownerState.states);
+          if (accepted) broadcast(accepted);
         }
         return true;
       }
@@ -395,7 +389,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v5", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v6", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -413,7 +407,7 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-owner-v5" && !socket.data.ownerChannel) {
+      if (channel.label === "gurgur-owner-v6" && !socket.data.ownerChannel) {
         socket.data.ownerChannel = channel;
         channel.stateChanged.subscribe((state) => {
           if (state === "closed" && socket.data.ownerChannel === channel)
@@ -796,24 +790,6 @@ export async function createGurgurServer(
             }
             return;
           }
-          if (control.type === "ownership-request" && socket.data.playerId) {
-            const result = game.requestOwnership(socket.data.playerId, control);
-            if (typeof result === "string") {
-              socket.send(
-                JSON.stringify({
-                  type: "ownership-denied",
-                  protocolVersion: PROTOCOL_VERSION,
-                  worldEpoch: game.worldEpoch,
-                  requestId: control.requestId,
-                  target: control.target,
-                  reason: result,
-                }),
-              );
-            } else {
-              broadcastOwnership(result);
-            }
-            return;
-          }
           if (control.type === "manipulation-request" && socket.data.playerId) {
             const result = game.requestManipulation(socket.data.playerId, control);
             if (typeof result === "string") {
@@ -914,11 +890,12 @@ export async function createGurgurServer(
         try {
           if (binaryPacketTag(message) === OWNER_COMMIT_TAG && socket.data.playerId) {
             const commit = decodeOwnerCommit(message);
-            if (
-              commit.worldEpoch === game.worldEpoch &&
-              game.acceptOwnedStates(socket.data.playerId, commit.states)
-            ) {
-              for (const state of commit.states)
+            const accepted =
+              commit.worldEpoch === game.worldEpoch
+                ? game.acceptOwnedStates(socket.data.playerId, commit.states, true)
+                : null;
+            if (accepted) {
+              for (const state of accepted)
                 broadcastOwnership({
                   worldEpoch: game.worldEpoch,
                   requestId: null,
@@ -929,13 +906,6 @@ export async function createGurgurServer(
                 });
             }
             return;
-          }
-          if (binaryPacketTag(message) === OWNERSHIP_DROP_TAG && socket.data.playerId) {
-            const changed = game.dropOwnership(socket.data.playerId, decodeOwnershipDrop(message));
-            if (changed) {
-              broadcastOwnership(changed);
-              return;
-            }
           }
         } catch {
           // Invalid reliable gameplay packets close the control connection below.
@@ -950,7 +920,6 @@ export async function createGurgurServer(
         if (!session || session.socket !== socket) return;
         session.socket = null;
         if (shuttingDown) return;
-        for (const changed of game.reclaimOwnedBy(session.playerId)) broadcastOwnership(changed);
         for (const changed of game.endManipulationsForPlayer(session.playerId))
           broadcastManipulation(changed);
         session.disconnectTimer = setTimeout(() => {

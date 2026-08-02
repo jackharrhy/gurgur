@@ -359,6 +359,92 @@ describe("PhysicsWorld", () => {
     }
   });
 
+  test("moves a kinematic proxy through fixed-step position and rotation targets", async () => {
+    const world = await PhysicsWorld.create({ gravity: { x: 0, y: 0, z: 0 } });
+    try {
+      const proxy = world.createBox({
+        type: "kinematic",
+        position: { x: 0, y: 0, z: 0 },
+        halfExtents: { x: 0.5, y: 0.2, z: 0.1 },
+      });
+      const rotation = {
+        x: 0,
+        y: Math.sin(Math.PI / 4),
+        z: 0,
+        w: Math.cos(Math.PI / 4),
+      };
+      for (let tick = 0; tick < 4; tick += 1) {
+        world.setKinematicTargetTransform(proxy, { x: 1, y: 0.5, z: -0.25 }, rotation, PHYSICS_DT);
+        world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+      }
+      const state = world.state(proxy);
+      expect(state.position.x).toBeCloseTo(1, 5);
+      expect(state.position.y).toBeCloseTo(0.5, 5);
+      expect(state.position.z).toBeCloseTo(-0.25, 5);
+      expect(Math.abs(state.rotation.y)).toBeCloseTo(Math.SQRT1_2, 5);
+      expect(Math.abs(state.rotation.w)).toBeCloseTo(Math.SQRT1_2, 5);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  test("replays the same fixed-step contact fixture to the same authoritative trace", async () => {
+    const replay = async (): Promise<string[]> => {
+      const world = await PhysicsWorld.create();
+      try {
+        world.createBox({
+          type: "static",
+          position: { x: 0, y: -0.5, z: 0 },
+          halfExtents: { x: 8, y: 0.5, z: 8 },
+        });
+        const driven = world.createBox({
+          type: "dynamic",
+          position: { x: -2, y: 0.5, z: 0 },
+          halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+        });
+        const contacted = world.createBox({
+          type: "dynamic",
+          position: { x: 0, y: 0.5, z: 0 },
+          halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+        });
+        const trace: string[] = [];
+        for (let tick = 0; tick < 180; tick += 1) {
+          world.driveBodyToTarget(driven, {
+            targetPosition: { x: 2, y: 0.5, z: 0 },
+            targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+            linearGain: 10,
+            maxLinearSpeed: 5,
+            maxLinearAcceleration: 30,
+            angularGain: 8,
+            maxAngularSpeed: Math.PI * 2,
+            maxAngularAcceleration: Math.PI * 8,
+            seconds: PHYSICS_DT,
+          });
+          world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
+          const state = world.state(contacted);
+          trace.push(
+            [
+              state.position.x,
+              state.position.y,
+              state.position.z,
+              state.linearVelocity.x,
+              state.linearVelocity.y,
+              state.linearVelocity.z,
+            ]
+              .map((value) => value.toFixed(7))
+              .join(","),
+          );
+        }
+        expect(world.state(contacted).position.x).toBeGreaterThan(0.5);
+        return trace;
+      } finally {
+        world.dispose();
+      }
+    };
+
+    expect(await replay()).toEqual(await replay());
+  });
+
   test("applies a bounded reaction impulse when the controller pushes a dynamic body", async () => {
     const world = await PhysicsWorld.create();
     try {

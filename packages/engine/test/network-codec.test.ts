@@ -14,7 +14,6 @@ import {
   decodeOwnerCommit,
   decodeOwnedState,
   decodeOwnershipChanged,
-  decodeOwnershipDrop,
   decodeStateAck,
   decodeStateCluster,
   encodeBootstrapState,
@@ -22,7 +21,6 @@ import {
   encodeOwnerCommit,
   encodeOwnedState,
   encodeOwnershipChanged,
-  encodeOwnershipDrop,
   encodeStateAck,
   encodeStateCluster,
   fullStateDelta,
@@ -37,6 +35,7 @@ const body = (overrides: Partial<NetworkBodyState> = {}): NetworkBodyState => ({
   id: { index: 7, generation: 2 },
   authorityVersion: 3,
   stateSequence: 4,
+  sourceTick: 400,
   position: { x: 1.25, y: -2.5, z: 3.75 },
   rotation: { x: 0, y: 0.25, z: 0, w: 0.968_245_8 },
   linearVelocity: { x: 4, y: 5, z: 6 },
@@ -50,6 +49,7 @@ const player = (overrides: Partial<NetworkPlayerState> = {}): NetworkPlayerState
   id: { index: 50_000, generation: 1 },
   authorityVersion: 8,
   stateSequence: 12,
+  sourceTick: 1_200,
   position: { x: 10, y: 2, z: -4 },
   rotation: { x: 0, y: 0, z: 0, w: 1 },
   linearVelocity: { x: 1, y: 0, z: -1 },
@@ -64,7 +64,7 @@ const player = (overrides: Partial<NetworkPlayerState> = {}): NetworkPlayerState
   ...overrides,
 });
 
-describe("protocol-v5 network state codecs", () => {
+describe("protocol-v6 network state codecs", () => {
   test("round-trips owner, bootstrap, ack, and reliable ownership packets", () => {
     const states: NetworkObjectState[] = [body(), player()];
     expectStateList(decodeOwnedState(encodeOwnedState({ worldEpoch: 11, states })).states, states);
@@ -99,14 +99,6 @@ describe("protocol-v5 network state codecs", () => {
     expect(decodedChanged.requestId).toBe(91);
     expect(decodedChanged.ownerPlayerId).toEqual(player().id);
     expectState(decodedChanged.state, body());
-
-    const dropped = {
-      worldEpoch: 11,
-      id: body().id,
-      authorityVersion: body().authorityVersion,
-      state: body(),
-    };
-    expectState(decodeOwnershipDrop(encodeOwnershipDrop(dropped)).state, body());
   });
 
   test("round-trips a bounded disposable manipulation target", () => {

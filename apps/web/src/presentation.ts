@@ -1,6 +1,12 @@
 import {
   PHYSICS_DT,
-  PROXY_INTERPOLATION_MS,
+  PHYSICS_HZ,
+  NETWORK_FLAG_AWAKE,
+  NETWORK_FLAG_HELD,
+  PROXY_INTERPOLATION_TICKS,
+  RENDER_INTERPOLATION_MAX_TICKS,
+  RENDER_INTERPOLATION_MIN_TICKS,
+  unwrapTick32,
   type BodySnapshot,
   type NetworkObjectState,
   type RuntimeId,
@@ -8,36 +14,110 @@ import {
 
 type TimedState = {
   receivedAtMs: number;
+  timelineTick: number;
   state: NetworkObjectState;
 };
 
 type Track = {
-  delayMs: number;
+  delayTicks: number;
+  desiredDelayTicks: number;
+  underrunRequiredTicks: number;
+  underrunHoldUntilMs: number;
+  lastAdaptiveSampleMs: number | null;
+  underrunSamples: number;
+  latenessSamples: LatenessSample[];
+  timeline: "host" | "local";
   authorityVersion: number;
   samples: TimedState[];
 };
 
+type ClockAnchor = {
+  serverTick: number;
+  localAtServerTickMs: number;
+};
+
+export type PresentationBufferOptions = {
+  networkDelayPolicy?: "fixed-proxy" | "adaptive-render";
+};
+
+export type PresentationBufferDiagnostics = {
+  networkDelayPolicy: "fixed-proxy" | "adaptive-render";
+  minimumNetworkDelayTicks: number;
+  networkDelayTicks: number;
+  desiredNetworkDelayTicks: number;
+  underrunSamples: number;
+  trackDelayTicks: Record<string, number>;
+};
+
+type LatenessSample = { receivedAtMs: number; ticks: number };
+
+const LATENESS_WINDOW_MS = 10_000;
+const UNDERRUN_HOLD_MS = 2_000;
+const DELAY_BUILD_RATE_TICKS_PER_TICK = 0.9;
+const DELAY_RELEASE_RATE_TICKS_PER_SECOND = 0.5;
+
 export class PresentationBuffer {
   readonly #tracks = new Map<string, Track>();
+  readonly #networkDelayPolicy: "fixed-proxy" | "adaptive-render";
+  #clock: ClockAnchor | null = null;
+
+  constructor(options: PresentationBufferOptions = {}) {
+    this.#networkDelayPolicy = options.networkDelayPolicy ?? "fixed-proxy";
+  }
 
   reset(states: readonly NetworkObjectState[], receivedAtMs: number): void {
     this.#tracks.clear();
+    this.#clock = null;
     this.pushNetwork(states, receivedAtMs);
   }
 
+  updateClock(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void {
+    if (
+      !Number.isSafeInteger(serverTick) ||
+      serverTick < 0 ||
+      !Number.isFinite(receivedAtMs) ||
+      !Number.isFinite(oneWayDelayMs)
+    )
+      return;
+    this.#clock = {
+      serverTick,
+      localAtServerTickMs: receivedAtMs - Math.max(0, oneWayDelayMs),
+    };
+  }
+
   pushNetwork(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    this.#push(states, receivedAtMs, PROXY_INTERPOLATION_MS);
+    this.#push(states, receivedAtMs, "host", PROXY_INTERPOLATION_TICKS);
+    this.#observeNetworkLateness(states, receivedAtMs);
   }
 
   pushLocal(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    this.#push(states, receivedAtMs, PHYSICS_DT * 1_000);
+    this.#push(states, receivedAtMs, "local", PHYSICS_DT * PHYSICS_HZ);
   }
 
   replaceReliable(state: NetworkObjectState, receivedAtMs: number, local: boolean): void {
+    const delayTicks =
+      !local && this.#networkDelayPolicy === "adaptive-render"
+        ? RENDER_INTERPOLATION_MIN_TICKS
+        : local
+          ? PHYSICS_DT * PHYSICS_HZ
+          : PROXY_INTERPOLATION_TICKS;
     this.#tracks.set(idKey(state.id), {
-      delayMs: local ? PHYSICS_DT * 1_000 : PROXY_INTERPOLATION_MS,
+      delayTicks,
+      desiredDelayTicks: delayTicks,
+      underrunRequiredTicks: RENDER_INTERPOLATION_MIN_TICKS,
+      underrunHoldUntilMs: 0,
+      lastAdaptiveSampleMs: receivedAtMs,
+      underrunSamples: 0,
+      latenessSamples: [],
+      timeline: local ? "local" : "host",
       authorityVersion: state.authorityVersion,
-      samples: [{ receivedAtMs, state: cloneState(state) }],
+      samples: [
+        {
+          receivedAtMs,
+          timelineTick: state.sourceTick,
+          state: cloneState(state),
+        },
+      ],
     });
   }
 
@@ -47,51 +127,238 @@ export class PresentationBuffer {
 
   sample(nowMs: number): BodySnapshot[] {
     return [...this.#tracks.values()].flatMap((track) => {
-      const sample = sampleTrack(track, nowMs - track.delayMs);
+      const latest = track.samples.at(-1);
+      if (!latest) return [];
+      this.#adaptNetworkDelay(track, nowMs);
+      const clockTick =
+        track.timeline === "host" && this.#clock
+          ? alignClockTick(
+              this.#clock.serverTick +
+                ((nowMs - this.#clock.localAtServerTickMs) / 1_000) * PHYSICS_HZ,
+              latest.timelineTick,
+            )
+          : latest.timelineTick + (Math.max(0, nowMs - latest.receivedAtMs) / 1_000) * PHYSICS_HZ;
+      const sample = sampleTrack(track, clockTick - track.delayTicks);
       return sample ? [toBodySnapshot(sample)] : [];
     });
   }
 
-  #push(states: readonly NetworkObjectState[], receivedAtMs: number, delayMs: number): void {
+  diagnostics(): PresentationBufferDiagnostics {
+    const delays = [...this.#tracks.values()]
+      .filter((track) => track.timeline === "host")
+      .map((track) => track.delayTicks);
+    const desired = [...this.#tracks.values()]
+      .filter((track) => track.timeline === "host")
+      .map((track) => track.desiredDelayTicks);
+    const fallback =
+      this.#networkDelayPolicy === "adaptive-render"
+        ? RENDER_INTERPOLATION_MIN_TICKS
+        : PROXY_INTERPOLATION_TICKS;
+    return {
+      networkDelayPolicy: this.#networkDelayPolicy,
+      minimumNetworkDelayTicks: delays.length > 0 ? Math.min(...delays) : fallback,
+      networkDelayTicks: delays.length > 0 ? Math.max(...delays) : fallback,
+      desiredNetworkDelayTicks: desired.length > 0 ? Math.max(...desired) : fallback,
+      underrunSamples: [...this.#tracks.values()].reduce(
+        (sum, track) => sum + track.underrunSamples,
+        0,
+      ),
+      trackDelayTicks: Object.fromEntries(
+        [...this.#tracks.entries()].map(([key, track]) => [key, track.delayTicks]),
+      ),
+    };
+  }
+
+  trackDelayTicks(id: RuntimeId): number | null {
+    return this.#tracks.get(idKey(id))?.delayTicks ?? null;
+  }
+
+  #push(
+    states: readonly NetworkObjectState[],
+    receivedAtMs: number,
+    timeline: Track["timeline"],
+    delayTicks: number,
+  ): void {
     for (const state of states) {
       const key = idKey(state.id);
       let track = this.#tracks.get(key);
-      if (!track || track.authorityVersion !== state.authorityVersion) {
+      if (
+        !track ||
+        track.authorityVersion !== state.authorityVersion ||
+        track.timeline !== timeline
+      ) {
+        const initialDelay =
+          timeline === "host" && this.#networkDelayPolicy === "adaptive-render"
+            ? RENDER_INTERPOLATION_MIN_TICKS
+            : delayTicks;
         track = {
-          delayMs,
+          delayTicks: initialDelay,
+          desiredDelayTicks: initialDelay,
+          underrunRequiredTicks: RENDER_INTERPOLATION_MIN_TICKS,
+          underrunHoldUntilMs: 0,
+          lastAdaptiveSampleMs: receivedAtMs,
+          underrunSamples: 0,
+          latenessSamples: [],
+          timeline,
           authorityVersion: state.authorityVersion,
           samples: [],
         };
         this.#tracks.set(key, track);
       }
-      track.delayMs = delayMs;
+      if (timeline === "local" || this.#networkDelayPolicy === "fixed-proxy") {
+        track.delayTicks = delayTicks;
+        track.desiredDelayTicks = delayTicks;
+      }
       const previous = track.samples.at(-1);
-      if (previous && previous.state.stateSequence === state.stateSequence) continue;
-      track.samples.push({ receivedAtMs, state: cloneState(state) });
-      while (track.samples.length > 32) track.samples.shift();
-      const cutoff = receivedAtMs - 2_000;
-      while (track.samples.length > 2 && track.samples[1]!.receivedAtMs < cutoff)
+      if (previous?.state.stateSequence === state.stateSequence) continue;
+      const timelineTick = previous
+        ? unwrapTick32(state.sourceTick, previous.timelineTick)
+        : state.sourceTick;
+      if (previous && timelineTick < previous.timelineTick) continue;
+      const sample = {
+        receivedAtMs,
+        timelineTick,
+        state: cloneState(state),
+      };
+      if (previous && timelineTick === previous.timelineTick)
+        track.samples[track.samples.length - 1] = sample;
+      else track.samples.push(sample);
+      while (track.samples.length > 64) track.samples.shift();
+      const cutoff = timelineTick - PHYSICS_HZ * 2;
+      while (track.samples.length > 2 && track.samples[1]!.timelineTick < cutoff)
         track.samples.shift();
     }
   }
+
+  #observeNetworkLateness(states: readonly NetworkObjectState[], receivedAtMs: number): void {
+    if (this.#networkDelayPolicy !== "adaptive-render" || !this.#clock) return;
+    for (const state of states) {
+      const track = this.#tracks.get(idKey(state.id));
+      const latest = track?.samples.at(-1);
+      if (!track || track.timeline !== "host" || latest?.receivedAtMs !== receivedAtMs) continue;
+      if (!activeNetworkState(state)) continue;
+      track.latenessSamples.push({
+        receivedAtMs,
+        ticks: Math.max(0, this.#clockTick(track, receivedAtMs) - latest.timelineTick),
+      });
+      this.#pruneLateness(track, receivedAtMs);
+      const measured = this.#measuredDelayTicks(track);
+      track.desiredDelayTicks =
+        receivedAtMs < track.underrunHoldUntilMs
+          ? Math.max(measured, track.underrunRequiredTicks)
+          : measured;
+    }
+  }
+
+  #adaptNetworkDelay(track: Track, nowMs: number): void {
+    if (
+      this.#networkDelayPolicy !== "adaptive-render" ||
+      track.timeline !== "host" ||
+      !Number.isFinite(nowMs)
+    )
+      return;
+    const previousAt = track.lastAdaptiveSampleMs ?? nowMs;
+    const elapsedSeconds = Math.max(0, (nowMs - previousAt) / 1_000);
+    track.lastAdaptiveSampleMs = nowMs;
+    this.#pruneLateness(track, nowMs);
+
+    const latest = track.samples.at(-1);
+    const required = latest
+      ? Math.ceil(Math.max(0, this.#clockTick(track, nowMs) - latest.timelineTick + 1))
+      : RENDER_INTERPOLATION_MIN_TICKS;
+    const underrun =
+      latest !== undefined &&
+      nowMs - latest.receivedAtMs <= 250 &&
+      activeNetworkState(latest.state) &&
+      track.delayTicks + 1e-6 < required;
+    if (underrun) {
+      track.underrunSamples += 1;
+      track.underrunRequiredTicks = clamp(
+        required,
+        RENDER_INTERPOLATION_MIN_TICKS,
+        RENDER_INTERPOLATION_MAX_TICKS,
+      );
+      track.underrunHoldUntilMs = nowMs + UNDERRUN_HOLD_MS;
+      track.desiredDelayTicks = Math.max(track.desiredDelayTicks, track.underrunRequiredTicks);
+    } else if (nowMs >= track.underrunHoldUntilMs) {
+      track.desiredDelayTicks = this.#measuredDelayTicks(track);
+    }
+
+    if (track.desiredDelayTicks > track.delayTicks) {
+      track.delayTicks = Math.min(
+        track.desiredDelayTicks,
+        track.delayTicks + elapsedSeconds * PHYSICS_HZ * DELAY_BUILD_RATE_TICKS_PER_TICK,
+      );
+    } else {
+      track.delayTicks = Math.max(
+        track.desiredDelayTicks,
+        track.delayTicks - elapsedSeconds * DELAY_RELEASE_RATE_TICKS_PER_SECOND,
+      );
+    }
+  }
+
+  #measuredDelayTicks(track: Track): number {
+    const sorted = track.latenessSamples.map((sample) => sample.ticks).toSorted((a, b) => a - b);
+    const p95 = sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
+    return clamp(
+      Math.ceil(p95 + 1),
+      RENDER_INTERPOLATION_MIN_TICKS,
+      RENDER_INTERPOLATION_MAX_TICKS,
+    );
+  }
+
+  #clockTick(track: Track, nowMs: number): number {
+    const latest = track.samples.at(-1)!;
+    return this.#clock
+      ? alignClockTick(
+          this.#clock.serverTick + ((nowMs - this.#clock.localAtServerTickMs) / 1_000) * PHYSICS_HZ,
+          latest.timelineTick,
+        )
+      : latest.timelineTick + (Math.max(0, nowMs - latest.receivedAtMs) / 1_000) * PHYSICS_HZ;
+  }
+
+  #pruneLateness(track: Track, nowMs: number): void {
+    const cutoff = nowMs - LATENESS_WINDOW_MS;
+    while (track.latenessSamples.length > 0 && track.latenessSamples[0]!.receivedAtMs < cutoff)
+      track.latenessSamples.shift();
+  }
 }
 
-function sampleTrack(track: Track, targetMs: number): NetworkObjectState | null {
+function activeNetworkState(state: NetworkObjectState): boolean {
+  return (
+    (state.flags & (NETWORK_FLAG_AWAKE | NETWORK_FLAG_HELD)) !== 0 ||
+    Math.hypot(
+      state.linearVelocity.x,
+      state.linearVelocity.y,
+      state.linearVelocity.z,
+      state.angularVelocity.x,
+      state.angularVelocity.y,
+      state.angularVelocity.z,
+    ) > 1e-4
+  );
+}
+
+function sampleTrack(track: Track, targetTick: number): NetworkObjectState | null {
   const samples = track.samples;
   if (samples.length === 0) return null;
-  if (samples.length === 1 || targetMs <= samples[0]!.receivedAtMs)
+  if (samples.length === 1 || targetTick <= samples[0]!.timelineTick)
     return cloneState(samples[0]!.state);
   const latest = samples.at(-1)!;
-  if (targetMs >= latest.receivedAtMs) return cloneState(latest.state);
+  if (targetTick >= latest.timelineTick) return cloneState(latest.state);
   for (let index = 1; index < samples.length; index += 1) {
     const next = samples[index]!;
-    if (next.receivedAtMs < targetMs) continue;
+    if (next.timelineTick < targetTick) continue;
     const previous = samples[index - 1]!;
-    const span = next.receivedAtMs - previous.receivedAtMs;
-    const amount = span <= 0 ? 1 : (targetMs - previous.receivedAtMs) / span;
+    const span = next.timelineTick - previous.timelineTick;
+    const amount = span <= 0 ? 1 : (targetTick - previous.timelineTick) / span;
     return interpolate(previous.state, next.state, amount);
   }
   return cloneState(latest.state);
+}
+
+function alignClockTick(clockTick: number, reference: number): number {
+  const whole = Math.floor(clockTick);
+  return unwrapTick32(whole >>> 0, reference) + (clockTick - whole);
 }
 
 function interpolate(
@@ -196,6 +463,10 @@ function mixAngle(a: number, b: number, amount: number): number {
 
 function mix(a: number, b: number, amount: number): number {
   return a + (b - a) * amount;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 function idKey(id: RuntimeId): string {

@@ -6,7 +6,9 @@ import {
   BOOTSTRAP_STATE_TAG,
   LIFECYCLE_TAG,
   OWNERSHIP_CHANGED_TAG,
+  PHYSICS_HZ,
   PROTOCOL_VERSION,
+  PROXY_INTERPOLATION_TICKS,
   STATE_CLUSTER_TAG,
   StateReceiver,
   binaryPacketTag,
@@ -17,6 +19,7 @@ import {
   decodeStateCluster,
   encodeOwnedState,
   encodeStateAck,
+  unwrapTick32,
   type NetworkPlayerState,
   type RuntimeId,
   type WelcomeMessage,
@@ -33,6 +36,10 @@ export type ProfileReport = {
   stateAgeP95Ms: number;
   stateIntervalP95Ms: number;
   targetStateSamples: number;
+  presentationPathErrorP95Cm: number;
+  presentationPathErrorSamples: number;
+  bufferUnderrunPercent: number;
+  bufferUnderrunFrames: number;
   advancingFramePercent: number;
   advancingFramePercent60Hz: number;
   advancingFramePercent120Hz: number;
@@ -43,7 +50,7 @@ export type ProfileReport = {
 };
 
 export type HarnessReport = {
-  reportVersion: 5;
+  reportVersion: 6;
   clientCount: number;
   propCount: number;
   durationMs: number;
@@ -69,6 +76,7 @@ type HarnessClient = {
   player: NetworkPlayerState;
   nextPublishMs: number;
   renderTarget: RuntimeId | null;
+  pathOracle: PathOracle | null;
   lastTargetStateAtMs: number | null;
   targetStateIntervalsMs: number[];
   renders: Record<60 | 120, RenderMetrics>;
@@ -83,6 +91,16 @@ type RenderMetrics = {
   previousZ: number | null;
   eligibleFrames: number;
   advancingFrames: number;
+  oracleFrames: number;
+  underrunFrames: number;
+  pathErrorsCm: number[];
+};
+
+type PathOracle = {
+  anchorTimelineTick: number;
+  anchorReceivedAtMs: number;
+  anchorZ: number;
+  latestTimelineTick: number;
 };
 
 export async function runRealNetworkHarness(options: {
@@ -97,7 +115,7 @@ export async function runRealNetworkHarness(options: {
     throw new Error("clientCount must be between 2 and 32");
   if (!Number.isInteger(propCount) || propCount < 6 || propCount > 512)
     throw new Error("propCount must be between 6 and 512");
-  const directory = await mkdtemp(join(tmpdir(), "gurgur-network-v5-"));
+  const directory = await mkdtemp(join(tmpdir(), "gurgur-network-v6-"));
   const server = await createGurgurServer({
     port: 0,
     hostname: "127.0.0.1",
@@ -138,6 +156,10 @@ export async function runRealNetworkHarness(options: {
         const selected = clients.filter((client) => client.profile.name === profile.name);
         const ages = selected.flatMap((client) => client.stateAgesMs);
         const intervals = selected.flatMap((client) => client.targetStateIntervalsMs);
+        const renders = selected.flatMap((client) => Object.values(client.renders));
+        const pathErrorsCm = renders.flatMap((render) => render.pathErrorsCm);
+        const oracleFrames = renders.reduce((sum, render) => sum + render.oracleFrames, 0);
+        const underrunFrames = renders.reduce((sum, render) => sum + render.underrunFrames, 0);
         const advancingPercent = (displayHz: 60 | 120): number => {
           const eligible = selected.reduce(
             (sum, client) => sum + client.renders[displayHz].eligibleFrames,
@@ -162,6 +184,10 @@ export async function runRealNetworkHarness(options: {
             stateAgeP95Ms: percentile(ages, 0.95),
             stateIntervalP95Ms: percentile(intervals, 0.95),
             targetStateSamples: intervals.length + selected.length,
+            presentationPathErrorP95Cm: percentile(pathErrorsCm, 0.95),
+            presentationPathErrorSamples: pathErrorsCm.length,
+            bufferUnderrunPercent: oracleFrames ? (underrunFrames / oracleFrames) * 100 : 100,
+            bufferUnderrunFrames: underrunFrames,
             advancingFramePercent: Math.min(advancingFramePercent60Hz, advancingFramePercent120Hz),
             advancingFramePercent60Hz,
             advancingFramePercent120Hz,
@@ -184,7 +210,7 @@ export async function runRealNetworkHarness(options: {
       }),
     );
     return {
-      reportVersion: 5,
+      reportVersion: 6,
       clientCount,
       propCount,
       durationMs,
@@ -213,6 +239,7 @@ function publishOwnerState(
     client.player = {
       ...client.player,
       stateSequence: (client.player.stateSequence + 2) & 0xffff,
+      sourceTick: (client.player.sourceTick + 2) >>> 0,
       position: {
         ...client.player.position,
         z: client.player.position.z + 5 / 30,
@@ -259,7 +286,20 @@ function deliverInbound(
           if (!client.renderTarget) {
             client.renderTarget = { ...state.id };
             client.lastTargetStateAtMs = packet.deliveryAtMs;
+            client.pathOracle = {
+              anchorTimelineTick: state.sourceTick,
+              anchorReceivedAtMs: packet.deliveryAtMs,
+              anchorZ: state.position.z,
+              latestTimelineTick: state.sourceTick,
+            };
+            client.presentation.updateClock(state.sourceTick, packet.deliveryAtMs, 0);
           } else if (same(state.id, client.renderTarget)) {
+            if (client.pathOracle) {
+              client.pathOracle.latestTimelineTick = unwrapTick32(
+                state.sourceTick,
+                client.pathOracle.latestTimelineTick,
+              );
+            }
             if (client.lastTargetStateAtMs !== null)
               client.targetStateIntervalsMs.push(packet.deliveryAtMs - client.lastTargetStateAtMs);
             client.lastTargetStateAtMs = packet.deliveryAtMs;
@@ -291,6 +331,23 @@ function samplePresentation(client: HarnessClient, nowMs: number): void {
             if (Math.abs(state.position.z - render.previousZ) > 1e-5) render.advancingFrames += 1;
           }
           render.previousZ = state.position.z;
+          const oracle = client.pathOracle;
+          if (oracle) {
+            render.oracleFrames += 1;
+            const targetTimelineTick =
+              oracle.anchorTimelineTick +
+              ((render.nextMs - oracle.anchorReceivedAtMs) / 1_000) * PHYSICS_HZ -
+              PROXY_INTERPOLATION_TICKS;
+            if (targetTimelineTick > oracle.latestTimelineTick + 1e-6) {
+              render.underrunFrames += 1;
+            } else {
+              const sampledTimelineTick = Math.max(oracle.anchorTimelineTick, targetTimelineTick);
+              const expectedZ =
+                oracle.anchorZ +
+                ((sampledTimelineTick - oracle.anchorTimelineTick) * 5) / PHYSICS_HZ;
+              render.pathErrorsCm.push(Math.abs(state.position.z - expectedZ) * 100);
+            }
+          }
         }
       }
       render.nextMs += 1_000 / displayHz;
@@ -308,7 +365,7 @@ function connectClient(
     const socket = new WebSocket(`ws://127.0.0.1:${port}/game`);
     socket.binaryType = "arraybuffer";
     const peer = new RTCPeerConnection({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-    const owner = peer.createDataChannel("gurgur-owner-v5", {
+    const owner = peer.createDataChannel("gurgur-owner-v6", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -343,6 +400,7 @@ function connectClient(
         player,
         nextPublishMs: 0,
         renderTarget: null,
+        pathOracle: null,
         lastTargetStateAtMs: null,
         targetStateIntervalsMs: [],
         renders: {
@@ -351,12 +409,18 @@ function connectClient(
             previousZ: null,
             eligibleFrames: 0,
             advancingFrames: 0,
+            oracleFrames: 0,
+            underrunFrames: 0,
+            pathErrorsCm: [],
           },
           120: {
             nextMs: 300,
             previousZ: null,
             eligibleFrames: 0,
             advancingFrames: 0,
+            oracleFrames: 0,
+            underrunFrames: 0,
+            pathErrorsCm: [],
           },
         },
         stateAgesMs: [],
@@ -371,7 +435,7 @@ function connectClient(
       done();
     });
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v5" || stateChannel) {
+      if (channel.label !== "gurgur-state-v6" || stateChannel) {
         channel.close();
         return;
       }

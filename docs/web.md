@@ -61,8 +61,18 @@ There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
 objects are keyed by generation-bearing runtime identity. Locally owned objects
 interpolate consecutive completed 60 Hz worker steps. Remote objects render from
-a 100 ms state buffer without extrapolation; the associated Box3D bodies remain
-motion-disabled collision proxies.
+independent adaptive tracks between four and eight source ticks without
+extrapolation. Recent late arrivals and underruns raise only the affected track;
+delay falls slowly and never rewinds the render timeline. Associated Box3D
+bodies remain motion-disabled proxies on the fixed eight-tick collision track.
+
+After a reliable loose-prop claim grant, the renderer drives only that prop's
+mesh toward the local 60 Hz target over one fixed interval. The authoritative
+snapshot remains immutable and camera collision continues to read it. Release
+retains the current visual offset and decays it toward Bun's sampled body with
+linear correction capped at 2 m/s and angular correction capped at 2π rad/s.
+Lifecycle removal, reset, or replacement clears the speculative presenter.
+Fixed-authority contraption meshes do not use this shortcut.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission. Leaving the page closes the
@@ -155,7 +165,7 @@ deliberate unlit presentation exception.
 Targetable physics props use a lightweight inverted-hull toon outline in the same
 low-resolution scene pass. Mint means a loose prop is locally available; orange
 marks an available fixed-authority manipulation target; amber identifies the
-local player's active grab lease or manipulation claim.
+local player's active manipulation claim.
 Exact, colorless silhouettes first accumulate stencil coverage without testing
 or changing world depth. The expanded hull then ignores world depth but draws
 only where coverage remains zero, and player billboards render afterward against
@@ -168,6 +178,13 @@ interactive mechanism, and red marks a blocker, unavailable prop, or miss. It
 also polls Bun's current Box3D debug frame at 10 Hz and draws broad-phase bounds,
 joints, and contact points above the scene. The overlay is diagnostic only and
 does not replace coordinator validation of ownership and reliable interactions.
+The test diagnostics also expose cumulative browser-worker fixed-step time
+discarded by the four-tick catch-up cap. Seeded disposable latency, jitter, and
+loss are available only through the test harness query parameters; reliable
+lifecycle remains separate.
+Client-feel diagnostics report adaptive render policy, each track's delay,
+underruns, the active speculative target, and its maximum observed authoritative
+error.
 Sprite presentation consumes only `PresentationSpec` and the hashed logical
 sprite manifest; it never compares mapper classnames. The player billboard source
 is a committed Blender scene sized to the shared

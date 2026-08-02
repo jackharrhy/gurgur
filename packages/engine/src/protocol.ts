@@ -60,7 +60,7 @@ function isRuntimeEntityRef(value: unknown): value is RuntimeEntityRef {
     isRuntimeId(value.id) &&
     (value.ownerPlayerId === null || isRuntimeId(value.ownerPlayerId)) &&
     Number.isSafeInteger(value.authorityVersion) &&
-    (value.transferPolicy === "fixed" || value.transferPolicy === "grab-lease") &&
+    value.transferPolicy === "fixed" &&
     (value.kind === "player" ||
       (value.kind === "world-entity" && Number.isSafeInteger(value.entityIndex)))
   );

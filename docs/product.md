@@ -13,10 +13,11 @@ authenticated administrator can reset the entire world to its authored state.
 
 - One continuously running world, not matches, rooms, or server zones.
 - Each browser controls and publishes its own player.
-- A browser temporarily controls a prop only while Bun has granted it an
-  exclusive grab lease.
-- Bun controls unheld props, mechanisms, triggers, movers, diagnostic actors,
-  identity, lifecycle, persistence, ownership grants, and global reset.
+- Bun dynamically simulates every shared prop, whether held or unheld.
+- A browser controls only its player and may publish a disposable target under
+  an exclusive prop-manipulation claim.
+- Bun controls shared rigid bodies, mechanisms, triggers, movers, diagnostic
+  actors, identity, lifecycle, persistence, claims, and global reset.
 - Jointed contraptions are host-fixed compositions. Players can push their
   parts, operate authored motors, and directly pull one part through an
   exclusive host-side manipulation claim. The part never leaves the graph's
@@ -24,8 +25,9 @@ authenticated administrator can reset the entire world to its authored state.
 - Maps may compose levers, sliders, ball sockets, ropes, springs, welded
   assemblies, conveyors, gravity areas, and machines such as trebuchets from a
   small Source-style physics vocabulary.
-- Owner transforms are gameplay truth. Gurgur is a cooperative trusted-client
-  social world, not a competitive shooter or anti-cheat boundary.
+- Browser player transforms and Bun rigid-body transforms are gameplay truth.
+  Gurgur is a cooperative trusted-client social world, not a competitive
+  shooter or anti-cheat boundary.
 - Ordinary collision never transfers control of an object.
 - TrenchBroom Valve 220 maps are the primary level-authoring format.
 - Authored defaults and persisted runtime state remain distinct.
@@ -50,18 +52,20 @@ for its local manipulator. Ball sockets, hinges, motors, sliders, ropes, rods,
 springs, and welds have authored-on-by-default physical markers derived from
 their live attachment frames.
 
-Pickup is a reliable request against the prop's current authority version. The
-first valid request wins; a held prop cannot be stolen. The prop is carried from
-its centre of mass toward a stable point in front of the owner. Walls shorten the
-carry position, turning rotates the captured relative orientation, and bounded
-linear/angular response keeps contact physical. Release reliably hands the
-complete final pose and velocity back to Bun.
+Pickup is a reliable claim request against the prop's current authority version.
+The first valid request wins; a held prop cannot be stolen. The browser moves a
+centre-of-mass target toward a stable point in front of the player. Walls shorten
+the target and turning rotates the captured relative orientation. Bun's control
+joint supplies bounded physical response while the prop and every contact remain
+in the shared solver. Once Bun confirms the claim, the holder sees an immediate
+presentation-only loose-prop response while that view converges to Bun's result.
+Other players, collisions, triggers, use actions, saves, and release velocity see
+only Bun's body. Release removes only the control joint and visually converges
+the holder's view without a gameplay handoff.
 
-Direct contraption manipulation is intentionally different from pickup. The
-browser selects the hit point and moves a smoothed target, while Bun pulls that
-point with a control joint and continues simulating the complete machine. The
-first valid claim wins, another player cannot steal it, and release removes only
-the temporary controller.
+Direct contraption manipulation uses the same claim and target transport but a
+different anchor: the browser selects the hit point instead of the centre of
+mass. Bun pulls that point while continuing to simulate the complete machine.
 
 ## Scope boundaries
 

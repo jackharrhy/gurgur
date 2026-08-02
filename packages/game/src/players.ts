@@ -1,6 +1,8 @@
 import {
   INPUT_INTENT_TIMEOUT_TICKS,
+  PROXY_INTERPOLATION_TICKS,
   isNewerSequence16,
+  unwrapTick32,
   type InputCommand,
   type NetworkPlayerState,
   type RuntimeEntityRef,
@@ -59,6 +61,16 @@ type Player = {
   externallyOwned: boolean;
   authorityVersion: number;
   stateSequence: number;
+  sourceTick: number;
+  proxyCrouched: boolean;
+  proxySamples: PlayerProxySample[];
+};
+
+type PlayerProxySample = {
+  timelineTick: number;
+  position: Vec3;
+  yaw: number;
+  crouched: boolean;
 };
 
 type PlayerSlot = { generation: number; player: Player | null };
@@ -94,7 +106,7 @@ export type GamePlayers = {
   ): RuntimeId;
   disconnect(id: RuntimeId, options?: { persist?: boolean }): boolean;
   acceptInput(id: RuntimeId, command: InputCommand, worldEpoch: number): boolean;
-  applyOwnedState(id: RuntimeId, state: NetworkPlayerState): boolean;
+  applyOwnedState(id: RuntimeId, state: NetworkPlayerState, discontinuity?: boolean): boolean;
   reassign(id: RuntimeId): NetworkPlayerState | null;
   step(): void;
   reset(): void;
@@ -206,6 +218,9 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       externallyOwned,
       authorityVersion: 1,
       stateSequence: 0,
+      sourceTick: engine.tick >>> 0,
+      proxyCrouched: state.crouched,
+      proxySamples: [proxySample(state, engine.tick)],
     };
     if (!externallyOwned && restored?.grabbedAuthoredId) {
       const target = bodyForAuthoredId(restored.grabbedAuthoredId);
@@ -240,6 +255,9 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     player.pendingInput = null;
     player.grab = null;
     player.stateSequence = 0;
+    player.sourceTick = engine.tick >>> 0;
+    player.proxyCrouched = false;
+    player.proxySamples = [proxySample(player.state, engine.tick)];
     if (worldRecreated) {
       player.lastSequence = -1;
       player.lastProcessedInputSequence = -1;
@@ -292,9 +310,49 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
     );
   };
 
+  const stepExternalProxy = (player: Player): void => {
+    const targetTick = engine.tick - PROXY_INTERPOLATION_TICKS;
+    while (player.proxySamples.length > 2 && player.proxySamples[1]!.timelineTick <= targetTick)
+      player.proxySamples.shift();
+    const first = player.proxySamples[0];
+    if (!first) return;
+    const latest = player.proxySamples.at(-1)!;
+    let position = first.position;
+    let yaw = first.yaw;
+    let crouched = first.crouched;
+    if (targetTick >= latest.timelineTick) {
+      position = latest.position;
+      yaw = latest.yaw;
+      crouched = latest.crouched;
+    } else if (targetTick > first.timelineTick) {
+      const next = player.proxySamples.find((sample) => sample.timelineTick >= targetTick);
+      if (next) {
+        const span = next.timelineTick - first.timelineTick;
+        const amount = span <= 0 ? 1 : (targetTick - first.timelineTick) / span;
+        position = {
+          x: mix(first.position.x, next.position.x, amount),
+          y: mix(first.position.y, next.position.y, amount),
+          z: mix(first.position.z, next.position.z, amount),
+        };
+        yaw = mixAngle(first.yaw, next.yaw, amount);
+        crouched = amount >= 1 ? next.crouched : first.crouched;
+      }
+    }
+    if (crouched !== player.proxyCrouched) {
+      engine.destroyBody(player.proxy);
+      player.proxy = engine.createPlayerProxy(position, playerCapsule(crouched));
+      player.proxyCrouched = crouched;
+    } else {
+      engine.updatePlayerProxy(player.proxy, position, yaw);
+    }
+  };
+
   const step = (): void => {
     for (const player of players()) {
-      if (player.externallyOwned) continue;
+      if (player.externallyOwned) {
+        stepExternalProxy(player);
+        continue;
+      }
       const pending = player.pendingInput;
       player.pendingInput = null;
       if (pending) {
@@ -330,6 +388,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       }
       updateGrab(player);
       player.stateSequence = (player.stateSequence + 1) & 0xffff;
+      player.sourceTick = engine.tick >>> 0;
     }
   };
 
@@ -424,7 +483,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       };
       return true;
     },
-    applyOwnedState(id, state) {
+    applyOwnedState(id, state, discontinuity = false) {
       const player = resolve(id)?.player;
       if (
         !player ||
@@ -436,7 +495,6 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       ) {
         return false;
       }
-      const wasCrouched = player.state.crouched;
       player.state = {
         position: { ...state.position },
         yaw: state.yaw,
@@ -447,11 +505,22 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         stepCooldown: state.stepCooldown,
       };
       player.stateSequence = state.stateSequence;
-      if (wasCrouched !== state.crouched) {
+      player.sourceTick = state.sourceTick;
+      const previousSample = player.proxySamples.at(-1);
+      const timelineTick = previousSample
+        ? unwrapTick32(state.sourceTick, previousSample.timelineTick)
+        : unwrapTick32(state.sourceTick, engine.tick);
+      const sample = proxySample(state, timelineTick);
+      if (discontinuity) {
         engine.destroyBody(player.proxy);
         player.proxy = engine.createPlayerProxy(state.position, playerCapsule(state.crouched));
+        player.proxyCrouched = state.crouched;
+        player.proxySamples = [sample];
       } else {
-        engine.updatePlayerProxy(player.proxy, state.position, state.yaw);
+        if (previousSample && previousSample.timelineTick === timelineTick)
+          player.proxySamples[player.proxySamples.length - 1] = sample;
+        else player.proxySamples.push(sample);
+        while (player.proxySamples.length > 64) player.proxySamples.shift();
       }
       return true;
     },
@@ -461,6 +530,8 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
       player.authorityVersion = (player.authorityVersion + 1) >>> 0;
       if (player.authorityVersion === 0) player.authorityVersion = 1;
       player.stateSequence = 0;
+      player.sourceTick = engine.tick >>> 0;
+      player.proxySamples = [proxySample(player.state, engine.tick)];
       return networkState(player);
     },
     step,
@@ -489,12 +560,34 @@ function defaultState(position: Vec3, yaw: number): PlayerControllerState {
   };
 }
 
+function proxySample(
+  state: Pick<PlayerControllerState, "position" | "yaw" | "crouched">,
+  timelineTick: number,
+): PlayerProxySample {
+  return {
+    timelineTick,
+    position: { ...state.position },
+    yaw: state.yaw,
+    crouched: state.crouched,
+  };
+}
+
+function mixAngle(a: number, b: number, amount: number): number {
+  const difference = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+  return a + difference * amount;
+}
+
+function mix(a: number, b: number, amount: number): number {
+  return a + (b - a) * amount;
+}
+
 function networkState(player: Player): NetworkPlayerState {
   return {
     kind: "player",
     id: { ...player.id },
     authorityVersion: player.authorityVersion,
     stateSequence: player.stateSequence,
+    sourceTick: player.sourceTick,
     position: { ...player.state.position },
     rotation: yawRotation(player.state.yaw),
     linearVelocity: { x: 0, y: player.state.verticalVelocity, z: 0 },

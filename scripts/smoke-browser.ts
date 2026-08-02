@@ -5,6 +5,32 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import { compileWorld, PLAYER_HALF_HEIGHT } from "@gurgur/game";
 import { createGurgurServer } from "../apps/server/src/server";
 
+type BrowserImpairment = {
+  oneWayLatencyMs: number;
+  jitterMs: number;
+  lossRate: number;
+  seed: number;
+};
+
+const LOCAL_IMPAIRMENT: BrowserImpairment = {
+  oneWayLatencyMs: 0,
+  jitterMs: 0,
+  lossRate: 0,
+  seed: 0x100,
+};
+const TYPICAL_IMPAIRMENT: BrowserImpairment = {
+  oneWayLatencyMs: 40,
+  jitterMs: 10,
+  lossRate: 0.01,
+  seed: 0x200,
+};
+const ADVERSE_IMPAIRMENT: BrowserImpairment = {
+  oneWayLatencyMs: 75,
+  jitterMs: 20,
+  lossRate: 0.05,
+  seed: 0x300,
+};
+
 const scenario = process.env.SMOKE_SCENARIO ?? "all";
 const path = "content/maps/fixtures/network-boxes.map";
 const bundle = compileWorld(await Bun.file(path).text(), path);
@@ -18,8 +44,8 @@ const spawn = {
   y: PLAYER_HALF_HEIGHT,
   z: brush.center.z + 2.5,
 };
-const directory = await mkdtemp(join(tmpdir(), "gurgur-browser-v5-"));
-const adminToken = "browser-v5-admin";
+const directory = await mkdtemp(join(tmpdir(), "gurgur-browser-v6-"));
+const adminToken = "browser-v6-admin";
 const server = await createGurgurServer({
   port: 0,
   hostname: "127.0.0.1",
@@ -30,16 +56,18 @@ const server = await createGurgurServer({
 });
 const executablePath =
   process.env.CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const chrome = await chromium.launch({
+const chromeOptions = {
   executablePath,
   headless: true,
   args: ["--enable-unsafe-webgpu"],
-});
+};
+const chrome = await chromium.launch(chromeOptions);
+const peerChrome = await chromium.launch(chromeOptions);
 
 try {
   if (scenario === "all" || scenario === "movement") {
     await resetWorld();
-    await movementAndBanding(chrome);
+    await movementAndBanding(chrome, peerChrome);
   }
   if (scenario === "all" || scenario === "pickup") {
     await resetWorld();
@@ -47,12 +75,12 @@ try {
   }
   if (scenario === "all" || scenario === "contention") {
     await resetWorld();
-    await contentionAndRecovery(chrome);
+    await contentionAndRecovery(chrome, peerChrome);
   }
   if (scenario === "all" || scenario === "contraption") await contraptionInteraction(chrome);
-  console.log(`protocol-v5 browser smoke passed (${scenario})`);
+  console.log(`protocol-v6 browser smoke passed (${scenario})`);
 } finally {
-  await chrome.close();
+  await Promise.all([chrome.close(), peerChrome.close()]);
   server.stop();
   await rm(directory, { recursive: true, force: true });
 }
@@ -65,11 +93,13 @@ async function resetWorld(): Promise<void> {
   if (!response.ok) throw new Error(`browser fixture reset failed (${response.status})`);
 }
 
-async function movementAndBanding(browser: Browser): Promise<void> {
-  const owner = await openPage(browser, 0);
-  const observer = await openPage(browser, 40);
+async function movementAndBanding(ownerBrowser: Browser, observerBrowser: Browser): Promise<void> {
+  const owner = await openPage(ownerBrowser, LOCAL_IMPAIRMENT);
+  const observer = await openPage(observerBrowser, ADVERSE_IMPAIRMENT);
   try {
     const ownerId = await localPlayerKey(owner);
+    await owner.waitForFunction(() => Boolean(document.body.dataset.interactionTarget));
+    const localBodyId = await owner.evaluate(() => document.body.dataset.interactionTarget!);
     await observer.waitForFunction(
       (id) =>
         (window as unknown as SmokeWindow).__gurgurDiagnostics
@@ -154,6 +184,24 @@ async function movementAndBanding(browser: Browser): Promise<void> {
         `remote presentation banded: ${movingFrames.advanced}/${movingFrames.eligible} advancing frames; ${JSON.stringify(replication)}`,
       );
     }
+    const localFeel = await owner.evaluate(
+      (target) => ({
+        target,
+        diagnostics: (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel(),
+      }),
+      localBodyId,
+    );
+    const localBodyDelay = localFeel.diagnostics.presentation.trackDelayTicks[localFeel.target];
+    if (
+      localFeel.diagnostics.presentation.networkDelayPolicy !== "adaptive-render" ||
+      localBodyDelay === undefined ||
+      localBodyDelay > 5
+    )
+      throw new Error(`localhost render delay did not adapt: ${JSON.stringify(localFeel)}`);
+    await assertNoDiscardedWorkerTime(owner);
+    await assertNoDiscardedWorkerTime(observer);
+    await proveMainThreadIsolation(owner);
+    await proveWorkerStallAccounting(owner);
   } finally {
     await owner.close();
     await observer.close();
@@ -161,29 +209,80 @@ async function movementAndBanding(browser: Browser): Promise<void> {
 }
 
 async function pickupAndRelease(browser: Browser): Promise<void> {
-  const page = await openPage(browser, 0);
+  const page = await openPage(browser, ADVERSE_IMPAIRMENT);
   try {
     await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget));
     const targetId = await page.evaluate(() => document.body.dataset.interactionTarget!);
-    const localId = await localPlayerKey(page);
+    const initialAuthority = await page.evaluate((target) => {
+      const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
+        .network()
+        .entities.find(
+          (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
+        );
+      if (!entity || entity.ownerPlayerId !== null || entity.transferPolicy !== "fixed")
+        throw new Error("pickup target is not fixed-authority");
+      return entity.authorityVersion;
+    }, targetId);
     await pressPrimary(page);
     await page.waitForFunction(
-      ({ target, local }) => {
-        const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
-          .network()
-          .entities.find(
-            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
-          );
-        return (
-          entity?.ownerPlayerId &&
-          `${entity.ownerPlayerId.index}:${entity.ownerPlayerId.generation}` === local
-        );
-      },
-      { target: targetId, local: localId },
+      (target) =>
+        document.body.dataset.manipulationTarget === target &&
+        document.body.dataset.interactionOutline === "held" &&
+        document.body.dataset.speculativeManipulation === "true",
+      targetId,
     );
-    await page.waitForFunction(() => document.body.dataset.interactionOutline === "held");
+    const cadenceStart = await page.evaluate(() =>
+      Number(document.body.dataset.manipulationStateCount ?? 0),
+    );
+    await page.waitForTimeout(500);
+    const cadenceCount =
+      (await page.evaluate(() => Number(document.body.dataset.manipulationStateCount ?? 0))) -
+      cadenceStart;
+    if (cadenceCount < 20)
+      throw new Error(`active manipulation target cadence was too low (${cadenceCount}/500ms)`);
     const startPosition = await position(page, targetId);
+    const previousLookAt = await page.evaluate(() => document.body.dataset.lookAt ?? "");
+    const speculativeResponse = page.evaluate(
+      ({ target, previousLook }) =>
+        new Promise<number>((resolve) => {
+          let lookAt: number | null = null;
+          let start: { x: number; y: number; z: number } | null = null;
+          const startedAt = performance.now();
+          const sample = (now: number): void => {
+            const nextLook = document.body.dataset.lookAt ?? "";
+            const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
+              .presentation()
+              .find((candidate) => candidate.runtimeId === target);
+            if (lookAt === null && nextLook !== previousLook && state) {
+              lookAt = Number(nextLook);
+              start = { ...state.position };
+            } else if (
+              lookAt !== null &&
+              start &&
+              state &&
+              Math.hypot(
+                state.position.x - start.x,
+                state.position.y - start.y,
+                state.position.z - start.z,
+              ) > 0.05
+            ) {
+              resolve(now - lookAt);
+              return;
+            }
+            if (now - startedAt >= 1_000) {
+              resolve(Number.POSITIVE_INFINITY);
+              return;
+            }
+            requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        }),
+      { target: targetId, previousLook: previousLookAt },
+    );
     await turnTouch(page, 150);
+    const responseMs = await speculativeResponse;
+    if (responseMs >= 50)
+      throw new Error(`speculative held-prop response took ${responseMs.toFixed(1)}ms`);
     await page.waitForFunction(
       ({ target, start }) => {
         const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
@@ -200,94 +299,109 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       },
       { target: targetId, start: startPosition },
     );
+    const releaseTrace = page.evaluate(
+      (target) =>
+        new Promise<Array<{ x: number; y: number; z: number }>>((resolve) => {
+          const samples: Array<{ x: number; y: number; z: number }> = [];
+          const startedAt = performance.now();
+          const sample = (now: number): void => {
+            const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
+              .presentation()
+              .find((candidate) => candidate.runtimeId === target);
+            if (state) samples.push({ ...state.position });
+            if (now - startedAt >= 400) resolve(samples);
+            else requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        }),
+      targetId,
+    );
     await pressPrimary(page);
-    await page.waitForFunction((target) => {
-      const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
-        .network()
-        .entities.find(
-          (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
+    await page.waitForFunction(
+      ({ target, authority }) => {
+        const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
+          .network()
+          .entities.find(
+            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
+          );
+        return (
+          entity?.ownerPlayerId === null &&
+          entity.authorityVersion === authority &&
+          document.body.dataset.manipulationTarget === "" &&
+          document.body.dataset.interactionOutline !== "held"
         );
-      return entity?.ownerPlayerId === null;
-    }, targetId);
-    await page.waitForFunction(() => document.body.dataset.interactionOutline !== "held");
-    const finalOwned = await page.evaluate(
-      () =>
-        (window as unknown as SmokeWindow).__gurgurDiagnostics.lastOwnershipDrop()?.position ??
-        null,
+      },
+      { target: targetId, authority: initialAuthority },
     );
-    if (!finalOwned) throw new Error("browser did not capture its final ownership state");
-    const afterDrop = await position(page, targetId);
-    const discontinuity = Math.hypot(
-      afterDrop.x - finalOwned.x,
-      afterDrop.y - finalOwned.y,
-      afterDrop.z - finalOwned.z,
-    );
-    if (discontinuity >= 0.05)
-      throw new Error(`release handoff discontinuity was ${(discontinuity * 100).toFixed(2)}cm`);
+    const samples = await releaseTrace;
+    const maximumFrameStep = samples.slice(1).reduce((maximum, sample, index) => {
+      const previous = samples[index]!;
+      return Math.max(
+        maximum,
+        Math.hypot(sample.x - previous.x, sample.y - previous.y, sample.z - previous.z),
+      );
+    }, 0);
+    if (samples.length < 10 || maximumFrameStep >= 0.5)
+      throw new Error(
+        `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step`,
+      );
+    await assertNoDiscardedWorkerTime(page);
   } finally {
     await page.close();
   }
 }
 
-async function contentionAndRecovery(browser: Browser): Promise<void> {
-  const first = await openPage(browser, 0);
-  const second = await openPage(browser, 0);
+async function contentionAndRecovery(firstBrowser: Browser, secondBrowser: Browser): Promise<void> {
+  const first = await openPage(firstBrowser, TYPICAL_IMPAIRMENT);
+  const second = await openPage(secondBrowser, {
+    ...ADVERSE_IMPAIRMENT,
+    seed: ADVERSE_IMPAIRMENT.seed + 1,
+  });
   try {
     await Promise.all([
       first.waitForFunction(() => Boolean(document.body.dataset.interactionTarget)),
       second.waitForFunction(() => Boolean(document.body.dataset.interactionTarget)),
     ]);
-    const firstPlayer = await localPlayerKey(first);
-    const secondPlayer = await localPlayerKey(second);
     const targetId = await first.evaluate(() => document.body.dataset.interactionTarget!);
+    const secondTargetId = await second.evaluate(() => document.body.dataset.interactionTarget!);
+    if (secondTargetId !== targetId)
+      throw new Error(`contention selected different targets (${targetId}, ${secondTargetId})`);
     await Promise.all([pressPrimary(first), pressPrimary(second)]);
-    await first.waitForFunction(
-      ({ target, owners }) => {
-        const owner = (window as unknown as SmokeWindow).__gurgurDiagnostics
-          .network()
-          .entities.find(
-            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
-          )?.ownerPlayerId;
-        return (
-          owner !== null &&
-          owner !== undefined &&
-          owners.includes(`${owner.index}:${owner.generation}`)
-        );
-      },
-      { target: targetId, owners: [firstPlayer, secondPlayer] },
-    );
-    const observedOwner = await first.evaluate((target) => {
-      const owner = (window as unknown as SmokeWindow).__gurgurDiagnostics
-        .network()
-        .entities.find(
-          (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
-        )?.ownerPlayerId;
-      return owner ? `${owner.index}:${owner.generation}` : null;
-    }, targetId);
-    await second.waitForFunction(
-      ({ target, owner }) => {
-        const value = (window as unknown as SmokeWindow).__gurgurDiagnostics
-          .network()
-          .entities.find(
-            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
-          )?.ownerPlayerId;
-        return (
-          value !== undefined && (value ? `${value.index}:${value.generation}` : null) === owner
-        );
-      },
-      { target: targetId, owner: observedOwner },
-    );
-
-    const holder = observedOwner === firstPlayer ? first : second;
+    const holder = await Promise.race([
+      first
+        .waitForFunction((target) => document.body.dataset.manipulationTarget === target, targetId)
+        .then(() => first),
+      second
+        .waitForFunction((target) => document.body.dataset.manipulationTarget === target, targetId)
+        .then(() => second),
+    ]);
     const observer = holder === first ? second : first;
+    await observer.waitForFunction(
+      (target) => document.body.dataset.manipulationTarget !== target,
+      targetId,
+    );
+    for (const page of [holder, observer]) {
+      const authority = await page.evaluate((target) => {
+        const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
+          .network()
+          .entities.find(
+            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
+          );
+        return entity
+          ? {
+              ownerPlayerId: entity.ownerPlayerId,
+              transferPolicy: entity.transferPolicy,
+            }
+          : null;
+      }, targetId);
+      if (!authority || authority.ownerPlayerId !== null || authority.transferPolicy !== "fixed")
+        throw new Error(`contention changed prop authority: ${JSON.stringify(authority)}`);
+    }
     await holder.close();
     await observer.waitForFunction(
       (target) =>
-        (window as unknown as SmokeWindow).__gurgurDiagnostics
-          .network()
-          .entities.find(
-            (candidate) => `${candidate.id.index}:${candidate.id.generation}` === target,
-          )?.ownerPlayerId === null,
+        document.body.dataset.interactionTarget === target &&
+        document.body.dataset.interactionOutline !== "held",
       targetId,
     );
 
@@ -327,6 +441,7 @@ async function contentionAndRecovery(browser: Browser): Promise<void> {
         document.body.dataset.inputReady === "true",
       epoch,
     );
+    await assertNoDiscardedWorkerTime(observer);
   } finally {
     if (!first.isClosed()) await first.close();
     if (!second.isClosed()) await second.close();
@@ -354,7 +469,7 @@ async function contraptionInteraction(browser: Browser): Promise<void> {
       z: leverBrush.center.z + 1.8,
     },
   });
-  const page = await openPage(browser, 0, contraptionServer.port);
+  const page = await openPage(browser, ADVERSE_IMPAIRMENT, contraptionServer.port);
   try {
     await page.waitForFunction(() => Number(document.body.dataset.constraintVisuals) >= 8);
     await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget));
@@ -427,6 +542,7 @@ async function contraptionInteraction(browser: Browser): Promise<void> {
         document.body.dataset.manipulationTarget === "" &&
         document.body.dataset.interactionOutline !== "held",
     );
+    await assertNoDiscardedWorkerTime(page);
   } finally {
     await page.close();
     contraptionServer.stop();
@@ -436,7 +552,7 @@ async function contraptionInteraction(browser: Browser): Promise<void> {
 
 async function openPage(
   browser: Browser,
-  simulatedLatencyMs: number,
+  impairment: BrowserImpairment,
   port = server.port,
 ): Promise<Page> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
@@ -457,14 +573,74 @@ async function openPage(
   });
   const url = new URL(`http://127.0.0.1:${port}/`);
   url.searchParams.set("test", "1");
-  if (simulatedLatencyMs > 0)
-    url.searchParams.set("simulatedLatencyMs", String(simulatedLatencyMs));
+  url.searchParams.set("simulatedLatencyMs", String(impairment.oneWayLatencyMs));
+  url.searchParams.set("simulatedJitterMs", String(impairment.jitterMs));
+  url.searchParams.set("simulatedLossRate", String(impairment.lossRate));
+  url.searchParams.set("simulatedSeed", String(impairment.seed));
   await page.goto(url.href);
   await page.locator('body[data-owner-physics="ready"]').waitFor({ timeout: 15_000 });
   await page.locator('body[data-input-ready="true"]').waitFor({ timeout: 15_000 });
   await page.locator('body[data-player-view-ready="true"]').waitFor({ timeout: 15_000 });
   if (errors.length > 0) throw new Error(`browser startup errors: ${errors.join("; ")}`);
   return page;
+}
+
+async function assertNoDiscardedWorkerTime(page: Page): Promise<void> {
+  const discarded = await page.evaluate(
+    () => (window as unknown as SmokeWindow).__gurgurDiagnostics.physics().discardedCatchUpSeconds,
+  );
+  if (discarded !== 0)
+    throw new Error(`browser worker discarded ${discarded.toFixed(6)}s of fixed-step time`);
+}
+
+async function proveMainThreadIsolation(page: Page): Promise<void> {
+  const playerId = await localPlayerKey(page);
+  const before = await page.evaluate(
+    (id) =>
+      (window as unknown as SmokeWindow).__gurgurDiagnostics
+        .replication()
+        .find((state) => state.runtimeId === id)?.stateSequence ?? -1,
+    playerId,
+  );
+  await page.evaluate(() => {
+    const until = performance.now() + 120;
+    while (performance.now() < until) {
+      // Deliberately block only the renderer main thread.
+    }
+  });
+  await page.waitForFunction(
+    ({ id, sequence }) =>
+      ((window as unknown as SmokeWindow).__gurgurDiagnostics
+        .replication()
+        .find((state) => state.runtimeId === id)?.stateSequence ?? -1) !== sequence,
+    { id: playerId, sequence: before },
+  );
+  await assertNoDiscardedWorkerTime(page);
+}
+
+async function proveWorkerStallAccounting(page: Page): Promise<void> {
+  const playerId = await localPlayerKey(page);
+  const before = await page.evaluate(
+    (id) =>
+      (window as unknown as SmokeWindow).__gurgurDiagnostics
+        .replication()
+        .find((state) => state.runtimeId === id)?.stateSequence ?? -1,
+    playerId,
+  );
+  await page.evaluate(() =>
+    (window as unknown as SmokeWindow).__gurgurDiagnostics.stallPhysicsWorker(120),
+  );
+  await page.waitForFunction(
+    () =>
+      (window as unknown as SmokeWindow).__gurgurDiagnostics.physics().discardedCatchUpSeconds > 0,
+  );
+  await page.waitForFunction(
+    ({ id, sequence }) =>
+      ((window as unknown as SmokeWindow).__gurgurDiagnostics
+        .replication()
+        .find((state) => state.runtimeId === id)?.stateSequence ?? -1) !== sequence,
+    { id: playerId, sequence: before },
+  );
 }
 
 async function localPlayerKey(page: Page): Promise<string> {
@@ -534,6 +710,7 @@ type DiagnosticRuntime = {
   id: { index: number; generation: number };
   ownerPlayerId: { index: number; generation: number } | null;
   authorityVersion: number;
+  transferPolicy: "fixed";
 };
 type SmokeWindow = {
   __gurgurSmokePad: {
@@ -541,6 +718,24 @@ type SmokeWindow = {
     buttons: Array<{ pressed: boolean; value: number }>;
   };
   __gurgurDiagnostics: {
+    clientFeel(): {
+      presentation: {
+        networkDelayPolicy: "fixed-proxy" | "adaptive-render";
+        minimumNetworkDelayTicks: number;
+        networkDelayTicks: number;
+        desiredNetworkDelayTicks: number;
+        underrunSamples: number;
+        trackDelayTicks: Record<string, number>;
+      };
+      speculative: {
+        active: string | null;
+        reconciling: string | null;
+        positionErrorMetres: number;
+        rotationErrorRadians: number;
+        maximumPositionErrorMetres: number;
+        maximumRotationErrorRadians: number;
+      };
+    };
     presentation(): Array<{
       runtimeId: string;
       position: { x: number; y: number; z: number };
@@ -558,8 +753,9 @@ type SmokeWindow = {
       receivedAtMs: number;
       position: { x: number; y: number; z: number };
     }>;
-    lastOwnershipDrop(): {
-      position: { x: number; y: number; z: number };
-    } | null;
+    physics(): {
+      discardedCatchUpSeconds: number;
+    };
+    stallPhysicsWorker(durationMs: number): void;
   };
 };

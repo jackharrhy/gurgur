@@ -27,16 +27,6 @@ describe("bounded client control union", () => {
         text: "Hello from a browser.",
       },
       {
-        type: "ownership-request",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 1,
-        requestId: 8,
-        target: { index: 2, generation: 3 },
-        authorityVersion: 4,
-        holdDistance: 1.5,
-        relativeRotation: { x: 0, y: 0, z: 0, w: 1 },
-      },
-      {
         type: "manipulation-request",
         protocolVersion: PROTOCOL_VERSION,
         worldEpoch: 1,
@@ -193,7 +183,7 @@ describe("bounded server control union", () => {
             entityIndex: 2,
             ownerPlayerId: null,
             authorityVersion: 1,
-            transferPolicy: "grab-lease",
+            transferPolicy: "fixed",
           },
           {
             id: { index: 2, generation: 1 },
@@ -243,14 +233,6 @@ describe("bounded server control union", () => {
         requestId: 9,
         reason: "world-changed",
         retryAfterMs: 0,
-      },
-      {
-        type: "ownership-denied",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: 2,
-        requestId: 10,
-        target: { index: 4, generation: 5 },
-        reason: "unavailable",
       },
       {
         type: "manipulation-changed",

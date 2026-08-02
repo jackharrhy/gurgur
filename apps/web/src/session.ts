@@ -13,7 +13,6 @@ import {
   decodeStateCluster,
   encodeManipulationState,
   encodeOwnedState,
-  encodeOwnershipDrop,
   encodeOwnerCommit,
   encodeStateAck,
   type BootstrapStatePacket,
@@ -26,9 +25,6 @@ import {
   type ManipulationStatePacket,
   type NetworkObjectState,
   type OwnershipChangedPacket,
-  type OwnershipDeniedMessage,
-  type OwnershipDropPacket,
-  type OwnershipRequestMessage,
   type RtcOfferMessage,
   type SpeechMessage,
   type SpeechRejectedMessage,
@@ -50,7 +46,6 @@ export type SessionCallbacks = {
   lifecycle(message: LifecycleMessage): void;
   state(states: NetworkObjectState[], receivedAtMs: number): void;
   ownership(message: OwnershipChangedPacket, receivedAtMs: number): void;
-  ownershipDenied(message: OwnershipDeniedMessage): void;
   manipulation(message: ManipulationChangedMessage): void;
   manipulationDenied(message: ManipulationDeniedMessage): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
@@ -63,6 +58,9 @@ export type SessionCallbacks = {
 export class GameSession {
   readonly #callbacks: SessionCallbacks;
   readonly #simulatedLatencyMs: number;
+  readonly #simulatedJitterMs: number;
+  readonly #simulatedLossRate: number;
+  readonly #random: () => number;
   readonly #timers = new Set<number>();
   readonly #receiver = new StateReceiver();
   #socket: WebSocket | null = null;
@@ -88,9 +86,20 @@ export class GameSession {
   #stateChannel: RTCDataChannel | null = null;
   #transportReady = false;
 
-  constructor(callbacks: SessionCallbacks, options: { simulatedLatencyMs?: number } = {}) {
+  constructor(
+    callbacks: SessionCallbacks,
+    options: {
+      simulatedLatencyMs?: number;
+      simulatedJitterMs?: number;
+      simulatedLossRate?: number;
+      simulatedSeed?: number;
+    } = {},
+  ) {
     this.#callbacks = callbacks;
     this.#simulatedLatencyMs = Math.max(0, Math.min(1_000, options.simulatedLatencyMs ?? 0));
+    this.#simulatedJitterMs = Math.max(0, Math.min(1_000, options.simulatedJitterMs ?? 0));
+    this.#simulatedLossRate = Math.max(0, Math.min(1, options.simulatedLossRate ?? 0));
+    this.#random = mulberry32(options.simulatedSeed ?? 0x67757267);
   }
 
   connect(): void {
@@ -149,7 +158,7 @@ export class GameSession {
   sendOwnerStates(states: NetworkObjectState[]): void {
     const channel = this.#ownerChannel;
     const packet = encodeOwnedState({ worldEpoch: this.#worldEpoch ?? 0, states });
-    this.#defer(() => {
+    this.#deferDisposable(() => {
       if (
         channel?.readyState === "open" &&
         channel === this.#ownerChannel &&
@@ -158,10 +167,6 @@ export class GameSession {
         channel.send(packet);
       }
     });
-  }
-
-  requestOwnership(message: OwnershipRequestMessage): boolean {
-    return this.#sendControl(message);
   }
 
   requestManipulation(message: ManipulationRequestMessage): boolean {
@@ -176,20 +181,20 @@ export class GameSession {
       message.worldEpoch !== this.#worldEpoch
     )
       return false;
-    channel.send(encodeManipulationState(message));
+    const packet = encodeManipulationState(message);
+    this.#deferDisposable(() => {
+      if (
+        channel.readyState === "open" &&
+        channel === this.#ownerChannel &&
+        channel.bufferedAmount < 16_384
+      )
+        channel.send(packet);
+    });
     return true;
   }
 
   dropManipulation(message: ManipulationDropMessage): boolean {
     return this.#sendControl(message);
-  }
-
-  dropOwnership(message: OwnershipDropPacket): boolean {
-    const socket = this.#socket;
-    if (socket?.readyState !== WebSocket.OPEN || message.worldEpoch !== this.#worldEpoch)
-      return false;
-    socket.send(encodeOwnershipDrop(message));
-    return true;
   }
 
   commitOwnerStates(states: NetworkObjectState[]): boolean {
@@ -267,8 +272,6 @@ export class GameSession {
       if (message.worldEpoch === this.#worldEpoch) this.#callbacks.speech?.(message);
     } else if (message.type === "speech-rejected") {
       this.#callbacks.speechRejected?.(message);
-    } else if (message.type === "ownership-denied") {
-      if (message.worldEpoch === this.#worldEpoch) this.#callbacks.ownershipDenied(message);
     } else if (message.type === "manipulation-changed") {
       if (message.worldEpoch === this.#worldEpoch) this.#callbacks.manipulation(message);
     } else if (message.type === "manipulation-denied") {
@@ -318,8 +321,16 @@ export class GameSession {
 
   #sendAck(ack: ReturnType<StateReceiver["applyCluster"]>["ack"]): void {
     const channel = this.#ownerChannel;
-    if (channel?.readyState === "open" && channel.bufferedAmount < 16_384)
-      channel.send(encodeStateAck(ack));
+    if (channel?.readyState !== "open" || channel.bufferedAmount >= 16_384) return;
+    const packet = encodeStateAck(ack);
+    this.#deferDisposable(() => {
+      if (
+        channel.readyState === "open" &&
+        channel === this.#ownerChannel &&
+        channel.bufferedAmount < 16_384
+      )
+        channel.send(packet);
+    });
   }
 
   async #acceptRtcOffer(socket: WebSocket, message: RtcOfferMessage): Promise<void> {
@@ -328,7 +339,7 @@ export class GameSession {
     this.#closeRtc();
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: message.iceServers });
-    const owner = peer.createDataChannel("gurgur-owner-v5", {
+    const owner = peer.createDataChannel("gurgur-owner-v6", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -337,7 +348,7 @@ export class GameSession {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v5" ||
+        state.label !== "gurgur-state-v6" ||
         this.#stateChannel
       ) {
         state.close();
@@ -348,7 +359,7 @@ export class GameSession {
       state.addEventListener("open", () => this.#maybeTransportReady());
       state.addEventListener("message", (messageEvent) => {
         if (this.#peerConnection !== peer || !(messageEvent.data instanceof ArrayBuffer)) return;
-        this.#defer(() => {
+        this.#deferDisposable(() => {
           if (this.#peerConnection === peer)
             this.#handleBinary(socket, messageEvent.data as ArrayBuffer);
         });
@@ -408,14 +419,24 @@ export class GameSession {
   }
 
   #defer(callback: () => void): void {
-    if (this.#simulatedLatencyMs === 0) {
+    this.#schedule(callback, this.#simulatedLatencyMs);
+  }
+
+  #deferDisposable(callback: () => void): void {
+    if (this.#random() < this.#simulatedLossRate) return;
+    const jitter = (this.#random() * 2 - 1) * this.#simulatedJitterMs;
+    this.#schedule(callback, Math.max(0, this.#simulatedLatencyMs + jitter));
+  }
+
+  #schedule(callback: () => void, delayMs: number): void {
+    if (delayMs === 0) {
       callback();
       return;
     }
     const timer = window.setTimeout(() => {
       this.#timers.delete(timer);
       callback();
-    }, this.#simulatedLatencyMs);
+    }, delayMs);
     this.#timers.add(timer);
   }
 
@@ -478,6 +499,17 @@ export class GameSession {
       if (generation === this.#worldLoadGeneration) socket.close(4011, "world load failed");
     }
   }
+}
+
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
 }
 
 function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {

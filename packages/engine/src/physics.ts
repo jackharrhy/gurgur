@@ -542,11 +542,23 @@ export class PhysicsWorld {
   }
 
   setKinematicTarget(id: RuntimeId, position: Vec3, seconds: number): void {
+    this.setKinematicTargetTransform(id, position, this.state(id).rotation, seconds);
+  }
+
+  setKinematicTargetTransform(
+    id: RuntimeId,
+    position: Vec3,
+    rotation: Quat,
+    seconds: number,
+  ): void {
     if (!Number.isFinite(seconds) || seconds <= 0)
       throw new Error("kinematic target duration must be positive");
     this.#box3d.b3Body_SetTargetTransform(
       this.#resolve(id),
-      { p: position, q: { v: { x: 0, y: 0, z: 0 }, s: 1 } },
+      {
+        p: position,
+        q: { v: { x: rotation.x, y: rotation.y, z: rotation.z }, s: rotation.w },
+      },
       seconds,
       true,
     );

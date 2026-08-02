@@ -2,6 +2,9 @@
 
 Status: accepted, 2026-07-26.
 
+Generalized to loose props by
+[0022](0022-centralized-shared-rigidbody-physics.md), 2026-07-31.
+
 Players may directly pull a jointed `func_physics`, but that interaction does
 not transfer body or graph authority. The browser owns an exclusive,
 short-lived manipulation claim and publishes a smoothed desired hit-point

@@ -532,7 +532,7 @@ export const entityDefinitions = {
       targetname: targetNameProperty("Optional name for constraint attachment", {
         optional: true,
       }),
-      grabbable: booleanProperty("Allow an unjointed body to receive a grab lease", {
+      grabbable: booleanProperty("Allow loose centre-of-mass pickup", {
         default: true,
       }),
       manipulable: booleanProperty(

@@ -6,8 +6,6 @@ import type {
   ManipulationDeniedMessage,
   ManipulationDropMessage,
   ManipulationRequestMessage,
-  OwnershipDeniedMessage,
-  OwnershipRequestMessage,
   PingMessage,
   PongMessage,
   RtcAnswerMessage,
@@ -40,7 +38,6 @@ export function decodeClientControl(text: string): ClientControlMessage {
   if (value.type === "ping") return ping(value);
   if (value.type === "rtc-answer") return rtcAnswer(value);
   if (value.type === "speak") return speak(value);
-  if (value.type === "ownership-request") return ownershipRequest(value);
   if (value.type === "manipulation-request") return manipulationRequest(value);
   if (value.type === "manipulation-drop") return manipulationDrop(value);
   if (value.type === "use-request") return useRequest(value);
@@ -54,7 +51,6 @@ export type ServerTextMessage =
   | WorldManifestMessage
   | SpeechMessage
   | SpeechRejectedMessage
-  | OwnershipDeniedMessage
   | ManipulationChangedMessage
   | ManipulationDeniedMessage;
 
@@ -66,7 +62,6 @@ export function decodeServerControl(text: string): ServerTextMessage {
   if (value.type === "rtc-offer") return rtcOffer(value);
   if (value.type === "speech") return speech(value);
   if (value.type === "speech-rejected") return speechRejected(value);
-  if (value.type === "ownership-denied") return ownershipDenied(value);
   if (value.type === "manipulation-changed") return manipulationChanged(value);
   if (value.type === "manipulation-denied") return manipulationDenied(value);
   throw new Error("unknown control packet type");
@@ -228,32 +223,6 @@ function speechRejected(value: RecordValue): SpeechRejectedMessage {
   return value as SpeechRejectedMessage;
 }
 
-function ownershipRequest(value: RecordValue): OwnershipRequestMessage {
-  exact(value, [
-    "type",
-    "protocolVersion",
-    "worldEpoch",
-    "requestId",
-    "target",
-    "authorityVersion",
-    "holdDistance",
-    "relativeRotation",
-  ]);
-  if (
-    !safeInteger(value.worldEpoch, 0) ||
-    !safeInteger(value.requestId, 0) ||
-    !runtimeId(value.target) ||
-    !safeInteger(value.authorityVersion, 0) ||
-    !finite(value.holdDistance) ||
-    value.holdDistance < 0.25 ||
-    value.holdDistance > 10 ||
-    !quat(value.relativeRotation)
-  ) {
-    throw new Error("ownership request fields are invalid");
-  }
-  return value as OwnershipRequestMessage;
-}
-
 function manipulationRequest(value: RecordValue): ManipulationRequestMessage {
   exact(value, [
     "type",
@@ -310,19 +279,6 @@ function useRequest(value: RecordValue): UseRequestMessage {
     throw new Error("use request fields are invalid");
   }
   return value as UseRequestMessage;
-}
-
-function ownershipDenied(value: RecordValue): OwnershipDeniedMessage {
-  exact(value, ["type", "protocolVersion", "worldEpoch", "requestId", "target", "reason"]);
-  if (
-    !safeInteger(value.worldEpoch, 0) ||
-    !safeInteger(value.requestId, 0) ||
-    !runtimeId(value.target) ||
-    !["stale", "unavailable", "out-of-range"].includes(value.reason as string)
-  ) {
-    throw new Error("ownership denial fields are invalid");
-  }
-  return value as OwnershipDeniedMessage;
 }
 
 function manipulationChanged(value: RecordValue): ManipulationChangedMessage {
@@ -424,7 +380,7 @@ function authorityDescriptor(value: RecordValue): boolean {
   return (
     (value.ownerPlayerId === null || runtimeId(value.ownerPlayerId)) &&
     safeInteger(value.authorityVersion, 0) &&
-    (value.transferPolicy === "fixed" || value.transferPolicy === "grab-lease")
+    value.transferPolicy === "fixed"
   );
 }
 
@@ -432,12 +388,6 @@ function runtimeId(value: unknown): boolean {
   if (!record(value)) return false;
   exact(value, ["index", "generation"]);
   return safeInteger(value.index, 0) && safeInteger(value.generation, 0);
-}
-
-function quat(value: unknown): boolean {
-  if (!record(value)) return false;
-  exact(value, ["x", "y", "z", "w"]);
-  return finite(value.x) && finite(value.y) && finite(value.z) && finite(value.w);
 }
 
 function vec3(value: unknown): boolean {

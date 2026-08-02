@@ -545,7 +545,7 @@ ${cube}
     });
   });
 
-  test("rejects ambiguous and grab-leased constraint graphs", () => {
+  test("rejects ambiguous constraint graphs and requires explicit manipulation intent", () => {
     expect(() =>
       compileWorld(
         baseMap(`

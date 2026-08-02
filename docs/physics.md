@@ -55,17 +55,23 @@ substeps. Forces, impulses, kinematic targets, controller input, and mechanism
 commands are applied before the step. Contacts, sensors, moved bodies, sleep
 transitions, and deferred destruction are processed afterward.
 
-Bun dynamically simulates unowned props, fixed-authority mechanisms, MCP
-players, and diagnostics. A browser worker dynamically simulates that browser's
-player and any prop for which it holds a grab lease. Every other network object
-in either world is a motion-disabled kinematic proxy driven by received state.
-Ordinary contact never changes authority. The authority registry, not the
-presence of a local body, decides which controller and bodies may advance.
+Bun dynamically simulates every shared prop, fixed-authority mechanism, MCP
+player, and diagnostic body. A browser worker simulates only that browser's
+geometric player controller. Every shared network body in a browser world is a
+motion-disabled kinematic proxy. Ordinary contact never changes authority.
+
+Disposable state is sampled by source simulation tick rather than receipt time.
+Browser collision proxies and Bun's externally owned player proxies are driven
+by position-and-rotation kinematic targets at fixed-step boundaries from the
+same eight-tick timeline. Packet callbacks update buffers and capability flags;
+they do not teleport ordinary collision proxies.
 
 The host and browser loops execute at most four catch-up ticks per turn.
 Persistence captures host application state only at a completed tick boundary.
 Locally owned rendering interpolates consecutive completed worker steps. Remote
-rendering uses a separate 100 ms state buffer and never extrapolates.
+render tracks adapt independently from four to eight source ticks using recent
+late-arrival and underrun evidence and never extrapolate. Render timing does not
+alter the fixed eight-tick collision or host player-proxy tracks.
 
 ## Coordinates and scale
 
@@ -113,8 +119,8 @@ disabled.
 
 Joint graphs are always Bun authority. Browsers receive each connected body as a
 kinematic collision/query proxy and never recreate the graph. These bodies have
-`fixed` transfer policy, and compilation rejects a graph containing a
-grab-leased part.
+`fixed` transfer policy, and compilation requires explicitly non-grabbable
+interaction before a body may join a graph.
 
 Direct manipulation does not relax that rule. Bun creates an untracked private
 kinematic helper body and a Box3D motor/control joint from it to the captured
@@ -131,12 +137,11 @@ support point velocity to the geometric player controller. This gives rigid
 bodies and players the same physical conveyor motion without translating the
 conveyor body.
 
-Gravity fields are evaluated by the peer currently simulating an object.
-Highest priority wins; ties use compiled entity order. The selected factor
-multiplies the object's authored baseline `gravityScale`, including controller
-gravity for players. Leaving the last overlapping shape restores the baseline.
-Ownership handoff does not bake the temporary field factor into authored or
-persisted body state.
+Gravity fields are evaluated by the relevant authority. Browsers evaluate them
+for their player; Bun evaluates them for shared bodies. Highest priority wins;
+ties use compiled entity order. The selected factor multiplies authored
+`gravityScale`, including controller gravity. Leaving the last overlapping
+shape restores the baseline.
 
 ## Constraint presentation
 
@@ -165,7 +170,13 @@ Each controller tick:
 3. resolves penetration and desired displacement with `b3SolvePlanes`;
 4. limits motion with `b3World_CastMover`;
 5. repeats for at most five iterations with a 1 cm movement tolerance;
-6. clips velocity and applies bounded reaction impulses to contacted dynamic bodies.
+6. clips velocity and applies bounded reaction impulses only where the current
+   authority also owns the dynamic body.
+
+Browser-side shared bodies are kinematic proxies, so local player movement
+cannot author an impulse for them. Bun's delayed kinematic player proxy can
+push Bun-owned bodies in the shared solver. This is the selected one-way
+player/body coupling contract.
 
 A fixed-tick controller result must be finite and move no more than one metre.
 The current authority rejects a larger Box3D depenetration result, retains the
@@ -191,32 +202,36 @@ mover and proxy atomically.
 Sensor shapes remain visible to proxy overlap events but are excluded from
 geometric mover, capsule-fit, sweep, and ordinary controller-ray queries.
 
-## Prop carry controller
+## Prop target controller
 
-Grabbing is a game-owned target controller, not a rope or distance constraint.
-The browser chooses the first grabbable body on its 3.25 m view ray and requests
-an exclusive lease containing that identity, current authority version, hold
-distance, and captured relative rotation. Bun validates type, version, epoch,
-finite values, availability, and reach against the latest player proxy; the
-first valid request wins. A grant atomically supplies complete state before the
-browser makes the prop dynamic.
+Grabbing is a game-owned target controller, not ownership transfer. The browser
+chooses the first grabbable body on its 3.25 m view ray and requests an
+exclusive claim containing identity, current authority version, centre-of-mass
+anchor, and hold distance. Bun validates type, version, epoch, finite values,
+availability, and reach; the first valid request wins.
 
-The controller derives a stable carry distance from compiled prop extent, then
-advances a target point toward the player’s chest-forward view at a bounded
-speed. A filtered ray that excludes the held body shortens that target before
-world geometry.
+The browser derives stable distance from compiled prop extent and advances a
+target toward the player's chest-forward view at bounded speed. A filtered ray
+that excludes the target shortens motion before world geometry. Desired
+rotation preserves the orientation captured relative to player yaw.
 
-The engine converts position error into a capped desired velocity and applies a
-mass-scaled impulse with a maximum acceleration. This gives light and heavy props
-the same bounded response without changing authored mass. Angular velocity is
-driven toward the orientation captured relative to player yaw at acquisition,
-with bounded angular speed and acceleration. Driving the center of mass avoids
-off-axis torque from an arbitrary face hit.
+At 60 Hz the browser publishes only that disposable target. Bun's private
+control joint converts target error into force and torque while the prop,
+contacts, and every other shared body remain in one solver. Driving the centre
+of mass avoids arbitrary face-hit torque for loose props; explicitly
+manipulable contraptions retain their hit offset. Bun publishes the manipulated
+body as a 60 Hz hot state while ordinary body state remains 30 Hz.
 
-The owning browser runs target smoothing and obstruction clearance. It drops a
-body that becomes invalid, exceeds maximum range, or remains more than 1.75 m
-behind its controller target for one second. A reliable drop includes final
-transform and linear/angular velocity; the browser immediately returns to a
-proxy while Bun atomically increments the authority version and resumes dynamic
-simulation. Bun owns lease exclusivity, host takeover, lifecycle, and
-persistence of the latest accepted state.
+After Bun reliably grants a loose-prop claim, the renderer may move only that
+prop's mesh from the local target over one 60 Hz interval. The physics worker's
+ordinary kinematic proxy remains authoritative for player collision and queries.
+The speculative pose is never installed in Box3D or encoded on the wire. On
+release its visual offset converges to the authoritative render track with
+bounded linear and angular correction. Contraption presentation stays entirely
+authoritative because a target-following part without its joint graph would be
+misleading.
+
+Release destroys only the temporary control joint. The prop never changes body
+type, authority version, solver, or persisted identity, so there is no final
+pose/velocity physics handoff to reconcile. Presentation reconciliation changes
+only the claimant's rendered mesh.
