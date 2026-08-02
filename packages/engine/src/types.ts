@@ -133,6 +133,26 @@ export type NetworkPlayerState = {
   stepCooldown: number;
 };
 
+export type PredictionHeldBody = {
+  claimVersion: number;
+  startInputSequence: number | null;
+  localAnchor: Vec3;
+  body: NetworkBodyState;
+  distance: number;
+  relativeRotation: Quat;
+  targetPosition: Vec3;
+  targetRotation: Quat;
+  errorSeconds: number;
+};
+
+export type PredictionCheckpointPacket = {
+  worldEpoch: number;
+  serverTick: number;
+  lastProcessedInputSequence: number | null;
+  player: NetworkPlayerState;
+  held: PredictionHeldBody | null;
+};
+
 export type NetworkObjectState = NetworkBodyState | NetworkPlayerState;
 
 export type StateDelta = {
@@ -157,13 +177,6 @@ export type StateDelta = {
     stepCooldown: number;
   };
 };
-
-export type OwnedStatePacket = {
-  worldEpoch: number;
-  states: NetworkObjectState[];
-};
-
-export type OwnerCommitPacket = OwnedStatePacket;
 
 export type StateClusterPacket = {
   worldEpoch: number;
@@ -208,7 +221,7 @@ export type PlayerStateSnapshot = {
 
 export type WelcomeMessage = {
   type: "welcome";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   playerId: RuntimeId;
   mapRevision: string;
@@ -220,7 +233,7 @@ export type WelcomeMessage = {
 
 export type HelloMessage = {
   type: "hello";
-  protocolVersion: 6;
+  protocolVersion: 7;
   mapRevision: string | null;
   worldEpoch: number | null;
   sessionToken: string | null;
@@ -229,7 +242,7 @@ export type HelloMessage = {
 
 export type PingMessage = {
   type: "ping";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -237,7 +250,7 @@ export type PingMessage = {
 
 export type PongMessage = {
   type: "pong";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   nonce: number;
   sentAtMs: number;
@@ -246,7 +259,7 @@ export type PongMessage = {
 
 export type RtcOfferMessage = {
   type: "rtc-offer";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   description: { type: "offer"; sdp: string };
   iceServers: Array<{ urls: string; username?: string; credential?: string }>;
@@ -254,7 +267,7 @@ export type RtcOfferMessage = {
 
 export type RtcAnswerMessage = {
   type: "rtc-answer";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   description: { type: "answer"; sdp: string };
 };
@@ -263,7 +276,7 @@ export type SpeechVoice = 0 | 1 | 2 | 3 | 4;
 
 export type SpeakMessage = {
   type: "speak";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   text: string;
@@ -271,7 +284,7 @@ export type SpeakMessage = {
 
 export type SpeechMessage = {
   type: "speech";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   speakerId: RuntimeId;
@@ -281,7 +294,7 @@ export type SpeechMessage = {
 
 export type SpeechRejectedMessage = {
   type: "speech-rejected";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   reason: "rate-limited" | "world-changed";
@@ -290,7 +303,7 @@ export type SpeechRejectedMessage = {
 
 export type ManipulationRequestMessage = {
   type: "manipulation-request";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   target: RuntimeId;
@@ -301,7 +314,7 @@ export type ManipulationRequestMessage = {
 
 export type ManipulationDropMessage = {
   type: "manipulation-drop";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   target: RuntimeId;
   authorityVersion: number;
@@ -310,7 +323,7 @@ export type ManipulationDropMessage = {
 
 export type ManipulationChangedMessage = {
   type: "manipulation-changed";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number | null;
   target: RuntimeId;
@@ -321,7 +334,7 @@ export type ManipulationChangedMessage = {
 
 export type ManipulationDeniedMessage = {
   type: "manipulation-denied";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   target: RuntimeId;
@@ -340,7 +353,7 @@ export type ManipulationStatePacket = {
 
 export type UseRequestMessage = {
   type: "use-request";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   requestId: number;
   target: RuntimeId;
@@ -365,7 +378,7 @@ export type ServerControlMessage =
 
 export type InputCommand = {
   type: "input";
-  protocolVersion: 6;
+  protocolVersion: 7;
   worldEpoch: number;
   sequence: number;
   clientTick: number;
@@ -378,6 +391,11 @@ export type InputCommand = {
   interactCounter: number;
   interactTarget: RuntimeId | null;
   primaryCounter: number;
+};
+
+export type InputBundlePacket = {
+  worldEpoch: number;
+  commands: InputCommand[];
 };
 
 export type ClientPacket = ClientControlMessage | InputCommand;

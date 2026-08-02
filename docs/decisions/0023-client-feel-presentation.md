@@ -1,6 +1,9 @@
 # 0023: Separate visual latency from gameplay authority
 
-Status: accepted, 2026-08-01. Supplements
+Status: superseded by [0024](0024-source-style-networked-physics.md),
+2026-08-02. Adaptive distant-object buffering remains; the fixed collision
+delay and mesh-only speculative held transform do not. Originally accepted
+2026-08-01 as a supplement to
 [0022](0022-centralized-shared-rigidbody-physics.md).
 
 ## Decision

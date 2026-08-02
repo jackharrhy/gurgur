@@ -1,6 +1,6 @@
 # Networked physics client feel: research and decision guide
 
-This guide answers a narrower question than the
+This guide records the narrower question that followed protocol v6:
 [networked-physics deep dive](networked-physics-deep-dive.md): can Gurgur keep
 protocol v6's centralized shared-body authority and recover the client feel that
 was lost when loose props stopped being browser-owned?
@@ -10,13 +10,38 @@ Research baseline and selected follow-up: 2026-08-01. The code comparisons use
 and
 [Source SDK 2013 `88fa198`](https://github.com/ValveSoftware/source-sdk-2013/tree/88fa198fba3fb85d46d4c95018254693fdc3af0a).
 The measurements below are exploratory characterizations, not release claims.
-The first architecture described here is now selected by
-[decision 0023](decisions/0023-client-feel-presentation.md): per-track adaptive
-render delay, 60 Hz manipulation targets and hot body state, and an isolated
-target-following loose-prop view. The stronger shadow-physics prototype remains
-conditional on retained contact fixtures and play testing.
+The first architecture described here was selected by
+[decision 0023](decisions/0023-client-feel-presentation.md), then rejected after
+play showed that a target-following mesh was not a plausible physical view.
+[Decision 0024](decisions/0024-source-style-networked-physics.md) records the
+replacement.
 
-## Answer
+## 2026-08-02 answer
+
+There was more work to do. Protocol v6 improved authoritative shared-body
+correctness but did not complete the client simulation and reconciliation half
+of a Source-style design. Its pickup path was intentionally mesh-only and
+reached the grab target in one frame; it was not interpolation and it was not a
+physical simulation. The walk-over glitch came from rendering, collision, and
+Bun authority using different delayed poses.
+
+Protocol v7 therefore makes Bun authoritative for players as well as shared
+bodies, predicts the local player and one confirmed held loose prop through the
+same fixed-tick Box3D controllers on both peers, and reconciles from checkpoints
+by replaying unacknowledged commands. Nearby interaction bodies use newest
+collision state and collision-aligned presentation; distant objects remain
+buffered. This is the bounded “full Source mode” appropriate to Gurgur. It does
+not attempt full-world rollback or clone joint graphs.
+
+Clean `main` is still an important feel oracle: it proves that the existing
+controller, grab policy, and Box3D integration can feel good when the player and
+held prop share one local simulation. Protocol v7 preserves that useful local
+shape while removing clean main's browser-authored gameplay truth. Box3D is not
+replaced because two independent adapters agree within the conformance budget;
+another solver would receive the same authority and timeline bugs if the
+network model stayed wrong.
+
+## Historical protocol-v6 answer
 
 Keep the current network authority model for now. It fixed a real correctness
 problem: every shared rigid-body contact now has one authoritative solver. The
@@ -426,7 +451,7 @@ Functional pickup tests are not feel tests. “The body eventually moved” can 
 with 300 ms latency. Every feel gate must name an input edge, a visible response,
 a percentile, a duration, and the browser/display/network profile.
 
-## Decision rule
+## Superseded decision rule
 
 Decision 0023 selected the first of these prototypes using the same stage trace
 and real-browser fixtures:
@@ -438,8 +463,9 @@ and real-browser fixtures:
 
 Keep protocol v6 while the selected prototype meets the response, correction,
 and discontinuity budgets without allowing speculative state into gameplay.
-Escalate to the stronger shadow-body prototype if retained contact scenes fail
-visual plausibility. Move to server-authoritative player prediction only if the
-desired interaction contract fails because the local player needs reciprocal
-shared-body physics—not merely because an intentionally delayed prop was
-rendered without its missing local presentation layer.
+The retained play test did fail visual plausibility: the view teleported to the
+target and contradicted the collision proxy. Decision 0024 therefore takes the
+previously conditional server-authoritative player prediction route and the
+stronger real Box3D held-body path. This final section remains as the historical
+decision boundary that exposed why the v6 gate was inadequate, not as current
+implementation guidance.

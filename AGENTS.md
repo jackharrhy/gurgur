@@ -14,29 +14,28 @@ Route work through the canonical document for the subsystem:
 
 Keep these invariants:
 
-- Authority belongs to one peer per network object. A browser owns its player;
-  Bun owns every shared rigid body plus mechanisms, triggers, movers, and
-  diagnostic actors.
-- Only an object's current authority runs its controller or dynamic simulation.
-  Every nonowner represents it as a non-simulating collision proxy.
-- Player authority, manipulation claims, lifecycle, persistence, mechanisms,
-  spawning, deletion, and global reset remain coordinated by Bun.
+- Bun owns every network player and shared rigid body plus mechanisms, triggers,
+  movers, and diagnostic actors. Browsers never publish gameplay transforms.
+- A browser predicts only its local player and one Bun-confirmed loose held
+  prop. Every other nonowner representation is a non-simulating collision proxy.
+- Player simulation, manipulation claims, lifecycle, persistence, mechanisms,
+  spawning, deletion, and global reset remain authoritative in Bun.
 - Every physics authority advances Box3D at 60 Hz with four substeps. Never step
   physics by render time or a remote peer's clock.
-- There is no gameplay movement prediction, input replay, reconciliation,
-  rigid-body extrapolation, or collision-based authority transfer. After Bun
-  confirms a loose-prop claim, the holder may run an isolated speculative
-  rendered view; it never feeds physics, queries, transport, or persistence.
-- Reliable lifecycle/authority and disposable owner state use separate transport
-  semantics. Never put current-state clusters behind an ordered reliable queue.
+- Prediction uses the same `stepPlayerController`, `stepPropGrab`, Box3D adapter,
+  fixed tick, and four substeps as Bun. Checkpoints restore authoritative state
+  and replay unacknowledged commands; prediction never becomes host truth.
+- Reliable lifecycle/discontinuities and disposable input/current state use
+  separate transport semantics. Never put current input or state clusters behind
+  an ordered reliable queue.
 - `authorityVersion`, per-object state sequence, source tick, `worldEpoch`,
   `mapRevision`, and persistence version are separate.
 - TrenchBroom Valve 220 maps and the TypeScript entity schema are authored truth.
 - Joint-connected and loose dynamic bodies are fixed to Bun and never transfer
   authority to a browser.
-- A browser may hold an exclusive manipulation claim on one fixed-authority
-  body. Bun applies the browser's disposable target through a native control
-  joint and keeps every shared contact in one dynamic solver; this is not
+- A loose grab target is derived by Bun from authoritative player commands and
+  predicted locally only after confirmation. Explicit jointed manipulation may
+  send a disposable target to Bun's native control joint; neither path is
   ownership.
 
 Canonical documents state selected behavior. Put TODOs, sequencing, and

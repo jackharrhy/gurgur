@@ -15,6 +15,7 @@ import type { WorldMessage } from "@gurgur/game";
 import { parseDevFollowCamera, type DevFollowCamera } from "./dev-follow";
 import { installSpeechChat, type SpeechChat } from "./speech-chat";
 import { SpeechSynthesizer } from "./speech-synthesis";
+import { PredictionTraceRecorder, type PredictionTracePose } from "./prediction-trace";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#world");
 if (!canvas) throw new Error("game canvas is missing");
@@ -136,6 +137,8 @@ const worldAudio = new WorldAudio(audioAssetUrls, (state) => {
 let localPlayerId: RuntimeId | null = null;
 let currentWorld: WorldMessage | null = null;
 let workerDiscardedCatchUpSeconds = 0;
+const predictionTrace = new PredictionTraceRecorder();
+const authoritativeStates = new Map<string, NetworkObjectState>();
 
 const diagnosticBodies = new Map<
   string,
@@ -199,6 +202,7 @@ if (testEnabled) {
       physics: () => ({
         discardedCatchUpSeconds: workerDiscardedCatchUpSeconds,
       }),
+      predictionTrace: () => predictionTrace.frames(),
       stallPhysicsWorker: (durationMs: number) => owner.stallForTest(durationMs),
     }),
   });
@@ -258,6 +262,7 @@ let ownerWorldGeneration = 0;
 let lastUseCounter = 0;
 let nextUseRequestId = 1;
 let inputMoving = false;
+let predictedBodyKey: string | null = null;
 const enableInputIfReady = (): void => {
   if (stateTransportReady && ownerPhysicsReady && loadedWorldEpoch !== null) {
     input.setWorld(loadedWorldEpoch);
@@ -265,17 +270,6 @@ const enableInputIfReady = (): void => {
   } else {
     document.body.dataset.inputReady = "false";
   }
-};
-const isLocallyOwned = (id: RuntimeId): boolean => {
-  if (!currentWorld || !localPlayerId) return false;
-  const descriptor = currentWorld.runtimeEntities.find(
-    (candidate) => candidate.id.index === id.index && candidate.id.generation === id.generation,
-  );
-  return Boolean(
-    descriptor?.ownerPlayerId &&
-    descriptor.ownerPlayerId.index === localPlayerId.index &&
-    descriptor.ownerPlayerId.generation === localPlayerId.generation,
-  );
 };
 const updateObservedStates = (states: readonly NetworkObjectState[]): void => {
   for (const state of states) {
@@ -303,22 +297,75 @@ const updateObservedStates = (states: readonly NetworkObjectState[]): void => {
       };
   }
 };
+const rememberAuthoritative = (states: readonly NetworkObjectState[]): void => {
+  for (const state of states)
+    authoritativeStates.set(`${state.id.index}:${state.id.generation}`, structuredClone(state));
+};
+const pose = (state: NetworkObjectState | null): PredictionTracePose | null =>
+  state
+    ? {
+        position: { ...state.position },
+        rotation: { ...state.rotation },
+      }
+    : null;
 const owner = createOwnershipClient({
-  localStates(states, producedAtMs, discardedCatchUpSeconds) {
+  localStates(states, producedAtMs, discardedCatchUpSeconds, reconciled, trace) {
     workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
     document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
     document.body.dataset.ownerStateAt = String(performance.now());
-    renderer.applyLocalStates(states, producedAtMs);
+    renderer.applyLocalStates(states, producedAtMs, reconciled);
+    renderer.setPredictionInteractions([...trace.contactIds, ...trace.supportIds]);
+    const predictedBody = states.find((state) => state.kind === "body") ?? null;
+    predictedBodyKey = predictedBody
+      ? `${predictedBody.id.index}:${predictedBody.id.generation}`
+      : null;
     updateObservedStates(states);
+    const predictedPlayer = states.find((state) => state.kind === "player") ?? null;
+    if (predictedPlayer) {
+      const playerKey = `${predictedPlayer.id.index}:${predictedPlayer.id.generation}`;
+      const renderedPlayer = presentedStates.get(playerKey) ?? null;
+      const authoritativePlayer = authoritativeStates.get(playerKey) ?? null;
+      const heldKey = predictedBody
+        ? `${predictedBody.id.index}:${predictedBody.id.generation}`
+        : null;
+      const authoritativeHeld = heldKey ? (authoritativeStates.get(heldKey) ?? null) : null;
+      const renderedHeld = heldKey ? (presentedStates.get(heldKey) ?? null) : null;
+      predictionTrace.record({
+        atMs: producedAtMs,
+        inputSequence: trace.inputSequence,
+        serverTick: predictedPlayer.sourceTick,
+        acknowledgment: trace.acknowledgment,
+        replayCount: trace.replayCount,
+        contactIds: trace.contactIds,
+        supportIds: trace.supportIds,
+        player: {
+          authoritative: pose(authoritativePlayer),
+          collision: pose(predictedPlayer),
+          predicted: pose(predictedPlayer),
+          rendered: renderedPlayer ? structuredClone(renderedPlayer) : null,
+        },
+        held: predictedBody
+          ? {
+              authoritative: pose(authoritativeHeld),
+              collision: pose(predictedBody),
+              predicted: pose(predictedBody),
+              rendered: renderedHeld ? structuredClone(renderedHeld) : null,
+            }
+          : null,
+      });
+    }
   },
-  ownerStates(states) {
-    session.sendOwnerStates(states);
+  inputCommand(command) {
+    const sent = session.sendInput(command);
+    if (testEnabled) {
+      document.body.dataset.predictedInputSequence = String(command.sequence);
+      document.body.dataset.predictedInputSent = String(sent);
+    }
   },
   manipulationRequest(message) {
     session.requestManipulation(message);
   },
   manipulationState(message) {
-    const speculative = renderer.applyLocalManipulationTarget(message);
     const sent = session.sendManipulationState(message);
     if (testEnabled) {
       document.body.dataset.manipulationStateAt = String(performance.now());
@@ -327,14 +374,11 @@ const owner = createOwnershipClient({
       );
       document.body.dataset.manipulationStateSent = String(sent);
       document.body.dataset.manipulationState = JSON.stringify(message);
-      document.body.dataset.speculativeManipulation = String(speculative);
+      document.body.dataset.speculativeManipulation = "false";
     }
   },
   manipulationDrop(message) {
     session.dropManipulation(message);
-  },
-  ownerCommit(states) {
-    session.commitOwnerStates(states);
   },
   error(message) {
     document.body.dataset.ownerPhysics = "error";
@@ -414,6 +458,8 @@ session = new GameSession(
       diagnosticBodies.clear();
       presentedStates.clear();
       observedStates.clear();
+      authoritativeStates.clear();
+      predictionTrace.reset();
       if (testEnabled)
         for (const runtime of message.runtimeEntities) {
           if (runtime.kind !== "world-entity") continue;
@@ -443,6 +489,7 @@ session = new GameSession(
       }
     },
     bootstrap(states, receivedAtMs) {
+      rememberAuthoritative(states);
       renderer.applyBootstrap(states, receivedAtMs);
       updateObservedStates(states);
       const world = currentWorld;
@@ -459,13 +506,26 @@ session = new GameSession(
       });
     },
     state(states, receivedAtMs) {
+      rememberAuthoritative(states);
       renderer.applyNetworkStates(
-        states.filter((state) => !isLocallyOwned(state.id)),
+        states.filter(
+          (state) =>
+            `${state.id.index}:${state.id.generation}` !== localPlayerKey &&
+            `${state.id.index}:${state.id.generation}` !== predictedBodyKey,
+        ),
         receivedAtMs,
       );
-      owner.pushNetworkStates(states, receivedAtMs);
+      owner.pushNetworkStates(states);
       updateObservedStates(states);
       document.body.dataset.worldEpoch = String(loadedWorldEpoch ?? "");
+    },
+    checkpoint(message) {
+      rememberAuthoritative([message.player, ...(message.held ? [message.held.body] : [])]);
+      owner.checkpoint(message);
+      document.body.dataset.lastAcknowledgedInputSequence = String(
+        message.lastProcessedInputSequence ?? -1,
+      );
+      document.body.dataset.predictionCheckpointTick = String(message.serverTick);
     },
     ownership(message, receivedAtMs) {
       const descriptor = currentWorld?.runtimeEntities.find(
@@ -478,9 +538,8 @@ session = new GameSession(
       }
       const local =
         localPlayerId !== null &&
-        message.ownerPlayerId !== null &&
-        message.ownerPlayerId.index === localPlayerId.index &&
-        message.ownerPlayerId.generation === localPlayerId.generation;
+        message.id.index === localPlayerId.index &&
+        message.id.generation === localPlayerId.generation;
       renderer.applyOwnershipState(message.state, local, receivedAtMs);
       owner.ownershipChanged(message);
       updateObservedStates([message.state]);
@@ -503,7 +562,6 @@ session = new GameSession(
     clock(serverTick, receivedAtMs, oneWayDelayMs) {
       document.body.dataset.serverTick = String(serverTick);
       renderer.updateClock(serverTick, receivedAtMs, oneWayDelayMs);
-      owner.updateClock(serverTick, receivedAtMs, oneWayDelayMs);
     },
     network(rttMs, jitterMs) {
       document.body.dataset.rttMs = rttMs.toFixed(1);

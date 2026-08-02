@@ -1,11 +1,12 @@
-import { STATE_CLUSTER_MAX_BYTES } from "./config";
+import { INPUT_BUNDLE_REDUNDANCY, PROTOCOL_VERSION, STATE_CLUSTER_MAX_BYTES } from "./config";
 import type {
   BootstrapStatePacket,
+  InputBundlePacket,
+  InputCommand,
   ManipulationStatePacket,
   NetworkObjectState,
-  OwnedStatePacket,
-  OwnerCommitPacket,
   OwnershipChangedPacket,
+  PredictionCheckpointPacket,
   Quat,
   RuntimeId,
   StateAckPacket,
@@ -14,13 +15,13 @@ import type {
   Vec3,
 } from "./types";
 
-export const OWNED_STATE_TAG = 16;
 export const STATE_CLUSTER_TAG = 17;
 export const STATE_ACK_TAG = 18;
 export const BOOTSTRAP_STATE_TAG = 19;
 export const OWNERSHIP_CHANGED_TAG = 20;
-export const OWNER_COMMIT_TAG = 22;
 export const MANIPULATION_STATE_TAG = 23;
+export const INPUT_BUNDLE_TAG = 24;
+export const PREDICTION_CHECKPOINT_TAG = 25;
 
 export const STATE_FIELD_POSITION = 1 << 0;
 export const STATE_FIELD_ROTATION = 1 << 1;
@@ -36,7 +37,6 @@ export const BODY_STATE_FIELDS =
   STATE_FIELD_FLAGS;
 export const PLAYER_STATE_FIELDS = BODY_STATE_FIELDS | STATE_FIELD_PLAYER;
 
-const MAX_OWNED_STATES = 4;
 const MAX_BOOTSTRAP_STATES = 2_048;
 const MAX_ACK_ENTRIES = 2_048;
 const NULL_REQUEST_ID = 0xffff_ffff;
@@ -208,34 +208,6 @@ export function applyStateDelta(
     throw new Error("invalid player state");
   }
   return { ...common, kind: "player", ...player };
-}
-
-export function encodeOwnedState(packet: OwnedStatePacket): ArrayBuffer {
-  if (packet.states.length > MAX_OWNED_STATES)
-    throw new Error("owner state packet contains too many objects");
-  return encodeStateList(OWNED_STATE_TAG, packet.worldEpoch, packet.states.map(fullStateDelta));
-}
-
-export function decodeOwnedState(bytes: ArrayBuffer | ArrayBufferView): OwnedStatePacket {
-  const packet = decodeStateList(bytes, OWNED_STATE_TAG, MAX_OWNED_STATES);
-  return {
-    worldEpoch: packet.worldEpoch,
-    states: packet.states.map((state) => applyStateDelta(null, state)),
-  };
-}
-
-export function encodeOwnerCommit(packet: OwnerCommitPacket): ArrayBuffer {
-  if (packet.states.length > MAX_OWNED_STATES)
-    throw new Error("owner commit contains too many objects");
-  return encodeStateList(OWNER_COMMIT_TAG, packet.worldEpoch, packet.states.map(fullStateDelta));
-}
-
-export function decodeOwnerCommit(bytes: ArrayBuffer | ArrayBufferView): OwnerCommitPacket {
-  const packet = decodeStateList(bytes, OWNER_COMMIT_TAG, MAX_OWNED_STATES);
-  return {
-    worldEpoch: packet.worldEpoch,
-    states: packet.states.map((state) => applyStateDelta(null, state)),
-  };
 }
 
 export function encodeStateCluster(packet: StateClusterPacket): ArrayBuffer {
@@ -435,10 +407,202 @@ export function decodeManipulationState(
   return packet;
 }
 
+export function encodeInputBundle(packet: InputBundlePacket): ArrayBuffer {
+  if (packet.commands.length < 1 || packet.commands.length > INPUT_BUNDLE_REDUNDANCY)
+    throw new Error("input bundle command count is invalid");
+  const writer = new Writer();
+  writer.u8(INPUT_BUNDLE_TAG);
+  writer.u32(packet.worldEpoch);
+  writer.u8(packet.commands.length);
+  let previousSequence = -1;
+  for (const command of packet.commands) {
+    validateInputCommand(command, packet.worldEpoch);
+    if (command.sequence <= previousSequence)
+      throw new Error("input bundle commands must be ordered by sequence");
+    previousSequence = command.sequence;
+    writeInputCommand(writer, command);
+  }
+  return writer.finish();
+}
+
+export function decodeInputBundle(bytes: ArrayBuffer | ArrayBufferView): InputBundlePacket {
+  const reader = new Reader(bytes);
+  reader.tag(INPUT_BUNDLE_TAG);
+  const worldEpoch = reader.u32();
+  const count = reader.u8();
+  if (count < 1 || count > INPUT_BUNDLE_REDUNDANCY)
+    throw new Error("input bundle command count is invalid");
+  const commands: InputCommand[] = [];
+  let previousSequence = -1;
+  for (let index = 0; index < count; index += 1) {
+    const command = readInputCommand(reader, worldEpoch);
+    if (command.sequence <= previousSequence)
+      throw new Error("input bundle commands must be ordered by sequence");
+    previousSequence = command.sequence;
+    commands.push(command);
+  }
+  reader.done();
+  return { worldEpoch, commands };
+}
+
+export function encodePredictionCheckpoint(packet: PredictionCheckpointPacket): ArrayBuffer {
+  if (
+    !Number.isSafeInteger(packet.serverTick) ||
+    packet.serverTick < 0 ||
+    (packet.lastProcessedInputSequence !== null &&
+      (!Number.isSafeInteger(packet.lastProcessedInputSequence) ||
+        packet.lastProcessedInputSequence < 0 ||
+        packet.lastProcessedInputSequence >= NULL_REQUEST_ID))
+  )
+    throw new Error("prediction checkpoint header is invalid");
+  const writer = new Writer();
+  writer.u8(PREDICTION_CHECKPOINT_TAG);
+  writer.u32(packet.worldEpoch);
+  writer.u32(packet.serverTick >>> 0);
+  writer.u32(packet.lastProcessedInputSequence ?? NULL_REQUEST_ID);
+  writeDelta(writer, fullStateDelta(packet.player));
+  writer.u8(packet.held ? 1 : 0);
+  if (packet.held) {
+    if (
+      !Number.isSafeInteger(packet.held.claimVersion) ||
+      packet.held.claimVersion < 1 ||
+      (packet.held.startInputSequence !== null &&
+        (!Number.isSafeInteger(packet.held.startInputSequence) ||
+          packet.held.startInputSequence < 0 ||
+          packet.held.startInputSequence >= NULL_REQUEST_ID)) ||
+      !Number.isFinite(packet.held.distance) ||
+      !Number.isFinite(packet.held.errorSeconds)
+    )
+      throw new Error("prediction held-body state is invalid");
+    writer.u32(packet.held.claimVersion);
+    writer.u32(packet.held.startInputSequence ?? NULL_REQUEST_ID);
+    writeVec3(writer, packet.held.localAnchor);
+    writeDelta(writer, fullStateDelta(packet.held.body));
+    writer.f32(packet.held.distance);
+    writeQuat(writer, packet.held.relativeRotation);
+    writeVec3(writer, packet.held.targetPosition);
+    writeQuat(writer, packet.held.targetRotation);
+    writer.f32(packet.held.errorSeconds);
+  }
+  return writer.finish();
+}
+
+export function decodePredictionCheckpoint(
+  bytes: ArrayBuffer | ArrayBufferView,
+): PredictionCheckpointPacket {
+  const reader = new Reader(bytes);
+  reader.tag(PREDICTION_CHECKPOINT_TAG);
+  const worldEpoch = reader.u32();
+  const serverTick = reader.u32();
+  const encodedSequence = reader.u32();
+  const player = applyStateDelta(null, readDelta(reader));
+  if (player.kind !== "player") throw new Error("prediction checkpoint requires player state");
+  const hasHeld = reader.u8();
+  if (hasHeld > 1) throw new Error("invalid prediction held-body marker");
+  let held: PredictionCheckpointPacket["held"] = null;
+  if (hasHeld === 1) {
+    const claimVersion = reader.u32();
+    const encodedStartInputSequence = reader.u32();
+    const localAnchor = readVec3(reader);
+    const body = applyStateDelta(null, readDelta(reader));
+    if (claimVersion < 1 || body.kind !== "body")
+      throw new Error("prediction held-body state is invalid");
+    held = {
+      claimVersion,
+      startInputSequence:
+        encodedStartInputSequence === NULL_REQUEST_ID ? null : encodedStartInputSequence,
+      localAnchor,
+      body,
+      distance: reader.f32(),
+      relativeRotation: readQuat(reader),
+      targetPosition: readVec3(reader),
+      targetRotation: readQuat(reader),
+      errorSeconds: reader.f32(),
+    };
+  }
+  reader.done();
+  return {
+    worldEpoch,
+    serverTick,
+    lastProcessedInputSequence: encodedSequence === NULL_REQUEST_ID ? null : encodedSequence,
+    player,
+    held,
+  };
+}
+
 export function binaryPacketTag(bytes: ArrayBuffer | ArrayBufferView): number {
   const view = byteView(bytes);
   if (view.byteLength === 0) throw new Error("empty binary packet");
   return view[0]!;
+}
+
+function writeInputCommand(writer: Writer, command: InputCommand): void {
+  writer.u32(command.sequence);
+  writer.u32(command.clientTick);
+  writer.f32(command.moveX);
+  writer.f32(command.moveZ);
+  writer.f32(command.lookYaw);
+  writer.f32(command.lookPitch);
+  writer.u16(command.buttons);
+  writer.u32(command.jumpCounter);
+  writer.u32(command.interactCounter);
+  writer.u8(command.interactTarget ? 1 : 0);
+  if (command.interactTarget) writeId(writer, command.interactTarget);
+  writer.u32(command.primaryCounter);
+}
+
+function readInputCommand(reader: Reader, worldEpoch: number): InputCommand {
+  const command: InputCommand = {
+    type: "input",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch,
+    sequence: reader.u32(),
+    clientTick: reader.u32(),
+    moveX: reader.f32(),
+    moveZ: reader.f32(),
+    lookYaw: reader.f32(),
+    lookPitch: reader.f32(),
+    buttons: reader.u16(),
+    jumpCounter: reader.u32(),
+    interactCounter: reader.u32(),
+    interactTarget: null,
+    primaryCounter: 0,
+  };
+  const hasTarget = reader.u8();
+  if (hasTarget > 1) throw new Error("invalid input target marker");
+  command.interactTarget = hasTarget === 1 ? readId(reader) : null;
+  command.primaryCounter = reader.u32();
+  validateInputCommand(command, worldEpoch);
+  return command;
+}
+
+function validateInputCommand(command: InputCommand, worldEpoch: number): void {
+  if (
+    command.type !== "input" ||
+    command.protocolVersion !== PROTOCOL_VERSION ||
+    command.worldEpoch !== worldEpoch ||
+    !Number.isSafeInteger(command.sequence) ||
+    command.sequence < 0 ||
+    command.sequence >= NULL_REQUEST_ID ||
+    !Number.isSafeInteger(command.clientTick) ||
+    command.clientTick < 0 ||
+    command.clientTick > 0xffff_ffff ||
+    ![command.moveX, command.moveZ, command.lookYaw, command.lookPitch].every(Number.isFinite) ||
+    Math.abs(command.moveX) > 1 ||
+    Math.abs(command.moveZ) > 1 ||
+    Math.abs(command.lookPitch) > Math.PI / 2 ||
+    !Number.isInteger(command.buttons) ||
+    command.buttons < 0 ||
+    command.buttons > 0xffff ||
+    ![command.jumpCounter, command.interactCounter, command.primaryCounter].every(
+      (value) => Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff,
+    )
+  )
+    throw new Error("input command fields are invalid");
+  if (command.interactTarget) {
+    requireUint(command.interactTarget.index, 0xffff_ffff, "input target index");
+    requireUint(command.interactTarget.generation, 0xffff_ffff, "input target generation");
+  }
 }
 
 export function isNewerSequence16(candidate: number, current: number): boolean {

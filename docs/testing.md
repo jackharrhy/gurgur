@@ -1,30 +1,22 @@
 # Testing
 
-`bun run check` runs formatting, lint, TypeScript, unit/simulation tests,
-persistence/content tests, and the real Bun/WebRTC protocol-v6 integration
-suite.
+`bun run check` runs format verification, lint, TypeScript, 174 unit/simulation/
+integration tests, persistence/content tests, and real protocol-v7 server
+transport tests.
 
-## Network commands
+## Commands
 
-- `bun run test:network` runs the 16-player/128-prop release matrix.
-- `bun run test:network -- --quick` runs a six-client development matrix.
-- `bun run test:network stress` reports 32 players/256 props without blocking a
-  release.
-- `bun run test:browser` runs real Chrome movement/banding, host-owned
-  pickup/release, contention, disconnect cleanup, connected reset, and
-  contraption scenarios.
-- `bun run test:browser movement|pickup|contention` selects one browser
-  scenario.
+- `bun run test:network` runs the 16-player/128-body release matrix.
+- `bun run test:network --quick` runs six clients for development.
+- `bun run test:network stress` reports 32 players/256 bodies nonblocking.
+- `bun run test:browser` runs real Chrome movement, pickup/release, contention,
+  and jointed contraption scenarios.
+- `bun run test:browser movement|pickup|contention|contraption` selects one.
 
-Run the release performance matrix without a concurrent browser suite or other
-CPU-heavy workload. Host tick time, state age, and underrun are wall-clock
-budgets; co-scheduling another stress gate invalidates those measurements.
+Run wall-clock performance gates without another CPU-heavy suite in parallel.
 
-The transport harness uses a real Bun server and real unordered WebRTC data
-channels. Seeded impairment layers apply. Its report includes state age,
-analytic presentation path error, buffer-underrun frames, advancing frames,
-traffic, stale authority, host source-state age, fixed-step discard, and host
-tick cost:
+Profiles use real Bun, `werift`, browser-compatible unordered data channels, and
+seeded impairment:
 
 | Profile |    RTT | Jitter | Loss |
 | ------- | -----: | -----: | ---: |
@@ -34,81 +26,70 @@ tick cost:
 
 ## Proof hierarchy
 
-Tests distinguish transport success, presentation accuracy, and physics
-correctness. A changing-frame count is useful as an underrun symptom but is not
-a physics oracle.
+A transport packet, an advancing mesh, and a plausible physical interaction are
+different claims and require different oracles.
 
-1. Codec tests prove exact protocol-v6 bounds, source-tick round trips,
-   generations, acknowledged baselines, resend, and sequence rollover.
-2. The isolated source-clock mapper feeds the same fixed source cadence through
-   variable arrival delay and must retain its tick spacing, including uint32
-   rollover. Improving delay cannot revise the epoch offset; backwards and
-   implausibly future clocks are rejected.
-3. Presentation tests use a virtual host clock and analytic constant-velocity
-   path. Jittered receipt times must not change the source-tick sample result;
-   the buffer holds rather than extrapolating past its newest state. Adaptive
-   tests prove a four-tick localhost floor, per-track isolation, bounded rise,
-   and a render timeline that never runs backwards.
-4. Externally owned player-proxy tests inject mapped samples at arbitrary
-   arrival times and assert the Bun proxy samples the eight-tick source
-   timeline.
-5. Adapter record/replay runs the same fixed-step contact fixture twice and
-   compares every authoritative trace row. Position-and-rotation kinematic
-   target tests gate the proxy primitive itself.
-6. Host tests reject every browser-authored body state, assert every shared prop
-   remains fixed Bun authority, and exercise loose-prop contact/control/release
-   in the one solver.
-7. Real WebRTC tests prove browser player tick mapping, loose-prop
-   first-claim-wins, disposable target motion, unchanged body authority, release,
-   reset, and jointed manipulation. While a body is manipulated, its accepted
-   transport trace must contain adjacent source ticks; a 30 Hz-only result has
-   two-tick gaps.
-8. Real Chrome tests prove the production worker, Wasm, input, claim UI, target
-   stream, presentation, and release path together. Two clients use independent
-   Chrome processes; disposable state and targets run through seeded Typical or
-   Adverse impairment. A deliberate main-thread stall must not discard worker
-   time, while a deliberate worker stall must increment the shared discard
-   metric and recover.
-9. The isolated speculative presenter proves response within one 60 Hz interval,
-   immutable authoritative input, no effect on unrelated bodies, bounded release
-   correction, and lifecycle/reset cleanup. The real Chrome pickup gate then
-   proves the production target cadence and visible response under impairment.
+1. Codec tests prove protocol-v7 bounds, four-command ordering/redundancy,
+   checkpoints with and without a held body, delta baselines, resend, rollover,
+   finite fields, and truncation rejection.
+2. The server-player queue test injects duplicate redundant bundles, consumes
+   one command per tick, keeps acknowledgements monotonic, and proves repeated
+   action counters do not retrigger an edge.
+3. Independent Bun/browser adapters start from the same state and replay the
+   same command stream through `stepPlayerController`, `stepPropGrab`, Box3D,
+   60 Hz, and four substeps. Player and free held-body pose/velocity traces must
+   agree within `1e-4` metres/radians before network correction.
+4. Pickup simulation proves target speed and body acceleration are bounded: a
+   distant target cannot be reached in one fixed step.
+5. Walk/stand/cross simulation uses the newest loose-body collision proxy and
+   permits at most 1 cm penetration and two grounded transitions.
+6. Physics adapter tests cover wall contact, slopes, steps, crouch clearance,
+   moving supports, dynamic reaction impulses, mass-independent target drive,
+   stacked/compound bodies, joints, sensors, and deterministic replay.
+7. Real server/WebRTC tests prove Bun-owned players, input-bundle delivery,
+   checkpoints/acks, first-wins loose claims, 60 Hz held state, bounded release,
+   reset, and server-only contraption manipulation.
+8. Presentation tests prove source-tick interpolation, per-track adaptive delay,
+   no extrapolation, and monotonic delay changes. The prediction trace recorder
+   retains input/ack/replay/contact/support metadata plus authoritative,
+   collision, predicted, and rendered poses.
+9. Real Chrome tests exercise production Wasm, workers, input, reconciliation,
+   WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. A main
+   thread stall must not discard worker time; a worker stall must be measured.
+10. Side-by-side manual play against clean `main` remains required. Metrics can
+    reject known bad feel but cannot prove the absence of every perceptual flaw.
 
 ## Release budgets
 
-The 16-player/128-prop gate requires:
+The release matrix requires zero stale authority/correctness errors, Typical and
+Adverse state age below 200/300 ms, analytic presentation error below 2/5 cm,
+buffer underrun below 0.1%/1%, average state traffic below 2 Mbit/s per
+recipient, no discarded host time, and host tick below 8 ms p95 / 12 ms p99.
 
-- exactly one dynamic simulator per shared gameplay body;
-- zero accepted browser-authored body states or stale authority/generation;
-- mapped source cadence error of zero ticks in deterministic tests;
-- presentation path error p95 below 2 cm Typical and 5 cm Adverse for analytic
-  constant-velocity traces;
-- presentation buffer underrun below 0.1% Typical and 1% Adverse;
-- remote state age p95 below 200 ms Typical and 300 ms Adverse;
-- average state traffic below 2 Mbit/s per recipient;
-- zero discarded fixed-step time in a release run;
-- host simulation tick below 8 ms p95 and 12 ms p99.
+Browser behavior gates require:
 
-The real-browser local movement gate measures input edge to presented player
-state and permits one fixed worker tick plus the next render frame. Pickup gates
-assert that the prop owner remains null, `authorityVersion` does not change,
-the worker produces at least 20 target states per 500 ms window, speculative
-loose-prop response appears within 50 ms of a look input under the seeded
-Adverse profile, motion ultimately comes from host state, and release produces
-no single-frame solver/handoff discontinuity. The movement scenario also asserts
-that an active localhost host-body render track stays at or below five ticks.
+- local movement begins within one predicted fixed tick and presentation is not
+  forced behind the Adverse buffer;
+- a confirmed pickup creates a predicted dynamic body and begins physical
+  movement without a mesh teleport;
+- no pickup or release frame discontinuity exceeds the physical 25 cm gate,
+  including loss while a recently released body remains on its 60 Hz hot path;
+- look changes affect the held physical body within the bounded input/worker/
+  render path, rather than waiting for RTT;
+- localhost remote motion remains smoothly buffered;
+- active localhost render delay settles to at most five ticks;
+- two-player contention has one winner and recovers after release/disconnect;
+- joint-connected manipulation remains Bun-owned and does not enter prediction.
 
-## Physics conformance and replacement
+Run localhost, Typical, and Adverse profiles at 60 and 120 Hz when changing
+prediction or presentation policy. Inspect the four-timeline trace for any
+walk-over or correction regression.
 
-The Box3D adapter remains replaceable. An engine candidate must run the same
-fixture inputs through the same adapter-level artifact and report:
+## Physics replacement gate
 
-- per-tick pose, linear/angular velocity, awake state, contact and sensor events;
-- controller result and kinematic-target result;
-- constraint anchor/error and manipulation target/error;
-- maximum penetration, contact lifetime, sleep parity, and finite-state checks;
-- deterministic replay trace equality within an explicitly recorded tolerance.
-
-Engine choice is made from these Gurgur traces plus real browser/server cost and
-stability. A feature list or microbenchmark cannot justify replacing the solver,
-and a solver replacement cannot repair an authority or time-model defect.
+Box3D remains selected. A candidate must consume the same serialized initial
+state and inputs and report per-tick pose/velocity, controller result,
+contact/support IDs, constraint error, maximum penetration, sleep behavior, and
+finite-state checks in Bun and a real browser. A solver replacement is justified
+only by failure of that conformance artifact or measured runtime constraints;
+it cannot repair an authority, timeline, or presentation defect.

@@ -18,11 +18,8 @@ import {
   NETWORK_FLAG_AWAKE,
   NETWORK_FLAG_HELD,
   STATE_PUBLISH_INTERVAL_TICKS,
-  SourceTickMapper,
   accumulateFixedStepTime,
   cloneNetworkState,
-  isNewerSequence16,
-  unwrapTick32,
   type InputCommand,
   type ManipulationChangedMessage,
   type ManipulationDropMessage,
@@ -32,6 +29,7 @@ import {
   type NetworkObjectState,
   type OwnershipChangedPacket,
   type PhysicsDebugFrame,
+  type PredictionCheckpointPacket,
   type Quat,
   type RuntimeId,
   type Snapshot,
@@ -78,6 +76,8 @@ type DevPlayer = {
   stopAtTick: number | null;
 };
 
+const RELEASE_HOT_STATE_TICKS = PHYSICS_HZ / 2;
+
 export class WorldHost {
   readonly #physics: PhysicsWorld;
   readonly #bundle: WorldBundle;
@@ -102,8 +102,8 @@ export class WorldHost {
   readonly #devPlayers = new Map<string, DevPlayer>();
   #devBodySequence = 0;
   readonly #lastPublishedBodies = new Map<string, NetworkBodyState>();
+  readonly #hotBodyUntilTick = new Map<string, number>();
   readonly #manipulationVersions = new Map<string, number>();
-  readonly #ownerSourceTicks = new Map<string, SourceTickMapper>();
 
   private constructor(
     physics: PhysicsWorld,
@@ -212,15 +212,10 @@ export class WorldHost {
   }
 
   connectPlayer(persistentId: string = crypto.randomUUID()): RuntimeId {
-    return this.#simulation.players.connect(persistentId, undefined, {
-      externallyOwned: true,
-    });
+    return this.#simulation.players.connect(persistentId);
   }
 
   disconnectPlayer(id: RuntimeId): boolean {
-    const prefix = `${key(id)}:`;
-    for (const mapperKey of this.#ownerSourceTicks.keys())
-      if (mapperKey.startsWith(prefix)) this.#ownerSourceTicks.delete(mapperKey);
     return this.#simulation.players.disconnect(id);
   }
 
@@ -237,56 +232,48 @@ export class WorldHost {
 
   networkHotStates(advanceHostSequences = false): NetworkObjectState[] {
     return this.#runtimeBodies
-      .filter((body) => this.#simulation.manipulationOwner(body.id) !== null)
+      .filter((body) => {
+        const identity = key(body.id);
+        if (this.#simulation.manipulationOwner(body.id) !== null || this.#isHeldByPlayer(body.id))
+          this.#hotBodyUntilTick.set(identity, this.#serverTick + RELEASE_HOT_STATE_TICKS);
+        const hot = (this.#hotBodyUntilTick.get(identity) ?? -1) >= this.#serverTick;
+        if (!hot) this.#hotBodyUntilTick.delete(identity);
+        return hot;
+      })
       .map((body) => this.#networkBodyState(body, advanceHostSequences));
+  }
+
+  predictionCheckpoint(playerId: RuntimeId): PredictionCheckpointPacket | null {
+    const prediction = this.#simulation.players.prediction(playerId);
+    const player = this.#simulation.players
+      .networkStates()
+      .find((candidate) => sameId(candidate.id, playerId));
+    if (!prediction || !player) return null;
+    const heldBody = prediction.grab ? this.#body(prediction.grab.target) : null;
+    return {
+      worldEpoch: this.#worldEpoch,
+      serverTick: this.#serverTick >>> 0,
+      lastProcessedInputSequence: prediction.lastProcessedInputSequence,
+      player,
+      held:
+        prediction.grab && heldBody
+          ? {
+              claimVersion: prediction.grabVersion,
+              startInputSequence: prediction.grabStartInputSequence,
+              localAnchor: { x: 0, y: 0, z: 0 },
+              body: this.#networkBodyState(heldBody, false),
+              distance: prediction.grab.distance,
+              relativeRotation: { ...prediction.grab.relativeRotation },
+              targetPosition: { ...prediction.grab.targetPosition },
+              targetRotation: { ...prediction.grab.targetRotation },
+              errorSeconds: prediction.grab.errorSeconds,
+            }
+          : null,
+    };
   }
 
   bootstrapStates(): NetworkObjectState[] {
     return this.networkStates(false).map(cloneNetworkState);
-  }
-
-  acceptOwnedStates(
-    owner: RuntimeId,
-    states: readonly NetworkObjectState[],
-    discontinuity = false,
-  ): NetworkObjectState[] | null {
-    if (
-      states.length !== 1 ||
-      states.some((state) => !this.#canAcceptOwnedState(owner, state, discontinuity))
-    )
-      return null;
-    let mapped: NetworkObjectState[];
-    try {
-      mapped = states.map((state) => {
-        const mapperKey = `${key(owner)}:${key(state.id)}:${state.authorityVersion}`;
-        let mapper = this.#ownerSourceTicks.get(mapperKey);
-        if (!mapper) {
-          mapper = new SourceTickMapper();
-          this.#ownerSourceTicks.set(mapperKey, mapper);
-        }
-        return {
-          ...cloneNetworkState(state),
-          sourceTick: mapper.map(state.sourceTick, this.#serverTick),
-        } as NetworkObjectState;
-      });
-    } catch {
-      return null;
-    }
-    for (const state of mapped) {
-      if (
-        state.kind !== "player" ||
-        !this.#simulation.players.applyOwnedState(owner, state, discontinuity)
-      )
-        return null;
-    }
-    for (const state of mapped) {
-      const sourceTick = unwrapTick32(state.sourceTick, this.#serverTick);
-      this.#maxStateAgeMs = Math.max(
-        this.#maxStateAgeMs,
-        (Math.max(0, this.#serverTick - sourceTick) / PHYSICS_HZ) * 1_000,
-      );
-    }
-    return mapped;
   }
 
   requestManipulation(
@@ -356,7 +343,7 @@ export class WorldHost {
       worldEpoch: this.#worldEpoch,
       requestId: null,
       id: { ...id },
-      ownerPlayerId: { ...id },
+      ownerPlayerId: null,
       authorityVersion: state.authorityVersion,
       state,
     };
@@ -711,6 +698,10 @@ export class WorldHost {
     return this.#simulation.players.grabbedTarget(playerId);
   }
 
+  releasePlayerGrab(playerId: RuntimeId): RuntimeId | null {
+    return this.#simulation.players.releaseGrab(playerId);
+  }
+
   reset(): Snapshot {
     this.#clearDevPlayers();
     this.#physics.recreate();
@@ -722,8 +713,8 @@ export class WorldHost {
     this.#saveRequested = false;
     this.#devBodyKeys.clear();
     this.#lastPublishedBodies.clear();
+    this.#hotBodyUntilTick.clear();
     this.#manipulationVersions.clear();
-    this.#ownerSourceTicks.clear();
     this.#maxStateAgeMs = 0;
     this.#worldEpoch += 1;
     this.#serverTick = 0;
@@ -867,7 +858,9 @@ export class WorldHost {
       stateSequence: body.stateSequence,
       sourceTick: this.#serverTick >>> 0,
       flags:
-        (body.ownerPlayerId || this.#simulation.manipulationOwner(body.id)
+        (body.ownerPlayerId ||
+        this.#simulation.manipulationOwner(body.id) ||
+        this.#isHeldByPlayer(body.id)
           ? NETWORK_FLAG_HELD
           : 0) |
         (awake ? NETWORK_FLAG_AWAKE : 0) |
@@ -886,6 +879,12 @@ export class WorldHost {
     return candidate;
   }
 
+  #isHeldByPlayer(id: RuntimeId): boolean {
+    return this.#simulation.players
+      .views()
+      .some((player) => player.grabTarget !== null && sameId(player.grabTarget, id));
+  }
+
   #manipulationChanged(
     body: RuntimeBody,
     requestId: number | null,
@@ -902,34 +901,6 @@ export class WorldHost {
       claimVersion,
       manipulatorPlayerId: manipulatorPlayerId ? { ...manipulatorPlayerId } : null,
     };
-  }
-
-  #canAcceptOwnedState(
-    owner: RuntimeId,
-    state: NetworkObjectState,
-    allowEqualSequence: boolean,
-  ): boolean {
-    if (!validOwnedState(state)) return false;
-    if (state.kind === "player") {
-      const current = this.#simulation.players
-        .networkStates()
-        .find((player) => sameId(player.id, owner));
-      return (
-        sameId(owner, state.id) &&
-        current !== undefined &&
-        ((allowEqualSequence && state.stateSequence === current.stateSequence) ||
-          isNewerSequence16(state.stateSequence, current.stateSequence)) &&
-        this.#simulation.players
-          .runtimeRefs()
-          .some(
-            (player) =>
-              sameId(player.id, owner) &&
-              player.ownerPlayerId !== null &&
-              player.authorityVersion === state.authorityVersion,
-          )
-      );
-    }
-    return false;
   }
 
   #submitDevPlayerInputs(): void {
@@ -994,39 +965,6 @@ function sameId(a: RuntimeId, b: RuntimeId): boolean {
 function nextVersion(version: number): number {
   const next = (version + 1) >>> 0;
   return next === 0 ? 1 : next;
-}
-
-function validOwnedState(state: NetworkObjectState): boolean {
-  const values = [
-    state.position.x,
-    state.position.y,
-    state.position.z,
-    state.rotation.x,
-    state.rotation.y,
-    state.rotation.z,
-    state.rotation.w,
-    state.linearVelocity.x,
-    state.linearVelocity.y,
-    state.linearVelocity.z,
-    state.angularVelocity.x,
-    state.angularVelocity.y,
-    state.angularVelocity.z,
-  ];
-  if (
-    !values.every(Number.isFinite) ||
-    Math.max(Math.abs(state.position.x), Math.abs(state.position.y), Math.abs(state.position.z)) >
-      10_000
-  )
-    return false;
-  if (state.kind === "player") {
-    return (
-      Number.isFinite(state.yaw) &&
-      Number.isFinite(state.verticalVelocity) &&
-      Number.isFinite(state.stepCooldown) &&
-      Number.isInteger(state.lastJumpCounter)
-    );
-  }
-  return true;
 }
 
 function bodyNetworkStateChanged(a: NetworkBodyState, b: NetworkBodyState): boolean {

@@ -47,8 +47,8 @@ async function content(action = "compile"): Promise<void> {
 }
 
 async function testBrowser(action = "all"): Promise<void> {
-  if (!["all", "movement", "pickup", "contention"].includes(action))
-    throw new Error("test:browser requires all, movement, pickup, or contention");
+  if (!["all", "movement", "pickup", "contention", "contraption"].includes(action))
+    throw new Error("test:browser requires all, movement, pickup, contention, or contraption");
   await run(["bun", "scripts/smoke-browser.ts"], {
     env: { SMOKE_SCENARIO: action },
   });

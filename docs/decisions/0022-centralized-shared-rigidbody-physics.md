@@ -1,7 +1,11 @@
 # 0022: Centralize shared rigid-body physics and replicate source time
 
-Status: accepted, 2026-07-31. Supersedes the prop-ownership portion of
-[0019](0019-object-ownership-netcode.md) and generalizes
+Status: partially superseded by
+[0024](0024-source-style-networked-physics.md), 2026-08-02. Bun's shared-body
+authority and source-time requirements remain accepted; browser player
+authority, the eight-tick collision proxy, and loose target transport do not.
+Originally accepted 2026-07-31, superseding the prop-ownership portion of
+[0019](0019-object-ownership-netcode.md) and generalizing
 [0021](0021-fixed-authority-contraption-manipulation.md).
 
 ## Decision

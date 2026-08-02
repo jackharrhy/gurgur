@@ -1,5 +1,4 @@
 import {
-  PHYSICS_DT,
   PHYSICS_HZ,
   NETWORK_FLAG_AWAKE,
   NETWORK_FLAG_HELD,
@@ -52,12 +51,13 @@ export type PresentationBufferDiagnostics = {
 type LatenessSample = { receivedAtMs: number; ticks: number };
 
 const LATENESS_WINDOW_MS = 10_000;
-const UNDERRUN_HOLD_MS = 2_000;
+const UNDERRUN_HOLD_MS = 500;
 const DELAY_BUILD_RATE_TICKS_PER_TICK = 0.9;
-const DELAY_RELEASE_RATE_TICKS_PER_SECOND = 0.5;
+const DELAY_RELEASE_RATE_TICKS_PER_SECOND = 2;
 
 export class PresentationBuffer {
   readonly #tracks = new Map<string, Track>();
+  readonly #latestNetwork = new Map<string, NetworkObjectState>();
   readonly #networkDelayPolicy: "fixed-proxy" | "adaptive-render";
   #clock: ClockAnchor | null = null;
 
@@ -67,6 +67,7 @@ export class PresentationBuffer {
 
   reset(states: readonly NetworkObjectState[], receivedAtMs: number): void {
     this.#tracks.clear();
+    this.#latestNetwork.clear();
     this.#clock = null;
     this.pushNetwork(states, receivedAtMs);
   }
@@ -86,12 +87,13 @@ export class PresentationBuffer {
   }
 
   pushNetwork(states: readonly NetworkObjectState[], receivedAtMs: number): void {
+    for (const state of states) this.#latestNetwork.set(idKey(state.id), cloneState(state));
     this.#push(states, receivedAtMs, "host", PROXY_INTERPOLATION_TICKS);
     this.#observeNetworkLateness(states, receivedAtMs);
   }
 
   pushLocal(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    this.#push(states, receivedAtMs, "local", PHYSICS_DT * PHYSICS_HZ);
+    this.#push(states, receivedAtMs, "local", 0);
   }
 
   replaceReliable(state: NetworkObjectState, receivedAtMs: number, local: boolean): void {
@@ -99,7 +101,7 @@ export class PresentationBuffer {
       !local && this.#networkDelayPolicy === "adaptive-render"
         ? RENDER_INTERPOLATION_MIN_TICKS
         : local
-          ? PHYSICS_DT * PHYSICS_HZ
+          ? 0
           : PROXY_INTERPOLATION_TICKS;
     this.#tracks.set(idKey(state.id), {
       delayTicks,
@@ -119,10 +121,12 @@ export class PresentationBuffer {
         },
       ],
     });
+    if (!local) this.#latestNetwork.set(idKey(state.id), cloneState(state));
   }
 
   remove(id: RuntimeId): void {
     this.#tracks.delete(idKey(id));
+    this.#latestNetwork.delete(idKey(id));
   }
 
   sample(nowMs: number): BodySnapshot[] {
@@ -171,6 +175,11 @@ export class PresentationBuffer {
 
   trackDelayTicks(id: RuntimeId): number | null {
     return this.#tracks.get(idKey(id))?.delayTicks ?? null;
+  }
+
+  latestNetwork(id: RuntimeId): BodySnapshot | null {
+    const latest = this.#latestNetwork.get(idKey(id));
+    return latest ? toBodySnapshot(latest) : null;
   }
 
   #push(
@@ -268,6 +277,8 @@ export class PresentationBuffer {
       : RENDER_INTERPOLATION_MIN_TICKS;
     const underrun =
       latest !== undefined &&
+      track.samples.length >= 2 &&
+      latest.timelineTick - track.samples[0]!.timelineTick >= RENDER_INTERPOLATION_MIN_TICKS &&
       nowMs - latest.receivedAtMs <= 250 &&
       activeNetworkState(latest.state) &&
       track.delayTicks + 1e-6 < required;

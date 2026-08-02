@@ -4,7 +4,6 @@ import {
   type BodySnapshot,
   type CompiledBrush,
   type LifecycleMessage,
-  type ManipulationStatePacket,
   type NetworkObjectState,
   type CompiledRenderBatch,
   type PhysicsDebugFrame,
@@ -40,7 +39,6 @@ import {
 } from "./camera";
 import { createPresentationLight, VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 import { PresentationBuffer } from "./presentation";
-import { SpeculativeHeldPresenter } from "./speculative-presentation";
 
 type MaterialTextureInfo = {
   url: string;
@@ -128,6 +126,27 @@ type PhysicsDebugView = {
   geometry: THREE.BufferGeometry;
   material: THREE.LineBasicNodeMaterial;
 };
+
+type PredictionCorrection = {
+  id: RuntimeId;
+  position: Vec3;
+  rotation: { x: number; y: number; z: number; w: number };
+  startedAtMs: number | null;
+  relative: boolean;
+};
+
+type InteractionPresentationTransition = {
+  from: BodySnapshot;
+  startedAtMs: number;
+};
+
+const PREDICTION_CORRECTION_MS = 100;
+const PREDICTION_HARD_SNAP_METRES = 1;
+const PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES = 0.2;
+const INTERACTION_PRESENTATION_ENTER_METRES = 2;
+const INTERACTION_PRESENTATION_EXIT_METRES = 2.5;
+const INTERACTION_PRESENTATION_HOLD_MS = 500;
+const INTERACTION_PRESENTATION_BLEND_MS = 100;
 
 function createPickupDebugView(): PickupDebugView {
   const group = new THREE.Group();
@@ -463,10 +482,19 @@ export class WorldRenderer {
   #realityLightRoot = new THREE.Group();
   #cameraCollisionRoot = new THREE.Group();
   readonly #cameraCollisionBodies = new Map<string, THREE.Object3D>();
-  readonly #speculativeHeld = new SpeculativeHeldPresenter();
   #localPlayer: RuntimeId | null = null;
   #interactionCandidate: THREE.Object3D | null = null;
   #heldTarget: THREE.Object3D | null = null;
+  #predictedHeldId: RuntimeId | null = null;
+  readonly #predictionCorrections = new Map<string, PredictionCorrection>();
+  readonly #interactionPresentationUntil = new Map<string, number>();
+  readonly #interactionPresentationActive = new Set<string>();
+  readonly #interactionPresentationTransitions = new Map<
+    string,
+    InteractionPresentationTransition
+  >();
+  readonly #interactionPresented = new Map<string, BodySnapshot>();
+  readonly #predictionInteractionIds = new Set<string>();
   #outlinedTarget: THREE.Object3D | null = null;
   #pickupPlayerPosition: THREE.Vector3 | null = null;
   readonly #onLocalPresentation: (body: BodySnapshot) => void;
@@ -552,9 +580,15 @@ export class WorldRenderer {
     this.#constraintVisuals = [];
     this.#cameraCollisionBodies.clear();
     this.#presentation.reset([], performance.now());
-    this.#speculativeHeld.reset();
     this.#interactionCandidate = null;
     this.#heldTarget = null;
+    this.#predictedHeldId = null;
+    this.#predictionCorrections.clear();
+    this.#interactionPresentationUntil.clear();
+    this.#interactionPresentationActive.clear();
+    this.#interactionPresentationTransitions.clear();
+    this.#interactionPresented.clear();
+    this.#predictionInteractionIds.clear();
     this.#outlinedTarget = null;
     this.#pickupPlayerPosition = null;
     if (this.#pickupDebug) this.#pickupDebug.group.visible = false;
@@ -660,10 +694,16 @@ export class WorldRenderer {
       const identity = idKey(id);
       this.#stopSpeech(identity, 0);
       this.#presentation.remove(id);
-      this.#speculativeHeld.remove(id);
+      this.#predictionCorrections.delete(identity);
+      this.#interactionPresentationUntil.delete(identity);
+      this.#interactionPresentationActive.delete(identity);
+      this.#interactionPresentationTransitions.delete(identity);
+      this.#interactionPresented.delete(identity);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
         if (this.#heldTarget === mesh) this.#heldTarget = null;
+        if (this.#predictedHeldId && idKey(this.#predictedHeldId) === identity)
+          this.#predictedHeldId = null;
         if (this.#interactionCandidate === mesh) this.#interactionCandidate = null;
         if (this.#outlinedTarget === mesh) this.#outlinedTarget = null;
         this.#meshes.delete(identity);
@@ -743,9 +783,51 @@ export class WorldRenderer {
     this.applyNetworkInteractionState(states);
   }
 
-  applyLocalStates(states: readonly NetworkObjectState[], receivedAtMs = performance.now()): void {
+  applyLocalStates(
+    states: readonly NetworkObjectState[],
+    receivedAtMs = performance.now(),
+    reconciled = false,
+  ): void {
     this.#presentation.pushLocal(states, receivedAtMs);
+    const player = states.find((state) => state.kind === "player");
+    if (player && reconciled) this.#queuePredictionCorrection(player, false);
+    const held = states.find(
+      (state) => state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0,
+    );
+    if (held) {
+      const previousId = this.#predictedHeldId;
+      const mesh = this.#meshes.get(idKey(held.id)) ?? null;
+      this.#heldTarget = mesh;
+      this.#predictedHeldId = { ...held.id };
+      if (mesh && (!previousId || idKey(previousId) !== idKey(held.id) || reconciled))
+        this.#queuePredictionCorrection(held, !previousId);
+    } else if (states.some((state) => state.kind === "player") && this.#predictedHeldId) {
+      const id = this.#predictedHeldId;
+      const mesh = this.#meshes.get(idKey(id));
+      const authoritative = this.#presentation.latestNetwork(id);
+      if (mesh && authoritative) this.#queuePredictionCorrection(authoritative, true);
+      else if (mesh)
+        this.#predictionCorrections.set(idKey(id), {
+          id: { ...id },
+          position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+          rotation: {
+            x: mesh.quaternion.x,
+            y: mesh.quaternion.y,
+            z: mesh.quaternion.z,
+            w: mesh.quaternion.w,
+          },
+          startedAtMs: null,
+          relative: false,
+        });
+      this.#heldTarget = null;
+      this.#predictedHeldId = null;
+    }
     this.applyNetworkInteractionState(states);
+  }
+
+  setPredictionInteractions(ids: readonly RuntimeId[]): void {
+    this.#predictionInteractionIds.clear();
+    for (const id of ids) this.#predictionInteractionIds.add(idKey(id));
   }
 
   updateClock(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void {
@@ -771,36 +853,10 @@ export class WorldRenderer {
     const mesh = this.#meshes.get(idKey(target)) ?? null;
     if (local) {
       this.#heldTarget = mesh;
-      if (mesh?.userData.grabbable)
-        this.#speculativeHeld.begin(
-          target,
-          {
-            position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
-            rotation: {
-              x: mesh.quaternion.x,
-              y: mesh.quaternion.y,
-              z: mesh.quaternion.z,
-              w: mesh.quaternion.w,
-            },
-          },
-          performance.now(),
-        );
     } else if (this.#heldTarget === mesh) {
       this.#heldTarget = null;
-      this.#speculativeHeld.end(target, performance.now());
     }
     this.#updateInteractionOutline();
-  }
-
-  applyLocalManipulationTarget(message: ManipulationStatePacket): boolean {
-    return this.#speculativeHeld.target(
-      message.target,
-      {
-        position: message.targetPosition,
-        rotation: message.targetRotation,
-      },
-      performance.now(),
-    );
   }
 
   applyNetworkInteractionState(bodies: readonly BodySnapshot[]): void {
@@ -898,7 +954,9 @@ export class WorldRenderer {
   clientFeelDiagnostics() {
     return {
       presentation: this.#presentation.diagnostics(),
-      speculative: this.#speculativeHeld.diagnostics(),
+      prediction: {
+        held: this.#predictedHeldId ? idKey(this.#predictedHeldId) : null,
+      },
     };
   }
 
@@ -989,7 +1047,7 @@ export class WorldRenderer {
     const render = (): void => {
       if (document.hidden) return;
       const now = performance.now();
-      const bodies = this.#presentation.sample(now);
+      const bodies = this.#interactionPresentation(this.#presentation.sample(now), now);
       if (bodies.length > 0) {
         this.#apply(bodies, now);
         const localPresentation = this.#localPlayer
@@ -1410,7 +1468,7 @@ export class WorldRenderer {
         );
       }
       if (!mesh) continue;
-      const presented = this.#speculativeHeld.present(body, nowMs);
+      const presented = this.#correctPrediction(body, nowMs);
       mesh.position.set(presented.position.x, presented.position.y, presented.position.z);
       if (!mesh.userData.billboard)
         mesh.quaternion.set(
@@ -1441,6 +1499,250 @@ export class WorldRenderer {
       this.#onBodyPresentation(presented);
     }
     this.#updateInteractionOutline();
+  }
+
+  #correctPrediction(body: BodySnapshot, nowMs: number): BodySnapshot {
+    const identity = idKey(body.id);
+    const correction = this.#predictionCorrections.get(identity);
+    if (!correction) return body;
+    if (!correction.relative) {
+      correction.position = {
+        x: correction.position.x - body.position.x,
+        y: correction.position.y - body.position.y,
+        z: correction.position.z - body.position.z,
+      };
+      const bodyRotation = new THREE.Quaternion(
+        body.rotation.x,
+        body.rotation.y,
+        body.rotation.z,
+        body.rotation.w,
+      );
+      const rotationOffset = new THREE.Quaternion(
+        correction.rotation.x,
+        correction.rotation.y,
+        correction.rotation.z,
+        correction.rotation.w,
+      ).multiply(bodyRotation.invert());
+      correction.rotation = {
+        x: rotationOffset.x,
+        y: rotationOffset.y,
+        z: rotationOffset.z,
+        w: rotationOffset.w,
+      };
+      correction.relative = true;
+    }
+    correction.startedAtMs ??= nowMs;
+    const amount = Math.max(
+      0,
+      Math.min(1, (nowMs - correction.startedAtMs) / PREDICTION_CORRECTION_MS),
+    );
+    const remaining = 1 - amount;
+    const rotationOffset = new THREE.Quaternion().slerpQuaternions(
+      new THREE.Quaternion(0, 0, 0, 1),
+      new THREE.Quaternion(
+        correction.rotation.x,
+        correction.rotation.y,
+        correction.rotation.z,
+        correction.rotation.w,
+      ),
+      remaining,
+    );
+    const rotation = rotationOffset.multiply(
+      new THREE.Quaternion(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w),
+    );
+    const candidate = {
+      ...body,
+      position: {
+        x: body.position.x + correction.position.x * remaining,
+        y: body.position.y + correction.position.y * remaining,
+        z: body.position.z + correction.position.z * remaining,
+      },
+      rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+    };
+    const mesh = this.#meshes.get(identity);
+    if (!mesh) {
+      if (amount >= 1) this.#predictionCorrections.delete(identity);
+      return candidate;
+    }
+    const step = Math.hypot(
+      candidate.position.x - mesh.position.x,
+      candidate.position.y - mesh.position.y,
+      candidate.position.z - mesh.position.z,
+    );
+    if (step <= PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) {
+      if (amount >= 1) this.#predictionCorrections.delete(identity);
+      return candidate;
+    }
+    const scale = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / step;
+    return {
+      ...candidate,
+      position: {
+        x: mesh.position.x + (candidate.position.x - mesh.position.x) * scale,
+        y: mesh.position.y + (candidate.position.y - mesh.position.y) * scale,
+        z: mesh.position.z + (candidate.position.z - mesh.position.z) * scale,
+      },
+    };
+  }
+
+  #queuePredictionCorrection(
+    state: Pick<NetworkObjectState, "id" | "position" | "rotation">,
+    allowLargeError: boolean,
+  ): void {
+    const identity = idKey(state.id);
+    const mesh = this.#meshes.get(identity);
+    if (!mesh) return;
+    const error = Math.hypot(
+      mesh.position.x - state.position.x,
+      mesh.position.y - state.position.y,
+      mesh.position.z - state.position.z,
+    );
+    if (error <= 0.05 || (error > PREDICTION_HARD_SNAP_METRES && !allowLargeError)) {
+      if (error > PREDICTION_HARD_SNAP_METRES) this.#predictionCorrections.delete(identity);
+      return;
+    }
+    const stateRotation = new THREE.Quaternion(
+      state.rotation.x,
+      state.rotation.y,
+      state.rotation.z,
+      state.rotation.w,
+    );
+    const rotationOffset = mesh.quaternion.clone().multiply(stateRotation.invert());
+    this.#predictionCorrections.set(identity, {
+      id: { ...state.id },
+      position: {
+        x: mesh.position.x - state.position.x,
+        y: mesh.position.y - state.position.y,
+        z: mesh.position.z - state.position.z,
+      },
+      rotation: {
+        x: rotationOffset.x,
+        y: rotationOffset.y,
+        z: rotationOffset.z,
+        w: rotationOffset.w,
+      },
+      startedAtMs: null,
+      relative: true,
+    });
+  }
+
+  #interactionPresentation(bodies: BodySnapshot[], nowMs: number): BodySnapshot[] {
+    const local = this.#localPlayer
+      ? bodies.find((body) => idKey(body.id) === idKey(this.#localPlayer!))
+      : null;
+    if (!local) return bodies;
+    return bodies.map((body) => {
+      const identity = idKey(body.id);
+      if (identity === idKey(local.id)) return body;
+      if (this.#predictedHeldId && identity === idKey(this.#predictedHeldId)) return body;
+      // Remote players are presentation-only and must keep their buffered motion.
+      // Interaction presentation is for shared rigid bodies whose collision pose
+      // can directly affect the locally predicted player or held prop.
+      if (this.#meshes.get(identity)?.userData.playerBillboard) return body;
+      const distance = Math.hypot(
+        body.position.x - local.position.x,
+        body.position.y - local.position.y,
+        body.position.z - local.position.z,
+      );
+      if (
+        distance <= INTERACTION_PRESENTATION_ENTER_METRES ||
+        this.#predictionInteractionIds.has(identity)
+      )
+        this.#interactionPresentationUntil.set(identity, nowMs + INTERACTION_PRESENTATION_HOLD_MS);
+      else if (
+        distance > INTERACTION_PRESENTATION_EXIT_METRES &&
+        (this.#interactionPresentationUntil.get(identity) ?? 0) < nowMs
+      )
+        this.#interactionPresentationUntil.delete(identity);
+      const active = (this.#interactionPresentationUntil.get(identity) ?? 0) >= nowMs;
+      const wasActive = this.#interactionPresentationActive.has(identity);
+      if (active !== wasActive) {
+        this.#interactionPresentationTransitions.set(identity, {
+          from: this.#interactionPresented.get(identity) ?? body,
+          startedAtMs: nowMs,
+        });
+        if (active) this.#interactionPresentationActive.add(identity);
+        else this.#interactionPresentationActive.delete(identity);
+      }
+      const desired = active ? (this.#presentation.latestNetwork(body.id) ?? body) : body;
+      if (this.#predictionCorrections.has(identity)) {
+        this.#interactionPresentationTransitions.delete(identity);
+        const presented = this.#limitInteractionPresentationStep(identity, desired);
+        this.#interactionPresented.set(identity, presented);
+        return presented;
+      }
+      const transition = this.#interactionPresentationTransitions.get(identity);
+      if (!transition) {
+        const presented = active
+          ? this.#limitInteractionPresentationStep(identity, desired)
+          : desired;
+        if (active) this.#interactionPresented.set(identity, presented);
+        else this.#interactionPresented.delete(identity);
+        return presented;
+      }
+      const amount = Math.max(
+        0,
+        Math.min(1, (nowMs - transition.startedAtMs) / INTERACTION_PRESENTATION_BLEND_MS),
+      );
+      if (amount >= 1) {
+        this.#interactionPresentationTransitions.delete(identity);
+        const presented = active
+          ? this.#limitInteractionPresentationStep(identity, desired)
+          : desired;
+        if (active) this.#interactionPresented.set(identity, presented);
+        else this.#interactionPresented.delete(identity);
+        return presented;
+      }
+      const rotation = new THREE.Quaternion().slerpQuaternions(
+        new THREE.Quaternion(
+          transition.from.rotation.x,
+          transition.from.rotation.y,
+          transition.from.rotation.z,
+          transition.from.rotation.w,
+        ),
+        new THREE.Quaternion(
+          desired.rotation.x,
+          desired.rotation.y,
+          desired.rotation.z,
+          desired.rotation.w,
+        ),
+        amount,
+      );
+      const presented = {
+        ...desired,
+        position: {
+          x:
+            transition.from.position.x + (desired.position.x - transition.from.position.x) * amount,
+          y:
+            transition.from.position.y + (desired.position.y - transition.from.position.y) * amount,
+          z:
+            transition.from.position.z + (desired.position.z - transition.from.position.z) * amount,
+        },
+        rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+      };
+      const limited = this.#limitInteractionPresentationStep(identity, presented);
+      this.#interactionPresented.set(identity, limited);
+      return limited;
+    });
+  }
+
+  #limitInteractionPresentationStep(identity: string, body: BodySnapshot): BodySnapshot {
+    const mesh = this.#meshes.get(identity);
+    if (!mesh) return body;
+    const step = Math.hypot(
+      body.position.x - mesh.position.x,
+      body.position.y - mesh.position.y,
+      body.position.z - mesh.position.z,
+    );
+    if (step <= PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) return body;
+    const amount = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / step;
+    return {
+      ...body,
+      position: {
+        x: mesh.position.x + (body.position.x - mesh.position.x) * amount,
+        y: mesh.position.y + (body.position.y - mesh.position.y) * amount,
+        z: mesh.position.z + (body.position.z - mesh.position.z) * amount,
+      },
+    };
   }
 
   #orientBillboards(): void {

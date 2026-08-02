@@ -2,111 +2,92 @@
 
 This is the only status document. Canonical behavior lives in the sibling docs.
 
-Updated: 2026-08-01.
+Updated: 2026-08-02.
 
 ## Current state
 
-Protocol v6 implements the centralized shared-rigidbody slice selected by
-[decision 0022](decisions/0022-centralized-shared-rigidbody-physics.md):
+Protocol v7 implements the Source-style recovery selected by
+[decision 0024](decisions/0024-source-style-networked-physics.md):
 
-- browsers simulate and publish only their own geometric players from a
-  dedicated 60 Hz Box3D module worker;
-- Bun simulates every shared rigid body, including loose props while held;
-- loose grabs and jointed manipulation use the same exclusive disposable
-  target plus Bun-native control-joint path;
-- prop ownership request/drop, browser-authored body state, and `grab-lease`
-  transfer policy have been removed;
-- replicated body/player state carries a uint32 source physics tick;
-- browser ticks are anchored once per authority epoch without copying packet
-  jitter or later offset revisions into their cadence;
-- browser collision proxies and Bun's browser-player proxies sample a fixed
-  eight-tick source timeline; collision proxies move through fixed-tick
-  position-and-rotation kinematic targets;
-- browser render tracks adapt independently between four and eight ticks without
-  rewinding their timelines;
-- confirmed loose-prop claimants get an isolated target-following rendered view
-  with bounded release correction; it never enters physics, queries, transport,
-  or persistence;
-- active manipulation targets and changed manipulated-body hot states are
-  produced at 60 Hz while ordinary state remains 30 Hz;
-- reliable bootstrap, lifecycle, player authority, respawn, and reset carry
-  complete state;
-- unordered player/cluster traffic retains bounded binary deltas,
-  acknowledgements, resend, backpressure coalescing, and stale rejection.
+- Bun simulates every player and shared rigid body at 60 Hz with four substeps;
+- browsers send four-command redundant unordered input bundles and publish no
+  player or loose-body gameplay state;
+- each browser predicts its local player and one confirmed held loose prop with
+  the same Box3D adapter, `stepPlayerController`, and `stepPropGrab` used by Bun;
+- Bun sends owner-specific checkpoints at 30 Hz with the last processed command,
+  complete player state, and optional held-body/grab state;
+- browsers retain 128 commands, restore checkpoints, replay unacknowledged
+  input, and sample nearby proxy history at each replay source tick;
+- ordinary collision proxies use newest authoritative state instead of the v6
+  fixed eight-tick collision timeline;
+- held props render from their predicted dynamic bodies, and both player and
+  held-prop reconciliation use 100 ms visual error decay;
+- a confirmed grab's release edge is predicted during replay, and extraordinary
+  release correction is presentation-rate-bounded instead of teleporting;
+- interaction-relevant bodies blend to collision-aligned presentation over
+  100 ms, remain relevant for 500 ms, and leave outside 2.5 m;
+- loose claims and targets derive from Bun's authoritative player/input state;
+  explicit jointed manipulation retains its Bun-native control-joint path;
+- protocol-v6 browser-authored owned state, owner commits, and mesh-only
+  speculative presentation have been removed.
 
-The proof surface now includes:
+The protocol-v6 implementation is preserved unchanged at archive commit
+`90d32d6` on `codex/netcode-v6-centralized-archive`. Clean `main` at `d604849`
+remains the golden local-feel reference.
 
-- isolated source-tick mapping with variable delay and rollover;
-- virtual-clock analytic presentation paths that reject receipt-time bursts;
-- adaptive render-delay isolation and monotonic timeline tests;
-- speculative held-prop response, immutability, unrelated-body isolation,
-  correction-bound, and lifecycle tests;
-- pure fixed-step overload accounting shared by Bun and the browser worker;
-- host player-proxy timeline sampling and reliable discontinuity reset;
-- Box3D kinematic transform and deterministic contact trace/replay tests;
-- host rejection of browser body state and single-solver loose-prop control;
-- real Bun/WebRTC player-tick mapping, loose pickup, contention, release, reset,
-  contraption manipulation, and adjacent-tick hot-body delivery;
-- profiled analytic path error and buffer-underrun gates under seeded loss,
-  jitter, latency, and load;
-- two-process real Chrome coverage with production workers, seeded disposable
-  impairment, deliberate main/worker stalls, and discard/recovery assertions.
+## Proof surface
 
-Source-style physics contraptions remain implemented as one Bun-owned vertical
-slice: native joints, authored local frames, conveyors, gravity fields,
-persistence, procedural constraint presentation, and target-driven direct
-manipulation all solve without graph authority transfer.
+The automated surface now includes:
 
-## Client-feel follow-up gate
+- protocol-v7 finite/bounds/round-trip coverage for redundant input bundles and
+  checkpoints with and without held state;
+- per-player deduplication, bounded ordering, one-command-per-tick consumption,
+  monotonic acknowledgement, and single execution of action edges;
+- independent Bun/browser Box3D adapters that agree for a player and free held
+  prop within `1e-4` metres/radians for the same checkpoint and commands;
+- pickup acceleration/velocity gates that forbid one-frame target arrival;
+- walk, stand, and cross fixtures using newest loose-body proxies, with a 1 cm
+  penetration and bounded grounded-transition budget;
+- server-authoritative pickup, release, contention, disconnect, reset, and
+  jointed manipulation through real Bun/WebRTC;
+- production Chrome movement, physical pickup/release, contention, and
+  contraption scenarios;
+- a bounded trace with command/ack/replay/contact/support data and
+  authoritative, collision, predicted, and rendered transforms;
+- the 16-player/128-body real transport matrix and existing fixed-step/tick,
+  state-age, traffic, underrun, and analytic-presentation budgets.
 
-The presentation follow-up selected by
-[decision 0023](decisions/0023-client-feel-presentation.md) is complete:
+## Release gate
 
-- the repository-wide format/lint/type/unit/integration gate passes 171 tests;
-- every production Chrome scenario passes, including an active localhost
-  host-body render delay of at most five ticks, at least 20 manipulation targets
-  per 500 ms, and visible loose-prop response within 50 ms of look input under
-  seeded Adverse impairment;
-- the complete Adverse pickup/turn/release feel path passes five additional
-  consecutive production-Chrome runs;
-- real WebRTC delivery contains adjacent manipulated-body source ticks while the
-  object remains Bun-owned at one unchanged authority version;
-- the isolated 16-player/128-prop matrix reports about 0.000057 cm analytic path
-  error p95, 0.071% Typical and Adverse buffer underrun, 155 ms Typical and 216 ms
-  Adverse state age p95, zero correctness errors or stale authority, zero host
-  discarded time, and about 1.27/1.91 ms host tick p95/p99.
+Automated implementation gate, 2026-08-02:
 
-## Protocol v6 release gate
+- `bun run check` passes formatting, lint, TypeScript, and all 174 tests;
+- `bun run test:browser` passes movement, physical pickup/release, first-wins
+  contention/recovery, and server-only contraption scenarios; the adverse
+  pickup path also passed three consecutive isolated runs;
+- the 16-player/128-body matrix passes with zero correctness/stale-authority
+  errors, zero measured underruns, 100% advancing moving-oracle frames at 60 and
+  120 Hz, approximately 0.74 Mbit/s per recipient, and 2.31/3.37 ms host tick
+  p95/p99;
+- localhost pickup must begin with bounded physical motion, never a mesh
+  teleport, and release remains inside the browser discontinuity gate;
+- local movement must respond inside the bounded input/worker/render path and
+  active localhost remote presentation settles to at most five ticks;
+- future network-matrix changes must retain less than 2 Mbit/s per recipient and
+  the 8/12 ms host tick p95/p99 budgets;
+- traces must be inspected under localhost, Typical, and Adverse impairment at
+  both 60 and 120 Hz for correction and walk-over regressions;
+- a human must play identical scripted scenes side-by-side against clean
+  `main`. Automated metrics deliberately cannot declare feel solved alone.
 
-The migration gate is complete:
+## Deferred scope
 
-- the repository-wide format/lint/type/unit/integration check passes;
-- every production Chrome scenario passes, including host-owned pickup/release,
-  first-wins contention, disconnect cleanup, reconnect/reset, contraptions,
-  separate browser processes, Adverse disposable impairment, and main/worker
-  stall probes;
-- the 16-player/128-prop matrix reports approximately 0.000057 cm analytic path
-  error p95, 0.071% Typical and Adverse buffer underrun, 155 ms Typical and
-  216 ms Adverse remote state age p95, zero correctness errors, zero stale
-  authority, and about 1.27/1.91 ms host tick p95/p99;
-- source-state age and browser/host discarded catch-up time are real metrics,
-  not placeholders; the ordinary release paths discard zero time;
-- the Box3D soak completes 10,000 handle churn cycles and 1,000,000 fixed ticks
-  with checkpoint hash
-  `10640c0c30c66aa0c71f601e2f4bdc8b01a558f8b179f21314683f7947fffcd1`.
+Full-world rollback, deterministic lockstep, client prediction of joint graphs,
+vehicles, runtime-created/breaking joints, pulley and suspension systems, and
+collision-based authority transfer remain out of scope. Jointed contraptions
+stay server-only.
 
-## Active focus
-
-Box3D remains pinned. A Rapier or Jolt bake-off is deferred until the same
-engine-neutral fixture/trace artifact can run against a candidate in Bun and a
-real browser. Solver replacement is not required to complete protocol v6.
-
-The stronger isolated Box3D shadow-body view remains deferred unless retained
-contact fixtures or blinded play testing show that the selected target-following
-presentation is physically implausible. Source-style server-player prediction
-remains contingent on a product requirement for reciprocal immediate
-player/shared-body response.
-
-Breaking joints, pulley systems, wheel/suspension joints, runtime joint
-creation, reciprocal player/body dynamics, Source-style player prediction, and
-conveyor texture scrolling remain deferred product/architecture work.
+Box3D remains pinned. A Rapier or Jolt bake-off starts only if the serialized
+cross-runtime conformance trace or measured browser/server budget identifies a
+solver defect. The v6 pickup snap and walk-over glitch do not meet that bar;
+they were authority, timeline, and presentation defects.

@@ -1,14 +1,15 @@
 # Networked physics: evidence, target model, and proof
 
 This is the evidence and migration guide behind
-[decision 0022](decisions/0022-centralized-shared-rigidbody-physics.md). Selected
+[decisions 0022](decisions/0022-centralized-shared-rigidbody-physics.md) and
+[0024](decisions/0024-source-style-networked-physics.md). Selected
 behavior lives in [networking](networking.md), [physics](physics.md),
 [architecture](architecture.md), and [testing](testing.md). Historical
 "current Gurgur" comparisons below describe the protocol-v5 baseline that the
 decision replaced. Active sequencing belongs only in
 [the work tracker](work.md). The follow-up
-[client-feel research](networked-physics-client-feel.md) evaluates what protocol
-v6 still needs on the owner-facing presentation path.
+[client-feel research](networked-physics-client-feel.md) records why protocol
+v6's owner-facing presentation was rejected.
 
 Research baseline: 2026-07-31. The local references were
 [s&box public `2053455`](https://github.com/Facepunch/sbox-public/tree/2053455813f24165d614cdeaf561082eecc86990)
@@ -16,7 +17,48 @@ Research baseline: 2026-07-31. The local references were
 HEAD `1a22bc7`) and
 [Source SDK 2013 `88fa198`](https://github.com/ValveSoftware/source-sdk-2013/tree/88fa198fba3fb85d46d4c95018254693fdc3af0a).
 
-## Executive conclusion
+## 2026-08-02 implementation outcome
+
+The conditional Source-style route described later in this guide is now the
+selected protocol-v7 architecture. The direct comparison that forced the change
+was:
+
+| Version                   | Player / prop behavior                                                                                        | Observed result                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Clean `main` at `d604849` | Browser simulates its player and held loose prop together with real Box3D                                     | Best local feel, but split gameplay authority and delayed remote state            |
+| Protocol-v6 overlay       | Browser owns player, Bun owns props, collision proxies stay eight ticks old, mesh follows target in one frame | Pickup snap and visible/collision/authority disagreement while walking over props |
+| Protocol v7               | Bun authority; browser runs shared player/held-body simulation, restores checkpoints, and replays commands    | Responsive bounded local physics with explicit correction and one gameplay truth  |
+
+Protocol v6 correctly centralized shared rigid bodies, but its feel layer made a
+false physical claim. `SpeculativeHeldPresenter` moved a mesh to the desired
+target within one frame. Browser collision remained approximately eight ticks
+old, ordinary rendering was roughly four to eight ticks old, and Bun used a
+different delayed player proxy. The player could therefore see, collide with,
+and authoritatively affect three different prop poses.
+
+The tests encoded the wrong oracle. A unit test required the prop to reach its
+target within one 60 Hz interval, the browser gate treated any movement over
+5 cm within 50 ms as success, release allowed a 50 cm frame discontinuity, and
+no scenario walked onto a moving body while comparing the four timelines.
+Protocol v7 replaces those assertions with shared-simulation conformance,
+bounded acceleration, walk/stand/cross contacts, replay/ack correctness, visual
+decay, and production-browser behavior gates.
+
+This outcome does not invalidate the s&box, Source, or Gaffer analysis below. It
+changes which lessons are decisive. S&box remains the reference for explicit
+identity, proxy state, authority generations, disposable replication, and
+native control joints. Source's authoritative movement, shared prediction code,
+checkpoint restore, command replay, and local physcannon simulation now define
+the player/held-prop model. `arctic-char` provides the concrete historical-proxy
+sampling pattern used during replay. Gaffer's work defines the fixed-step and
+presentation-time constraints. Box3D remains because the diagnosed failure was
+not a solver failure and the same adapter passes the Bun/browser trace.
+
+## Historical protocol-v5/v6 conclusion
+
+The following conclusion explains decision 0022's first centralized-body step.
+Where it defers Source-style player prediction, decision 0024 and the outcome
+above supersede it.
 
 Gurgur has a respectable protocol skeleton. Its reliable authority epochs,
 per-object state sequences, acknowledged delta baselines, 1,200-byte disposable
@@ -839,7 +881,7 @@ Contact fixtures should use the unnetworked one-solver trace as their oracle and
 set tolerances from engine numerical behavior. A networked result should not be
 allowed extra energy or penetration merely because its frames look smooth.
 
-## Decision summary
+## Historical protocol-v6 decision summary
 
 The most valuable parts of protocol v5 should survive:
 
@@ -850,7 +892,7 @@ The most valuable parts of protocol v5 should survive:
 - no remote rigid-body extrapolation;
 - Bun-coordinated lifecycle, persistence, claims, reset, and deletion.
 
-Decision 0022 selected and protocol v6 implements:
+Decision 0022 selected and protocol v6 implemented:
 
 - add a shared source-tick timebase and oracle-based presentation gates;
 - replace receipt-callback proxy teleports with fixed-tick kinematic targets;
@@ -860,7 +902,11 @@ Decision 0022 selected and protocol v6 implements:
   player prediction/reconciliation model;
 - retain Box3D until another engine passes the same adapter conformance suite.
 
-The make-or-break principle is simple:
+Decision 0024 subsequently keeps Bun's shared-body authority and source-time
+model, but moves players to Bun authority, replaces loose targets with numbered
+commands and checkpoints, predicts the local player plus one confirmed held
+body, removes fixed collision delay, and reconciles by restore/replay. The
+make-or-break principle remains simple:
 
 > Networked physics is correct when authority, time, and test oracle describe
 > the same world. Smooth frames are presentation evidence; they are not physics

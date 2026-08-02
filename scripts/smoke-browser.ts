@@ -44,8 +44,8 @@ const spawn = {
   y: PLAYER_HALF_HEIGHT,
   z: brush.center.z + 2.5,
 };
-const directory = await mkdtemp(join(tmpdir(), "gurgur-browser-v6-"));
-const adminToken = "browser-v6-admin";
+const directory = await mkdtemp(join(tmpdir(), "gurgur-browser-v7-"));
+const adminToken = "browser-v7-admin";
 const server = await createGurgurServer({
   port: 0,
   hostname: "127.0.0.1",
@@ -78,7 +78,7 @@ try {
     await contentionAndRecovery(chrome, peerChrome);
   }
   if (scenario === "all" || scenario === "contraption") await contraptionInteraction(chrome);
-  console.log(`protocol-v6 browser smoke passed (${scenario})`);
+  console.log(`protocol-v7 browser smoke passed (${scenario})`);
 } finally {
   await Promise.all([chrome.close(), peerChrome.close()]);
   server.stop();
@@ -211,7 +211,22 @@ async function movementAndBanding(ownerBrowser: Browser, observerBrowser: Browse
 async function pickupAndRelease(browser: Browser): Promise<void> {
   const page = await openPage(browser, ADVERSE_IMPAIRMENT);
   try {
-    await page.waitForFunction(() => Boolean(document.body.dataset.interactionTarget));
+    try {
+      await page.waitForFunction(
+        () => Boolean(document.body.dataset.interactionTarget),
+        undefined,
+        {
+          timeout: 5_000,
+        },
+      );
+    } catch {
+      const diagnostics = await page.evaluate(() => ({
+        body: { ...document.body.dataset },
+        feel: (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel(),
+        presentation: (window as unknown as SmokeWindow).__gurgurDiagnostics.presentation(),
+      }));
+      throw new Error(`pickup target unavailable: ${JSON.stringify(diagnostics)}`);
+    }
     const targetId = await page.evaluate(() => document.body.dataset.interactionTarget!);
     const initialAuthority = await page.evaluate((target) => {
       const entity = (window as unknown as SmokeWindow).__gurgurDiagnostics
@@ -224,25 +239,36 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       return entity.authorityVersion;
     }, targetId);
     await pressPrimary(page);
-    await page.waitForFunction(
-      (target) =>
-        document.body.dataset.manipulationTarget === target &&
-        document.body.dataset.interactionOutline === "held" &&
-        document.body.dataset.speculativeManipulation === "true",
-      targetId,
-    );
-    const cadenceStart = await page.evaluate(() =>
-      Number(document.body.dataset.manipulationStateCount ?? 0),
-    );
-    await page.waitForTimeout(500);
-    const cadenceCount =
-      (await page.evaluate(() => Number(document.body.dataset.manipulationStateCount ?? 0))) -
-      cadenceStart;
-    if (cadenceCount < 20)
-      throw new Error(`active manipulation target cadence was too low (${cadenceCount}/500ms)`);
+    try {
+      await page.waitForFunction(
+        (target) =>
+          (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel().prediction.held ===
+            target && document.body.dataset.interactionOutline === "held",
+        targetId,
+        { timeout: 5_000 },
+      );
+    } catch {
+      const diagnostics = await page.evaluate(
+        (target) => ({
+          body: { ...document.body.dataset },
+          feel: (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel(),
+          targetReplication: (window as unknown as SmokeWindow).__gurgurDiagnostics
+            .replication()
+            .find((state) => state.runtimeId === target),
+        }),
+        targetId,
+      );
+      throw new Error(`server did not confirm loose pickup: ${JSON.stringify(diagnostics)}`);
+    }
+    const pickupTrace = await tracePositions(page, targetId, 300);
+    const pickupMaximumStep = maximumStep(pickupTrace);
+    if (pickupTrace.length < 10 || pickupMaximumStep >= 0.25)
+      throw new Error(
+        `predicted pickup teleported: ${pickupTrace.length} frames, ${(pickupMaximumStep * 100).toFixed(2)}cm maximum step`,
+      );
     const startPosition = await position(page, targetId);
     const previousLookAt = await page.evaluate(() => document.body.dataset.lookAt ?? "");
-    const speculativeResponse = page.evaluate(
+    const predictedResponse = page.evaluate(
       ({ target, previousLook }) =>
         new Promise<number>((resolve) => {
           let lookAt: number | null = null;
@@ -264,7 +290,7 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
                 state.position.x - start.x,
                 state.position.y - start.y,
                 state.position.z - start.z,
-              ) > 0.05
+              ) > 0.0001
             ) {
               resolve(now - lookAt);
               return;
@@ -280,9 +306,11 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       { target: targetId, previousLook: previousLookAt },
     );
     await turnTouch(page, 150);
-    const responseMs = await speculativeResponse;
-    if (responseMs >= 50)
-      throw new Error(`speculative held-prop response took ${responseMs.toFixed(1)}ms`);
+    const responseMs = await predictedResponse;
+    // Measure the beginning of physical motion, not the time required to cover
+    // an arbitrary distance under the grab controller's acceleration limit.
+    if (responseMs >= 75)
+      throw new Error(`predicted held-prop response took ${responseMs.toFixed(1)}ms`);
     await page.waitForFunction(
       ({ target, start }) => {
         const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
@@ -327,7 +355,8 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
         return (
           entity?.ownerPlayerId === null &&
           entity.authorityVersion === authority &&
-          document.body.dataset.manipulationTarget === "" &&
+          (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel().prediction.held ===
+            null &&
           document.body.dataset.interactionOutline !== "held"
         );
       },
@@ -341,7 +370,7 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
         Math.hypot(sample.x - previous.x, sample.y - previous.y, sample.z - previous.z),
       );
     }, 0);
-    if (samples.length < 10 || maximumFrameStep >= 0.5)
+    if (samples.length < 10 || maximumFrameStep >= 0.25)
       throw new Error(
         `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step`,
       );
@@ -369,15 +398,27 @@ async function contentionAndRecovery(firstBrowser: Browser, secondBrowser: Brows
     await Promise.all([pressPrimary(first), pressPrimary(second)]);
     const holder = await Promise.race([
       first
-        .waitForFunction((target) => document.body.dataset.manipulationTarget === target, targetId)
+        .waitForFunction(
+          (target) =>
+            (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel().prediction.held ===
+            target,
+          targetId,
+        )
         .then(() => first),
       second
-        .waitForFunction((target) => document.body.dataset.manipulationTarget === target, targetId)
+        .waitForFunction(
+          (target) =>
+            (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel().prediction.held ===
+            target,
+          targetId,
+        )
         .then(() => second),
     ]);
     const observer = holder === first ? second : first;
     await observer.waitForFunction(
-      (target) => document.body.dataset.manipulationTarget !== target,
+      (target) =>
+        (window as unknown as SmokeWindow).__gurgurDiagnostics.clientFeel().prediction.held !==
+        target,
       targetId,
     );
     for (const page of [holder, observer]) {
@@ -672,6 +713,40 @@ async function position(page: Page, id: string) {
   }, id);
 }
 
+async function tracePositions(
+  page: Page,
+  id: string,
+  durationMs: number,
+): Promise<Array<{ x: number; y: number; z: number }>> {
+  return page.evaluate(
+    ({ runtimeId, duration }) =>
+      new Promise<Array<{ x: number; y: number; z: number }>>((resolve) => {
+        const samples: Array<{ x: number; y: number; z: number }> = [];
+        const startedAt = performance.now();
+        const sample = (now: number): void => {
+          const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
+            .presentation()
+            .find((candidate) => candidate.runtimeId === runtimeId);
+          if (state) samples.push({ ...state.position });
+          if (now - startedAt >= duration) resolve(samples);
+          else requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      }),
+    { runtimeId: id, duration: durationMs },
+  );
+}
+
+function maximumStep(samples: Array<{ x: number; y: number; z: number }>): number {
+  return samples.slice(1).reduce((maximum, sample, index) => {
+    const previous = samples[index]!;
+    return Math.max(
+      maximum,
+      Math.hypot(sample.x - previous.x, sample.y - previous.y, sample.z - previous.z),
+    );
+  }, 0);
+}
+
 async function pressPrimary(page: Page): Promise<void> {
   await page.evaluate(() => {
     const pad = (window as unknown as SmokeWindow).__gurgurSmokePad;
@@ -727,13 +802,8 @@ type SmokeWindow = {
         underrunSamples: number;
         trackDelayTicks: Record<string, number>;
       };
-      speculative: {
-        active: string | null;
-        reconciling: string | null;
-        positionErrorMetres: number;
-        rotationErrorRadians: number;
-        maximumPositionErrorMetres: number;
-        maximumRotationErrorRadians: number;
+      prediction: {
+        held: string | null;
       };
     };
     presentation(): Array<{

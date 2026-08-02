@@ -7,6 +7,7 @@ import type {
   ManipulationStatePacket,
   NetworkObjectState,
   OwnershipChangedPacket,
+  PredictionCheckpointPacket,
   LifecycleMessage,
   RuntimeId,
 } from "@gurgur/engine";
@@ -20,13 +21,8 @@ export type PhysicsWorkerRequest =
       localPlayerId: RuntimeId;
     }
   | { type: "input"; command: InputCommand }
-  | { type: "network-states"; states: NetworkObjectState[]; receivedAtMs: number }
-  | {
-      type: "clock";
-      serverTick: number;
-      receivedAtMs: number;
-      oneWayDelayMs: number;
-    }
+  | { type: "network-states"; states: NetworkObjectState[] }
+  | { type: "checkpoint"; message: PredictionCheckpointPacket }
   | { type: "lifecycle"; message: LifecycleMessage }
   | { type: "ownership-changed"; message: OwnershipChangedPacket }
   | { type: "manipulation-changed"; message: ManipulationChangedMessage }
@@ -40,12 +36,17 @@ export type PhysicsWorkerResponse =
       states: NetworkObjectState[];
       producedAtMs: number;
       discardedCatchUpSeconds: number;
+      reconciled: boolean;
+      inputSequence: number;
+      acknowledgment: number | null;
+      replayCount: number;
+      contactIds: RuntimeId[];
+      supportIds: RuntimeId[];
     }
-  | { type: "owner-states"; states: NetworkObjectState[] }
+  | { type: "input-command"; command: InputCommand }
   | { type: "manipulation-request"; message: ManipulationRequestMessage }
   | { type: "manipulation-state"; message: ManipulationStatePacket }
   | { type: "manipulation-drop"; message: ManipulationDropMessage }
-  | { type: "owner-commit"; states: NetworkObjectState[] }
   | { type: "error"; message: string };
 
 export type OwnershipClient = {
@@ -55,8 +56,8 @@ export type OwnershipClient = {
     localPlayerId: RuntimeId,
   ): Promise<void>;
   pushInput(command: InputCommand): void;
-  pushNetworkStates(states: NetworkObjectState[], receivedAtMs: number): void;
-  updateClock(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
+  pushNetworkStates(states: NetworkObjectState[]): void;
+  checkpoint(message: PredictionCheckpointPacket): void;
   applyLifecycle(message: LifecycleMessage): void;
   ownershipChanged(message: OwnershipChangedPacket): void;
   manipulationChanged(message: ManipulationChangedMessage): void;
@@ -70,12 +71,19 @@ export function createOwnershipClient(callbacks: {
     states: NetworkObjectState[],
     producedAtMs: number,
     discardedCatchUpSeconds: number,
+    reconciled: boolean,
+    trace: {
+      inputSequence: number;
+      acknowledgment: number | null;
+      replayCount: number;
+      contactIds: RuntimeId[];
+      supportIds: RuntimeId[];
+    },
   ): void;
-  ownerStates(states: NetworkObjectState[]): void;
+  inputCommand(command: InputCommand): void;
   manipulationRequest(message: ManipulationRequestMessage): void;
   manipulationState(message: ManipulationStatePacket): void;
   manipulationDrop(message: ManipulationDropMessage): void;
-  ownerCommit(states: NetworkObjectState[]): void;
   error(message: string): void;
 }): OwnershipClient {
   const worker = new Worker("/physics-worker.js", {
@@ -90,17 +98,27 @@ export function createOwnershipClient(callbacks: {
       for (const resolve of ready.get(message.worldEpoch) ?? []) resolve();
       ready.delete(message.worldEpoch);
     } else if (message.type === "local-states") {
-      callbacks.localStates(message.states, performance.now(), message.discardedCatchUpSeconds);
-    } else if (message.type === "owner-states") {
-      callbacks.ownerStates(message.states);
+      callbacks.localStates(
+        message.states,
+        performance.now(),
+        message.discardedCatchUpSeconds,
+        message.reconciled,
+        {
+          inputSequence: message.inputSequence,
+          acknowledgment: message.acknowledgment,
+          replayCount: message.replayCount,
+          contactIds: message.contactIds,
+          supportIds: message.supportIds,
+        },
+      );
+    } else if (message.type === "input-command") {
+      callbacks.inputCommand(message.command);
     } else if (message.type === "manipulation-request") {
       callbacks.manipulationRequest(message.message);
     } else if (message.type === "manipulation-state") {
       callbacks.manipulationState(message.message);
     } else if (message.type === "manipulation-drop") {
       callbacks.manipulationDrop(message.message);
-    } else if (message.type === "owner-commit") {
-      callbacks.ownerCommit(message.states);
     } else {
       callbacks.error(message.message);
     }
@@ -119,10 +137,8 @@ export function createOwnershipClient(callbacks: {
       return promise;
     },
     pushInput: (command) => post({ type: "input", command }),
-    pushNetworkStates: (states, receivedAtMs) =>
-      post({ type: "network-states", states, receivedAtMs }),
-    updateClock: (serverTick, receivedAtMs, oneWayDelayMs) =>
-      post({ type: "clock", serverTick, receivedAtMs, oneWayDelayMs }),
+    pushNetworkStates: (states) => post({ type: "network-states", states }),
+    checkpoint: (message) => post({ type: "checkpoint", message }),
     applyLifecycle: (message) => post({ type: "lifecycle", message }),
     ownershipChanged: (message) => post({ type: "ownership-changed", message }),
     manipulationChanged: (message) => post({ type: "manipulation-changed", message }),

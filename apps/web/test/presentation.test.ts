@@ -40,6 +40,13 @@ describe("source-tick proxy presentation", () => {
 
   test("adapts each authority track without making one late actor delay every host body", () => {
     const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    presentation.pushNetwork(
+      [
+        { ...state(4, 4), id: { index: 1, generation: 1 }, sourceTick: 8, flags: 1 },
+        { ...state(7, 7), id: { index: 2, generation: 1 }, sourceTick: 15, flags: 1 },
+      ],
+      900,
+    );
     presentation.updateClock(20, 1_000, 0);
     presentation.pushNetwork(
       [
@@ -78,6 +85,16 @@ describe("source-tick proxy presentation", () => {
     expect(presentation.sample(10_000)[0]!.position.x).toBe(1);
     presentation.replaceReliable(state(0, 7), 100, false);
     expect(presentation.sample(100)[0]!.position.x).toBe(7);
+  });
+
+  test("retains the authoritative checkpoint target beneath a local prediction track", () => {
+    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    presentation.pushNetwork([state(1, 3)], 10);
+    presentation.pushLocal([state(2, 9)], 20);
+    expect(presentation.sample(20)[0]!.position.x).toBe(9);
+    expect(presentation.latestNetwork(state(1, 0).id)?.position.x).toBe(3);
+    presentation.remove(state(1, 0).id);
+    expect(presentation.latestNetwork(state(1, 0).id)).toBeNull();
   });
 
   test("samples source cadence instead of compressing a late packet burst", () => {

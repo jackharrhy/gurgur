@@ -15,11 +15,12 @@ specification tentative.
 - [`0016-webgpu-lighting.md`](0016-webgpu-lighting.md)
 - [`0017-loopback-development-mcp.md`](0017-loopback-development-mcp.md)
 - [`0018-positional-lintalker-speech.md`](0018-positional-lintalker-speech.md)
-- [`0019-object-ownership-netcode.md`](0019-object-ownership-netcode.md) (partially superseded)
+- [`0019-object-ownership-netcode.md`](0019-object-ownership-netcode.md) (superseded)
 - [`0020-source-style-physics-contraptions.md`](0020-source-style-physics-contraptions.md)
 - [`0021-fixed-authority-contraption-manipulation.md`](0021-fixed-authority-contraption-manipulation.md)
-- [`0022-centralized-shared-rigidbody-physics.md`](0022-centralized-shared-rigidbody-physics.md)
-- [`0023-client-feel-presentation.md`](0023-client-feel-presentation.md)
+- [`0022-centralized-shared-rigidbody-physics.md`](0022-centralized-shared-rigidbody-physics.md) (partially superseded)
+- [`0023-client-feel-presentation.md`](0023-client-feel-presentation.md) (superseded)
+- [`0024-source-style-networked-physics.md`](0024-source-style-networked-physics.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

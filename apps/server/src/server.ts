@@ -8,21 +8,20 @@ import {
   STATE_PUBLISH_HZ,
   STATE_BACKPRESSURE_BYTES,
   STATE_MAX_RETRANSMITS,
-  OWNED_STATE_TAG,
+  INPUT_BUNDLE_TAG,
   MANIPULATION_STATE_TAG,
-  OWNER_COMMIT_TAG,
   STATE_ACK_TAG,
   StateReplicationPeer,
   binaryPacketTag,
   cloneNetworkState,
-  decodeOwnedState,
+  decodeInputBundle,
   decodeManipulationState,
-  decodeOwnerCommit,
   decodeStateAck,
   decodeClientControl,
   encodeBootstrapState,
   encodeLifecycle,
   encodeOwnershipChanged,
+  encodePredictionCheckpoint,
   encodeStateCluster,
   type RuntimeId,
   type LifecycleMessage,
@@ -60,9 +59,10 @@ type ClientData = {
   droppedStatePackets: number;
   rtcNegotiating: boolean;
   ownerPacketWindowStartedAt: number;
-  ownerStatePacketCount: number;
+  inputPacketCount: number;
   manipulationPacketCount: number;
   ackPacketCount: number;
+  lastCheckpointTick: number;
 };
 type SessionRecord = {
   playerId: RuntimeId;
@@ -230,6 +230,17 @@ export async function createGurgurServer(
           break;
         }
       }
+      if (
+        socket.data.lastCheckpointTick !== game.serverTick &&
+        game.serverTick % Math.max(1, PHYSICS_HZ / STATE_PUBLISH_HZ) === 0 &&
+        channel.bufferedAmount < MAX_STATE_BUFFERED_BYTES
+      ) {
+        const checkpoint = game.predictionCheckpoint(socket.data.playerId);
+        if (checkpoint) {
+          channel.send(Buffer.from(encodePredictionCheckpoint(checkpoint)));
+          socket.data.lastCheckpointTick = game.serverTick;
+        }
+      }
     }
   };
   const broadcast = (states: NetworkObjectState[]): void => {
@@ -325,19 +336,17 @@ export async function createGurgurServer(
       const now = performance.now();
       if (now - socket.data.ownerPacketWindowStartedAt >= 1_000) {
         socket.data.ownerPacketWindowStartedAt = now;
-        socket.data.ownerStatePacketCount = 0;
+        socket.data.inputPacketCount = 0;
         socket.data.manipulationPacketCount = 0;
         socket.data.ackPacketCount = 0;
       }
       const tag = binaryPacketTag(packet);
-      if (tag === OWNED_STATE_TAG) {
-        socket.data.ownerStatePacketCount += 1;
-        if (socket.data.ownerStatePacketCount > 120) return true;
-        const ownerState = decodeOwnedState(packet);
-        if (ownerState.worldEpoch === game.worldEpoch && socket.data.playerId !== null) {
-          const accepted = game.acceptOwnedStates(socket.data.playerId, ownerState.states);
-          if (accepted) broadcast(accepted);
-        }
+      if (tag === INPUT_BUNDLE_TAG) {
+        socket.data.inputPacketCount += 1;
+        if (socket.data.inputPacketCount > 120) return true;
+        const input = decodeInputBundle(packet);
+        if (input.worldEpoch === game.worldEpoch && socket.data.playerId !== null)
+          for (const command of input.commands) game.acceptInput(socket.data.playerId, command);
         return true;
       }
       if (tag === MANIPULATION_STATE_TAG) {
@@ -389,7 +398,7 @@ export async function createGurgurServer(
         : {}),
     });
     socket.data.peerConnection = peer;
-    const stateChannel = peer.createDataChannel("gurgur-state-v6", {
+    const stateChannel = peer.createDataChannel("gurgur-state-v7", {
       ordered: false,
       maxRetransmits: STATE_MAX_RETRANSMITS,
     });
@@ -407,7 +416,7 @@ export async function createGurgurServer(
         channel.close();
         return;
       }
-      if (channel.label === "gurgur-owner-v6" && !socket.data.ownerChannel) {
+      if (channel.label === "gurgur-input-v7" && !socket.data.ownerChannel) {
         socket.data.ownerChannel = channel;
         channel.stateChanged.subscribe((state) => {
           if (state === "closed" && socket.data.ownerChannel === channel)
@@ -415,7 +424,7 @@ export async function createGurgurServer(
         });
         channel.onMessage.subscribe((packet) => {
           if (typeof packet === "string" || !acceptOwnerPacket(socket, packet))
-            socket.close(1007, "invalid owner-state datagram");
+            socket.close(1007, "invalid input datagram");
         });
         return;
       }
@@ -651,9 +660,10 @@ export async function createGurgurServer(
               droppedStatePackets: 0,
               rtcNegotiating: false,
               ownerPacketWindowStartedAt: performance.now(),
-              ownerStatePacketCount: 0,
+              inputPacketCount: 0,
               manipulationPacketCount: 0,
               ackPacketCount: 0,
+              lastCheckpointTick: -1,
             },
           })
         )
@@ -754,6 +764,8 @@ export async function createGurgurServer(
                 states: bootstrapStates,
               }),
             );
+            const initialCheckpoint = game.predictionCheckpoint(session.playerId);
+            if (initialCheckpoint) socket.send(encodePredictionCheckpoint(initialCheckpoint));
             if (reassigned) broadcastOwnership(reassigned);
             void startRtcOffer(socket);
             if (createdPlayer) {
@@ -783,7 +795,7 @@ export async function createGurgurServer(
                   worldEpoch: game.worldEpoch,
                   requestId: null,
                   id: { ...createdState.id },
-                  ownerPlayerId: { ...session.playerId },
+                  ownerPlayerId: null,
                   authorityVersion: createdState.authorityVersion,
                   state: createdState,
                 });
@@ -887,29 +899,6 @@ export async function createGurgurServer(
           socket.close(1007, "invalid control packet");
           return;
         }
-        try {
-          if (binaryPacketTag(message) === OWNER_COMMIT_TAG && socket.data.playerId) {
-            const commit = decodeOwnerCommit(message);
-            const accepted =
-              commit.worldEpoch === game.worldEpoch
-                ? game.acceptOwnedStates(socket.data.playerId, commit.states, true)
-                : null;
-            if (accepted) {
-              for (const state of accepted)
-                broadcastOwnership({
-                  worldEpoch: game.worldEpoch,
-                  requestId: null,
-                  id: { ...state.id },
-                  ownerPlayerId: { ...socket.data.playerId },
-                  authorityVersion: state.authorityVersion,
-                  state,
-                });
-            }
-            return;
-          }
-        } catch {
-          // Invalid reliable gameplay packets close the control connection below.
-        }
         socket.close(1007, "invalid reliable gameplay packet");
       },
       close(socket) {
@@ -920,6 +909,7 @@ export async function createGurgurServer(
         if (!session || session.socket !== socket) return;
         session.socket = null;
         if (shuttingDown) return;
+        game.releasePlayerGrab(session.playerId);
         for (const changed of game.endManipulationsForPlayer(session.playerId))
           broadcastManipulation(changed);
         session.disconnectTimer = setTimeout(() => {

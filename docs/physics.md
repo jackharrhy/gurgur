@@ -55,23 +55,23 @@ substeps. Forces, impulses, kinematic targets, controller input, and mechanism
 commands are applied before the step. Contacts, sensors, moved bodies, sleep
 transitions, and deferred destruction are processed afterward.
 
-Bun dynamically simulates every shared prop, fixed-authority mechanism, MCP
-player, and diagnostic body. A browser worker simulates only that browser's
-geometric player controller. Every shared network body in a browser world is a
-motion-disabled kinematic proxy. Ordinary contact never changes authority.
+Bun dynamically simulates every player, shared prop, fixed-authority mechanism,
+MCP player, and diagnostic body. A browser worker dynamically predicts its local
+geometric player and one confirmed held loose prop. Every other shared body is a
+kinematic collision/query proxy. Ordinary contact never changes authority.
 
-Disposable state is sampled by source simulation tick rather than receipt time.
-Browser collision proxies and Bun's externally owned player proxies are driven
-by position-and-rotation kinematic targets at fixed-step boundaries from the
-same eight-tick timeline. Packet callbacks update buffers and capability flags;
-they do not teleport ordinary collision proxies.
+Disposable state is indexed by source simulation tick rather than receipt time.
+Browser collision proxies normally target the newest accepted authoritative
+transform. During checkpoint replay they sample retained history at the replayed
+server tick, then return to newest state. Packet callbacks update history and
+capability flags; they do not advance physics.
 
 The host and browser loops execute at most four catch-up ticks per turn.
 Persistence captures host application state only at a completed tick boundary.
-Locally owned rendering interpolates consecutive completed worker steps. Remote
-render tracks adapt independently from four to eight source ticks using recent
-late-arrival and underrun evidence and never extrapolate. Render timing does not
-alter the fixed eight-tick collision or host player-proxy tracks.
+Local prediction renders the newest completed worker step. Remote render tracks
+adapt independently from four to eight source ticks and never extrapolate.
+Nearby, touching, or supporting rigid bodies temporarily render from their
+collision-aligned pose; render timing never alters physics.
 
 ## Coordinates and scale
 
@@ -160,8 +160,9 @@ The player uses Box3D's geometric capsule mover, not a dynamic rigid body.
 Player lifecycle, intent policy, interaction state, controller rules, collider
 dimensions, and tuning live in `packages/game`; the engine retains only generic
 capsule/query primitives. The standing capsule is 1.8 m tall with a 0.35 m
-radius. The shared controller consumes fixed input commands on the current
-authority: the owning browser for network players and Bun for MCP players.
+radius. Bun consumes numbered fixed input commands for every player. The browser
+replays the same commands through the same controller for its bounded local
+prediction.
 
 Each controller tick:
 
@@ -170,13 +171,13 @@ Each controller tick:
 3. resolves penetration and desired displacement with `b3SolvePlanes`;
 4. limits motion with `b3World_CastMover`;
 5. repeats for at most five iterations with a 1 cm movement tolerance;
-6. clips velocity and applies bounded reaction impulses only where the current
-   authority also owns the dynamic body.
+6. clips velocity and applies bounded reaction impulses only where that
+   simulation also dynamically owns the affected body.
 
-Browser-side shared bodies are kinematic proxies, so local player movement
-cannot author an impulse for them. Bun's delayed kinematic player proxy can
-push Bun-owned bodies in the shared solver. This is the selected one-way
-player/body coupling contract.
+Browser-side unpredicted bodies are kinematic proxies, so their local reaction
+impulse never becomes gameplay truth. Bun applies authoritative player reaction
+impulses to Bun-owned bodies. A confirmed held prop is the one shared body
+dynamically included in browser prediction and is corrected by Bun checkpoints.
 
 A fixed-tick controller result must be finite and move no more than one metre.
 The current authority rejects a larger Box3D depenetration result, retains the
@@ -184,11 +185,10 @@ prior pose, consumes the yaw/jump edge, and zeroes vertical velocity. This is a
 safety invariant for pathological overlapping contact piles, not ordinary speed
 clamping.
 
-The player authority respawns it at `info_player_start` after it falls ten metres
-below the map's lowest static collision vertex. Respawn clears held movement and
-grabs, recreates the query proxy, and commits the discontinuity through reliable
-control. A disconnected network player's frozen host proxy therefore cannot
-accumulate unbounded free-fall state beneath the map.
+Bun respawns a player at `info_player_start` after it falls ten metres below the
+map's lowest static collision vertex. Respawn clears held movement and grabs,
+recreates the query proxy, increments the reliable generation, and replaces
+browser prediction history.
 
 Ground is walkable through 50 degrees. The controller steps up at most 0.30 m and
 snaps down at most 0.40 m while grounded. Jumping suppresses ground snapping until
@@ -204,34 +204,28 @@ geometric mover, capsule-fit, sweep, and ordinary controller-ray queries.
 
 ## Prop target controller
 
-Grabbing is a game-owned target controller, not ownership transfer. The browser
-chooses the first grabbable body on its 3.25 m view ray and requests an
-exclusive claim containing identity, current authority version, centre-of-mass
-anchor, and hold distance. Bun validates type, version, epoch, finite values,
-availability, and reach; the first valid request wins.
+Grabbing is a game-owned target controller, not ownership transfer. Primary is a
+numbered command edge. Bun raycasts from its authoritative player pose and view,
+validates type, epoch, availability, and reach, and grants the first valid loose
+prop claim. The claim and complete grab seed return in the player's next
+prediction checkpoint.
 
-The browser derives stable distance from compiled prop extent and advances a
-target toward the player's chest-forward view at bounded speed. A filtered ray
-that excludes the target shortens motion before world geometry. Desired
-rotation preserves the orientation captured relative to player yaw.
+After confirmation, Bun and the browser run the same `stepPropGrab`. The target
+moves toward the chest-forward view at at most 12 m/s, rotation at 2π rad/s, and
+the body drive is limited to 12 m/s and 50 m/s². A filtered obstruction ray
+shortens carry distance. The prop is a real dynamic body in the browser's local
+prediction world and is rendered from that body, never from `targetPosition`.
 
-At 60 Hz the browser publishes only that disposable target. Bun's private
-control joint converts target error into force and torque while the prop,
-contacts, and every other shared body remain in one solver. Driving the centre
-of mass avoids arbitrary face-hit torque for loose props; explicitly
-manipulable contraptions retain their hit offset. Bun publishes the manipulated
-body as a 60 Hz hot state while ordinary body state remains 30 Hz.
+Bun remains gameplay authority and publishes the held body as a 60 Hz hot state.
+Each checkpoint restores player, body, velocities, and grab seed before command
+replay. The browser sends neither a loose-prop transform nor a loose grab target.
 
-After Bun reliably grants a loose-prop claim, the renderer may move only that
-prop's mesh from the local target over one 60 Hz interval. The physics worker's
-ordinary kinematic proxy remains authoritative for player collision and queries.
-The speculative pose is never installed in Box3D or encoded on the wire. On
-release its visual offset converges to the authoritative render track with
-bounded linear and angular correction. Contraption presentation stays entirely
-authoritative because a target-following part without its joint graph would be
-misleading.
+Release is another command edge. A browser that already has a confirmed grab
+predicts that edge during command replay, while Bun remains authoritative for
+the claim and final body state. This prevents later unacknowledged commands from
+continuing a grab that their own command stream has released. Presentation
+decays toward the authoritative body with a per-frame discontinuity bound. The
+body never changes authority, solver, or persisted identity.
 
-Release destroys only the temporary control joint. The prop never changes body
-type, authority version, solver, or persisted identity, so there is no final
-pose/velocity physics handoff to reconcile. Presentation reconciliation changes
-only the claimant's rendered mesh.
+Explicitly `manipulate` jointed bodies keep the separate server-only control
+joint path. Predicting one detached part without its joint graph is forbidden.

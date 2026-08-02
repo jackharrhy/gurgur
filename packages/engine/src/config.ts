@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 export const PHYSICS_HZ = 60;
 export const PHYSICS_DT = 1 / PHYSICS_HZ;
 export const PHYSICS_SUBSTEPS = 4;
@@ -18,3 +18,6 @@ export const NETWORK_FLAG_REVERSED = 1 << 2;
 export const NETWORK_FLAG_HELD = 1 << 4;
 export const MAX_CATCH_UP_TICKS = 4;
 export const INPUT_INTENT_TIMEOUT_TICKS = Math.ceil(0.25 / PHYSICS_DT);
+export const INPUT_BUNDLE_REDUNDANCY = 4;
+export const INPUT_QUEUE_CAPACITY = 128;
+export const PREDICTION_HISTORY_CAPACITY = 128;

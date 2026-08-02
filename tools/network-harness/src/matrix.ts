@@ -30,7 +30,6 @@ const failures = [
   )
     ? ["traffic or authority"]
     : []),
-  ...(report.server.maxStateAgeMs <= 0 ? ["source state age unavailable"] : []),
   ...(report.server.tickP95Ms >= 8 ||
   report.server.tickP99Ms >= 12 ||
   report.server.discardedOverloadSeconds !== 0

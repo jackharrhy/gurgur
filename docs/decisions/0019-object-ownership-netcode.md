@@ -1,9 +1,9 @@
 # 0019: Use s&box-style per-object network authority
 
-Status: partially superseded by
-[0022](0022-centralized-shared-rigidbody-physics.md), 2026-07-31. Browser player
-authority and the reliable/disposable transport split remain accepted; prop
-grab leases do not.
+Status: superseded by [0022](0022-centralized-shared-rigidbody-physics.md) and
+[0024](0024-source-style-networked-physics.md), 2026-08-02. The
+reliable/disposable transport split remains accepted; browser player/body
+authority and prop grab leases do not.
 
 ## Decision
 

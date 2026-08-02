@@ -44,6 +44,7 @@ export function createPlayerInput(
   let moveTouch: (TouchState & { startX: number; startY: number }) | null = null;
   let lookTouch: TouchState | null = null;
   let textEntryActive = false;
+  let flush = (): void => {};
 
   const clearKeys = (): void => keys.clear();
   const focusCanvas = (): void => {
@@ -88,6 +89,7 @@ export function createPlayerInput(
     yaw -= event.movementX * 0.0022;
     pitch = Math.max(-1.35, Math.min(1.35, pitch - event.movementY * 0.0022));
     onLook(yaw, pitch);
+    flush();
   };
   const mouseDown = (event: MouseEvent): void => {
     if (textEntryActive) return;
@@ -130,6 +132,7 @@ export function createPlayerInput(
       yaw -= dx * 0.006;
       pitch = Math.max(-1.35, Math.min(1.35, pitch - dy * 0.006));
       onLook(yaw, pitch);
+      flush();
     }
   };
   const pointerUp = (event: PointerEvent): void => {
@@ -153,7 +156,7 @@ export function createPlayerInput(
     gamepadCrouch = Boolean(gamepad.buttons[1]?.pressed);
     return { x: deadzone(gamepad.axes[0] ?? 0), z: -deadzone(gamepad.axes[1] ?? 0) };
   };
-  const flush = (): void => {
+  flush = (): void => {
     if (worldEpoch === null || document.hidden) return;
     const gamepad = pollGamepad();
     const touchX = moveTouch ? Math.max(-1, Math.min(1, (moveTouch.x - moveTouch.startX) / 55)) : 0;

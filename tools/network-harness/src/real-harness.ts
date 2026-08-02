@@ -17,9 +17,10 @@ import {
   decodeOwnershipChanged,
   decodeServerControl,
   decodeStateCluster,
-  encodeOwnedState,
+  encodeInputBundle,
   encodeStateAck,
   unwrapTick32,
+  type InputCommand,
   type NetworkPlayerState,
   type RuntimeId,
   type WelcomeMessage,
@@ -28,6 +29,7 @@ import {
 import { PresentationBuffer } from "../../../apps/web/src/presentation";
 import { createGurgurServer } from "../../../apps/server/src/server";
 import { guardIceUdpSockets } from "../../../apps/server/src/rtc";
+import { WORLD_BUNDLE } from "../../../apps/server/src/world";
 import { NETWORK_PROFILES } from "./profiles";
 import { UnreliableDatagramLink, type NetworkProfile } from "./unreliable-datagram-link";
 
@@ -50,7 +52,7 @@ export type ProfileReport = {
 };
 
 export type HarnessReport = {
-  reportVersion: 6;
+  reportVersion: 7;
   clientCount: number;
   propCount: number;
   durationMs: number;
@@ -64,7 +66,7 @@ type HarnessClient = {
   profile: NetworkProfile;
   socket: WebSocket;
   peer: RTCPeerConnection;
-  owner: RTCDataChannel;
+  input: RTCDataChannel;
   state: RTCDataChannel;
   welcome: WelcomeMessage;
   world: WorldManifestMessage;
@@ -74,7 +76,9 @@ type HarnessClient = {
   inbound: UnreliableDatagramLink<ArrayBuffer>;
   presentation: PresentationBuffer;
   player: NetworkPlayerState;
-  nextPublishMs: number;
+  nextInputMs: number;
+  nextInputSequence: number;
+  inputHistory: InputCommand[];
   renderTarget: RuntimeId | null;
   pathOracle: PathOracle | null;
   lastTargetStateAtMs: number | null;
@@ -89,6 +93,7 @@ type HarnessClient = {
 type RenderMetrics = {
   nextMs: number;
   previousZ: number | null;
+  previousOracleZ: number | null;
   eligibleFrames: number;
   advancingFrames: number;
   oracleFrames: number;
@@ -99,8 +104,8 @@ type RenderMetrics = {
 type PathOracle = {
   anchorTimelineTick: number;
   anchorReceivedAtMs: number;
-  anchorZ: number;
   latestTimelineTick: number;
+  samples: { timelineTick: number; z: number }[];
 };
 
 export async function runRealNetworkHarness(options: {
@@ -115,16 +120,18 @@ export async function runRealNetworkHarness(options: {
     throw new Error("clientCount must be between 2 and 32");
   if (!Number.isInteger(propCount) || propCount < 6 || propCount > 512)
     throw new Error("propCount must be between 6 and 512");
-  const directory = await mkdtemp(join(tmpdir(), "gurgur-network-v6-"));
+  const directory = await mkdtemp(join(tmpdir(), "gurgur-network-v7-"));
   const server = await createGurgurServer({
     port: 0,
     hostname: "127.0.0.1",
     databasePath: join(directory, "world.sqlite"),
-    extraDynamicBodies: propCount - 6,
+    extraDynamicBodies: Math.max(
+      0,
+      propCount - WORLD_BUNDLE.entities.filter((entity) => entity.body !== null).length,
+    ),
   });
   const profiles = [NETWORK_PROFILES.local, NETWORK_PROFILES.typical, NETWORK_PROFILES.adverse];
   const clients: HarnessClient[] = [];
-  const publicationTimes = new Map<string, { atMs: number; profile: string }>();
   try {
     clients.push(
       ...(await Promise.all(
@@ -138,15 +145,15 @@ export async function runRealNetworkHarness(options: {
       client.startedAt = startedAt;
       client.outbound = new UnreliableDatagramLink(client.profile, seed + client.index * 2);
       client.inbound = new UnreliableDatagramLink(client.profile, seed + client.index * 2 + 1);
-      client.nextPublishMs = 0;
+      client.nextInputMs = 0;
       for (const render of Object.values(client.renders)) render.nextMs = 300;
     }
     while (performance.now() - startedAt < durationMs) {
       const now = performance.now() - startedAt;
       for (const client of clients) {
-        publishOwnerState(client, now, publicationTimes);
+        publishInput(client, now);
         deliverOutbound(client, now);
-        deliverInbound(client, now, publicationTimes);
+        deliverInbound(client, now);
         samplePresentation(client, now);
       }
       await Bun.sleep(2);
@@ -210,7 +217,7 @@ export async function runRealNetworkHarness(options: {
       }),
     );
     return {
-      reportVersion: 6,
+      reportVersion: 7,
       clientCount,
       propCount,
       durationMs,
@@ -230,46 +237,43 @@ export async function runRealNetworkHarness(options: {
   }
 }
 
-function publishOwnerState(
-  client: HarnessClient,
-  nowMs: number,
-  publicationTimes: Map<string, { atMs: number; profile: string }>,
-): void {
-  while (nowMs >= client.nextPublishMs) {
-    client.player = {
-      ...client.player,
-      stateSequence: (client.player.stateSequence + 2) & 0xffff,
-      sourceTick: (client.player.sourceTick + 2) >>> 0,
-      position: {
-        ...client.player.position,
-        z: client.player.position.z + 5 / 30,
-      },
-      linearVelocity: { x: 0, y: 0, z: 5 },
-    };
-    const packet = encodeOwnedState({
+function publishInput(client: HarnessClient, nowMs: number): void {
+  while (nowMs >= client.nextInputMs) {
+    const command: InputCommand = {
+      type: "input",
+      protocolVersion: PROTOCOL_VERSION,
       worldEpoch: client.world.worldEpoch,
-      states: [client.player],
+      sequence: client.nextInputSequence,
+      clientTick: client.nextInputSequence,
+      moveX: 0,
+      moveZ: 1,
+      lookYaw: 0,
+      lookPitch: 0,
+      buttons: 0,
+      jumpCounter: 0,
+      interactCounter: 0,
+      interactTarget: null,
+      primaryCounter: 0,
+    };
+    client.nextInputSequence += 1;
+    client.inputHistory.push(command);
+    while (client.inputHistory.length > 4) client.inputHistory.shift();
+    const packet = encodeInputBundle({
+      worldEpoch: client.world.worldEpoch,
+      commands: client.inputHistory,
     });
-    publicationTimes.set(stateKey(client.player.id, client.player.stateSequence), {
-      atMs: nowMs,
-      profile: client.profile.name,
-    });
-    client.outbound.send(client.nextPublishMs, packet.byteLength, packet);
-    client.nextPublishMs += 1_000 / 30;
+    client.outbound.send(client.nextInputMs, packet.byteLength, packet);
+    client.nextInputMs += 1_000 / PHYSICS_HZ;
   }
 }
 
 function deliverOutbound(client: HarnessClient, nowMs: number): void {
   for (const packet of client.outbound.advance(nowMs)) {
-    if (client.owner.readyState === "open") client.owner.send(Buffer.from(packet.payload));
+    if (client.input.readyState === "open") client.input.send(Buffer.from(packet.payload));
   }
 }
 
-function deliverInbound(
-  client: HarnessClient,
-  nowMs: number,
-  publicationTimes: Map<string, { atMs: number; profile: string }>,
-): void {
+function deliverInbound(client: HarnessClient, nowMs: number): void {
   for (const packet of client.inbound.advance(nowMs)) {
     try {
       if (binaryPacketTag(packet.payload) !== STATE_CLUSTER_TAG) continue;
@@ -279,9 +283,8 @@ function deliverInbound(
         if (currentAuthority !== undefined && state.authorityVersion < currentAuthority)
           client.staleAuthorityAccepted += 1;
         if (state.kind !== "player" || same(state.id, client.welcome.playerId)) continue;
-        const publication = publicationTimes.get(stateKey(state.id, state.stateSequence));
-        if (publication?.profile === client.profile.name) {
-          client.stateAgesMs.push(nowMs - publication.atMs);
+        {
+          client.stateAgesMs.push(packet.deliveryAtMs - packet.sentAtMs);
           client.presentation.pushNetwork([state], packet.deliveryAtMs);
           if (!client.renderTarget) {
             client.renderTarget = { ...state.id };
@@ -289,16 +292,19 @@ function deliverInbound(
             client.pathOracle = {
               anchorTimelineTick: state.sourceTick,
               anchorReceivedAtMs: packet.deliveryAtMs,
-              anchorZ: state.position.z,
               latestTimelineTick: state.sourceTick,
+              samples: [{ timelineTick: state.sourceTick, z: state.position.z }],
             };
             client.presentation.updateClock(state.sourceTick, packet.deliveryAtMs, 0);
           } else if (same(state.id, client.renderTarget)) {
             if (client.pathOracle) {
-              client.pathOracle.latestTimelineTick = unwrapTick32(
+              const timelineTick = unwrapTick32(
                 state.sourceTick,
                 client.pathOracle.latestTimelineTick,
               );
+              client.pathOracle.latestTimelineTick = timelineTick;
+              client.pathOracle.samples.push({ timelineTick, z: state.position.z });
+              while (client.pathOracle.samples.length > 256) client.pathOracle.samples.shift();
             }
             if (client.lastTargetStateAtMs !== null)
               client.targetStateIntervalsMs.push(packet.deliveryAtMs - client.lastTargetStateAtMs);
@@ -326,28 +332,35 @@ function samplePresentation(client: HarnessClient, nowMs: number): void {
           .sample(render.nextMs)
           .find((candidate) => same(candidate.id, target));
         if (state) {
-          if (render.previousZ !== null) {
-            render.eligibleFrames += 1;
-            if (Math.abs(state.position.z - render.previousZ) > 1e-5) render.advancingFrames += 1;
-          }
-          render.previousZ = state.position.z;
           const oracle = client.pathOracle;
           if (oracle) {
             render.oracleFrames += 1;
+            const delayTicks =
+              client.presentation.trackDelayTicks(target) ?? PROXY_INTERPOLATION_TICKS;
             const targetTimelineTick =
               oracle.anchorTimelineTick +
               ((render.nextMs - oracle.anchorReceivedAtMs) / 1_000) * PHYSICS_HZ -
-              PROXY_INTERPOLATION_TICKS;
+              delayTicks;
             if (targetTimelineTick > oracle.latestTimelineTick + 1e-6) {
               render.underrunFrames += 1;
             } else {
-              const sampledTimelineTick = Math.max(oracle.anchorTimelineTick, targetTimelineTick);
-              const expectedZ =
-                oracle.anchorZ +
-                ((sampledTimelineTick - oracle.anchorTimelineTick) * 5) / PHYSICS_HZ;
+              const expectedZ = sampleOracleZ(oracle.samples, targetTimelineTick);
               render.pathErrorsCm.push(Math.abs(state.position.z - expectedZ) * 100);
+              if (
+                render.previousOracleZ !== null &&
+                Math.abs(expectedZ - render.previousOracleZ) > 1e-5
+              ) {
+                render.eligibleFrames += 1;
+                if (
+                  render.previousZ !== null &&
+                  Math.abs(state.position.z - render.previousZ) > 1e-5
+                )
+                  render.advancingFrames += 1;
+              }
+              render.previousOracleZ = expectedZ;
             }
           }
+          render.previousZ = state.position.z;
         }
       }
       render.nextMs += 1_000 / displayHz;
@@ -365,7 +378,7 @@ function connectClient(
     const socket = new WebSocket(`ws://127.0.0.1:${port}/game`);
     socket.binaryType = "arraybuffer";
     const peer = new RTCPeerConnection({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-    const owner = peer.createDataChannel("gurgur-owner-v6", {
+    const input = peer.createDataChannel("gurgur-input-v7", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -375,20 +388,20 @@ function connectClient(
     let welcome: WelcomeMessage | null = null;
     let world: WorldManifestMessage | null = null;
     let player: NetworkPlayerState | null = null;
-    let ownerOpen = false;
+    let inputOpen = false;
     let stateOpen = false;
     let answerStarted = false;
     let client: HarnessClient | null = null;
     const timeout = setTimeout(() => reject(new Error("network harness client timed out")), 10_000);
     const done = (): void => {
-      if (!stateChannel || !welcome || !world || !player || !ownerOpen || !stateOpen) return;
+      if (!stateChannel || !welcome || !world || !player || !inputOpen || !stateOpen) return;
       clearTimeout(timeout);
       client = {
         index,
         profile,
         socket,
         peer,
-        owner,
+        input,
         state: stateChannel,
         welcome,
         world,
@@ -398,7 +411,9 @@ function connectClient(
         inbound: new UnreliableDatagramLink(profile, seed + 1),
         presentation: new PresentationBuffer(),
         player,
-        nextPublishMs: 0,
+        nextInputMs: 0,
+        nextInputSequence: 0,
+        inputHistory: [],
         renderTarget: null,
         pathOracle: null,
         lastTargetStateAtMs: null,
@@ -407,6 +422,7 @@ function connectClient(
           60: {
             nextMs: 300,
             previousZ: null,
+            previousOracleZ: null,
             eligibleFrames: 0,
             advancingFrames: 0,
             oracleFrames: 0,
@@ -416,6 +432,7 @@ function connectClient(
           120: {
             nextMs: 300,
             previousZ: null,
+            previousOracleZ: null,
             eligibleFrames: 0,
             advancingFrames: 0,
             oracleFrames: 0,
@@ -430,12 +447,12 @@ function connectClient(
       };
       resolve(client);
     };
-    owner.stateChanged.subscribe((value) => {
-      ownerOpen = value === "open";
+    input.stateChanged.subscribe((value) => {
+      inputOpen = value === "open";
       done();
     });
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v6" || stateChannel) {
+      if (channel.label !== "gurgur-state-v7" || stateChannel) {
         channel.close();
         return;
       }
@@ -524,8 +541,21 @@ function percentile(values: readonly number[], amount: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * amount))]!;
 }
 
-function stateKey(id: RuntimeId, sequence: number): string {
-  return `${id.index}:${id.generation}:${sequence}`;
+function sampleOracleZ(
+  samples: readonly { timelineTick: number; z: number }[],
+  targetTimelineTick: number,
+): number {
+  const first = samples[0]!;
+  if (targetTimelineTick <= first.timelineTick) return first.z;
+  const last = samples.at(-1)!;
+  if (targetTimelineTick >= last.timelineTick) return last.z;
+  const rightIndex = samples.findIndex((sample) => sample.timelineTick >= targetTimelineTick);
+  const right = samples[rightIndex]!;
+  const left = samples[rightIndex - 1]!;
+  const span = right.timelineTick - left.timelineTick;
+  if (span <= 0) return right.z;
+  const amount = (targetTimelineTick - left.timelineTick) / span;
+  return left.z + (right.z - left.z) * amount;
 }
 
 function idKey(id: RuntimeId): string {

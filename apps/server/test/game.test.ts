@@ -5,7 +5,6 @@ import {
   NETWORK_FLAG_ACTIVE,
   NETWORK_FLAG_HELD,
   PROTOCOL_VERSION,
-  SourceTickMapper,
   type InputCommand,
   type ManipulationRequestMessage,
   type NetworkBodyState,
@@ -57,7 +56,7 @@ describe("per-object authority host", () => {
     }
   });
 
-  test("accepts browser-owned player state and never advances that player from host input", async () => {
+  test("owns player truth, consumes ordered commands once, and checkpoints acknowledgements", async () => {
     const store = new WorldStore(":memory:");
     const game = await WorldHost.create(
       store,
@@ -65,52 +64,33 @@ describe("per-object authority host", () => {
       () => {},
     );
     try {
-      const player = game.connectPlayer("browser-player");
+      const player = game.connectPlayer("server-player");
       const initial = playerState(game, player);
-      expect(game.acceptInput(player, input(game, 1))).toBe(false);
-      for (let tick = 0; tick < 30; tick += 1) game.advance(PHYSICS_DT);
-      expect(game.playerPosition(player)).toEqual(initial.position);
+      expect(descriptorFor(game, player).ownerPlayerId).toBeNull();
+      expect(game.acceptInput(player, input(game, 1))).toBe(true);
+      expect(game.acceptInput(player, input(game, 1))).toBe(true);
+      expect(game.acceptInput(player, input(game, 10_000))).toBe(false);
+      game.advance(PHYSICS_DT);
+      const first = game.predictionCheckpoint(player)!;
+      expect(first.lastProcessedInputSequence).toBe(1);
+      expect(first.serverTick).toBe(game.serverTick);
+      expect(first.player.position).not.toEqual(initial.position);
 
-      const published = {
-        ...initial,
-        stateSequence: 1,
-        position: { x: initial.position.x + 3, y: initial.position.y, z: initial.position.z },
-        yaw: 0.75,
-      };
-      expect(game.acceptOwnedStates(player, [published, published])).toBeNull();
-      expect(game.acceptOwnedStates(player, [published])).not.toBeNull();
-      expect(game.playerPosition(player)).toEqual(published.position);
-      expect(game.acceptOwnedStates(player, [published])).toBeNull();
-      expect(game.acceptOwnedStates(player, [published], true)).not.toBeNull();
-      expect(game.acceptOwnedStates(player, [{ ...published, stateSequence: 0 }])).toBeNull();
-
-      for (let tick = 0; tick < 10; tick += 1) game.advance(PHYSICS_DT);
-      expect(
-        game.acceptOwnedStates(player, [
-          {
-            ...published,
-            stateSequence: 2,
-            sourceTick: (published.sourceTick + 2) >>> 0,
-          },
-        ]),
-      ).not.toBeNull();
-      expect(game.metrics().maxStateAgeMs).toBeGreaterThan(100);
-      expect(
-        game.acceptOwnedStates(player, [
-          {
-            ...published,
-            stateSequence: 3,
-            sourceTick: published.sourceTick + SourceTickMapper.MAX_FUTURE_LEAD_TICKS + 1_000,
-          },
-        ]),
-      ).toBeNull();
+      const action = { ...input(game, 2), jumpCounter: 1 };
+      expect(game.acceptInput(player, action)).toBe(true);
+      game.advance(PHYSICS_DT);
+      const afterAction = game.predictionCheckpoint(player)!;
+      expect(afterAction.lastProcessedInputSequence).toBe(2);
+      expect(afterAction.player.lastJumpCounter).toBe(1);
+      game.advance(PHYSICS_DT);
+      expect(game.predictionCheckpoint(player)!.player.lastJumpCounter).toBe(1);
     } finally {
       game.stop();
       store.close();
     }
   });
 
-  test("keeps every loose prop Bun-owned and rejects browser-authored body state", async () => {
+  test("keeps every loose prop Bun-owned while players submit commands only", async () => {
     const bundle = await fixture("network-push-corridor");
     const store = new WorldStore(":memory:");
     const game = await WorldHost.create(
@@ -120,24 +100,15 @@ describe("per-object authority host", () => {
       { worldBundle: bundle },
     );
     try {
-      const player = game.connectPlayer("body-state-attacker");
+      game.connectPlayer("command-only-browser");
       const target = runtimeId(game, "corridor.light");
       const targetState = bodyState(game, target);
       expect(descriptorFor(game, target).transferPolicy).toBe("fixed");
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
-      expect(
-        game.acceptOwnedStates(player, [
-          {
-            ...targetState,
-            stateSequence: targetState.stateSequence + 1,
-            position: { x: 9_000, y: 9_000, z: 9_000 },
-          },
-        ]),
-      ).toBeNull();
       for (let tick = 0; tick < 120; tick += 1) game.advance(PHYSICS_DT);
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
       expect(descriptorFor(game, target).authorityVersion).toBe(targetState.authorityVersion);
-      expect(bodyState(game, target).position.x).not.toBe(9_000);
+      expect(Number.isFinite(bodyState(game, target).position.x)).toBe(true);
     } finally {
       game.stop();
       store.close();
@@ -146,6 +117,7 @@ describe("per-object authority host", () => {
 
   test("drives a loose grab through one host control claim without authority transfer", async () => {
     const bundle = await fixture("network-push-corridor");
+    const playerSpawn = spawnNear(bundle, "corridor.light");
     const store = new WorldStore(":memory:");
     const published: NetworkBodyState[][] = [];
     const game = await WorldHost.create(
@@ -153,36 +125,23 @@ describe("per-object authority host", () => {
       (states) =>
         published.push(states.filter((state): state is NetworkBodyState => state.kind === "body")),
       () => {},
-      { worldBundle: bundle },
+      { worldBundle: bundle, playerSpawn },
     );
     try {
       const player = game.connectPlayer("host-grabber");
       const competitor = game.connectPlayer("competing-grabber");
       const target = runtimeId(game, "corridor.light");
       const initial = bodyState(game, target);
-      placePlayer(game, player, initial.position, 1);
-      placePlayer(game, competitor, initial.position, 1);
-      const request = manipulationRequest(game, target, initial.authorityVersion, 7);
-      const granted = game.requestManipulation(player, request);
-      if (typeof granted === "string") throw new Error(granted);
-      expect(game.requestManipulation(competitor, { ...request, requestId: 8 })).toBe("busy");
+      game.acceptInput(player, grabInput(game, 1, target, 1));
+      game.acceptInput(competitor, grabInput(game, 1, target, 1));
+      game.advance(PHYSICS_DT);
+      expect(game.grabbedTarget(player)).toEqual(target);
+      expect(game.grabbedTarget(competitor)).toBeNull();
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
       expect(descriptorFor(game, target).authorityVersion).toBe(initial.authorityVersion);
-      expect(
-        game.acceptManipulationState(player, {
-          worldEpoch: game.worldEpoch,
-          target,
-          authorityVersion: initial.authorityVersion,
-          claimVersion: granted.claimVersion,
-          stateSequence: 1,
-          targetPosition: {
-            x: initial.position.x,
-            y: initial.position.y + 1,
-            z: initial.position.z,
-          },
-          targetRotation: initial.rotation,
-        }),
-      ).toBe(true);
+      expect(game.predictionCheckpoint(player)!.held?.body.id).toEqual(target);
+      published.length = 0;
+      game.acceptInput(player, { ...grabInput(game, 2, target, 1), lookYaw: 0.7 });
       for (let tick = 0; tick < 4; tick += 1) game.advance(PHYSICS_DT);
       const hotTicks = published.flatMap((states) =>
         states.filter((state) => key(state.id) === key(target)).map((state) => state.sourceTick),
@@ -191,20 +150,15 @@ describe("per-object authority host", () => {
       expect(new Set(hotTicks).size).toBe(4);
       for (let tick = 0; tick < 30; tick += 1) game.advance(PHYSICS_DT);
       const controlled = bodyState(game, target);
-      expect(controlled.position.y).toBeGreaterThan(initial.position.y);
-      const changed = game.dropManipulation(player, {
-        type: "manipulation-drop",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: game.worldEpoch,
-        target,
-        authorityVersion: granted.authorityVersion,
-        claimVersion: granted.claimVersion,
-      });
-      expect(changed).not.toBeNull();
-      expect(changed!.manipulatorPlayerId).toBeNull();
-      const releasedY = controlled.position.y;
+      expect(
+        Math.hypot(
+          controlled.position.x - initial.position.x,
+          controlled.position.z - initial.position.z,
+        ),
+      ).toBeGreaterThan(0.1);
+      game.acceptInput(player, grabInput(game, 3, target, 2));
       game.advance(PHYSICS_DT);
-      expect(bodyState(game, target).position.y).not.toBe(releasedY);
+      expect(game.predictionCheckpoint(player)!.held).toBeNull();
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
     } finally {
       game.stop();
@@ -214,36 +168,25 @@ describe("per-object authority host", () => {
 
   test("ends a loose-prop claim on disconnect and permits a new first-wins claim", async () => {
     const bundle = await fixture("network-push-corridor");
+    const playerSpawn = spawnNear(bundle, "corridor.light");
     const store = new WorldStore(":memory:");
     const game = await WorldHost.create(
       store,
       () => {},
       () => {},
-      { worldBundle: bundle },
+      { worldBundle: bundle, playerSpawn },
     );
     try {
       const disconnected = game.connectPlayer("disconnect-holder");
       const successor = game.connectPlayer("successor");
       const target = runtimeId(game, "corridor.light");
-      const initial = bodyState(game, target);
-      placePlayer(game, disconnected, initial.position, 1);
-      placePlayer(game, successor, initial.position, 1);
-      const grant = game.requestManipulation(
-        disconnected,
-        manipulationRequest(game, target, initial.authorityVersion, 10),
-      );
-      if (typeof grant === "string") throw new Error(grant);
-
-      const reclaimed = game.endManipulationsForPlayer(disconnected);
-      expect(reclaimed).toHaveLength(1);
-      expect(reclaimed[0]!.manipulatorPlayerId).toBeNull();
-      const takeover = game.requestManipulation(
-        successor,
-        manipulationRequest(game, target, initial.authorityVersion, 11),
-      );
-      expect(typeof takeover).not.toBe("string");
-      if (typeof takeover === "string") throw new Error(takeover);
-      expect(takeover.manipulatorPlayerId).toEqual(successor);
+      game.acceptInput(disconnected, grabInput(game, 1, target, 1));
+      game.advance(PHYSICS_DT);
+      expect(game.grabbedTarget(disconnected)).toEqual(target);
+      expect(game.releasePlayerGrab(disconnected)).toEqual(target);
+      game.acceptInput(successor, grabInput(game, 1, target, 1));
+      game.advance(PHYSICS_DT);
+      expect(game.grabbedTarget(successor)).toEqual(target);
       expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
     } finally {
       game.stop();
@@ -264,11 +207,7 @@ describe("per-object authority host", () => {
       const initial = playerState(game, player);
       const reassigned = game.reassignPlayer(player);
       expect(reassigned?.authorityVersion).toBe(initial.authorityVersion + 1);
-      expect(
-        game.acceptOwnedStates(player, [
-          { ...initial, stateSequence: 1, authorityVersion: initial.authorityVersion },
-        ]),
-      ).toBeNull();
+      expect(game.acceptInput(player, input(game, 1))).toBe(true);
 
       const oldEpoch = game.worldEpoch;
       game.reset();
@@ -334,15 +273,13 @@ describe("per-object authority host", () => {
       store,
       () => {},
       () => {},
-      { worldBundle: bundle },
+      { worldBundle: bundle, playerSpawn: spawnNear(bundle, "fixture.lever.body") },
     );
     try {
       const first = game.connectPlayer("lever-first");
       const second = game.connectPlayer("lever-second");
       const target = runtimeId(game, "fixture.lever.body");
       const initial = bodyState(game, target);
-      placePlayer(game, first, initial.position, 1);
-      placePlayer(game, second, initial.position, 1);
       const request: ManipulationRequestMessage = {
         type: "manipulation-request",
         protocolVersion: PROTOCOL_VERSION,
@@ -458,24 +395,6 @@ describe("per-object authority host", () => {
   });
 });
 
-function manipulationRequest(
-  game: WorldHost,
-  target: RuntimeId,
-  authorityVersion: number,
-  requestId: number,
-): ManipulationRequestMessage {
-  return {
-    type: "manipulation-request",
-    protocolVersion: PROTOCOL_VERSION,
-    worldEpoch: game.worldEpoch,
-    requestId,
-    target: { ...target },
-    authorityVersion,
-    holdDistance: 2,
-    localAnchor: { x: 0, y: 0, z: 0 },
-  };
-}
-
 function input(game: WorldHost, sequence: number): InputCommand {
   return {
     type: "input" as const,
@@ -495,22 +414,30 @@ function input(game: WorldHost, sequence: number): InputCommand {
   };
 }
 
-function placePlayer(
+function grabInput(
   game: WorldHost,
-  id: RuntimeId,
-  position: NetworkPlayerState["position"],
   sequence: number,
-) {
-  const current = playerState(game, id);
-  expect(
-    game.acceptOwnedStates(id, [
-      {
-        ...current,
-        stateSequence: sequence,
-        position: { ...position },
-      },
-    ]),
-  ).not.toBeNull();
+  target: RuntimeId,
+  primaryCounter: number,
+): InputCommand {
+  return {
+    ...input(game, sequence),
+    moveX: 0,
+    lookPitch: -0.18,
+    interactTarget: { ...target },
+    primaryCounter,
+  };
+}
+
+function spawnNear(bundle: WorldBundle, authoredId: string) {
+  const entity = bundle.entities.find((candidate) => candidate.authoredId === authoredId);
+  const brush = entity?.body ? bundle.brushes[entity.body.brushIndices[0]!] : null;
+  if (!brush) throw new Error(`spawn target is unavailable: ${authoredId}`);
+  return {
+    x: brush.center.x,
+    y: 0.9,
+    z: brush.center.z + 1.2,
+  };
 }
 
 function playerState(game: WorldHost, id: RuntimeId): NetworkPlayerState {

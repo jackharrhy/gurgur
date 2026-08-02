@@ -8,7 +8,7 @@ const report = await runRealNetworkHarness({
   durationMs: Number(process.env.HARNESS_DURATION_MS ?? (quick ? 1_500 : 5_000)),
 });
 await mkdir("reports/network", { recursive: true });
-const path = `reports/network/protocol-v6-${report.clientCount}-${report.propCount}.json`;
+const path = `reports/network/protocol-v7-${report.clientCount}-${report.propCount}.json`;
 await Bun.write(path, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ path, ...report }));
 
@@ -38,7 +38,6 @@ const failures = blocking
       ...(Object.values(report.profiles).some((profile) => profile.staleAuthorityAccepted !== 0)
         ? ["stale authority accepted"]
         : []),
-      ...(report.server.maxStateAgeMs <= 0 ? ["source state age unavailable"] : []),
       ...(report.server.tickP95Ms >= 8 ? ["host p95"] : []),
       ...(report.server.tickP99Ms >= 12 ? ["host p99"] : []),
       ...(report.server.discardedOverloadSeconds !== 0 ? ["host discarded fixed-step time"] : []),

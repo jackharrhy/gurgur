@@ -2,6 +2,7 @@ import {
   BOOTSTRAP_STATE_TAG,
   LIFECYCLE_TAG,
   OWNERSHIP_CHANGED_TAG,
+  PREDICTION_CHECKPOINT_TAG,
   PROTOCOL_VERSION,
   STATE_CLUSTER_TAG,
   StateReceiver,
@@ -9,11 +10,11 @@ import {
   decodeBootstrapState,
   decodeLifecycle,
   decodeOwnershipChanged,
+  decodePredictionCheckpoint,
   decodeServerControl,
   decodeStateCluster,
   encodeManipulationState,
-  encodeOwnedState,
-  encodeOwnerCommit,
+  encodeInputBundle,
   encodeStateAck,
   type BootstrapStatePacket,
   type HelloMessage,
@@ -23,8 +24,10 @@ import {
   type ManipulationDropMessage,
   type ManipulationRequestMessage,
   type ManipulationStatePacket,
+  type InputCommand,
   type NetworkObjectState,
   type OwnershipChangedPacket,
+  type PredictionCheckpointPacket,
   type RtcOfferMessage,
   type SpeechMessage,
   type SpeechRejectedMessage,
@@ -46,6 +49,7 @@ export type SessionCallbacks = {
   lifecycle(message: LifecycleMessage): void;
   state(states: NetworkObjectState[], receivedAtMs: number): void;
   ownership(message: OwnershipChangedPacket, receivedAtMs: number): void;
+  checkpoint(message: PredictionCheckpointPacket, receivedAtMs: number): void;
   manipulation(message: ManipulationChangedMessage): void;
   manipulationDenied(message: ManipulationDeniedMessage): void;
   clock?(serverTick: number, receivedAtMs: number, oneWayDelayMs: number): void;
@@ -81,8 +85,10 @@ export class GameSession {
   #pendingLifecycles: LifecycleMessage[] = [];
   #pendingClusters: StateClusterPacket[] = [];
   #pendingOwnership: OwnershipChangedPacket[] = [];
+  #pendingCheckpoint: PredictionCheckpointPacket | null = null;
+  #inputHistory: InputCommand[] = [];
   #peerConnection: RTCPeerConnection | null = null;
-  #ownerChannel: RTCDataChannel | null = null;
+  #inputChannel: RTCDataChannel | null = null;
   #stateChannel: RTCDataChannel | null = null;
   #transportReady = false;
 
@@ -155,18 +161,29 @@ export class GameSession {
     this.#socket?.close(1000, "page closed");
   }
 
-  sendOwnerStates(states: NetworkObjectState[]): void {
-    const channel = this.#ownerChannel;
-    const packet = encodeOwnedState({ worldEpoch: this.#worldEpoch ?? 0, states });
+  sendInput(command: InputCommand): boolean {
+    const channel = this.#inputChannel;
+    if (
+      channel?.readyState !== "open" ||
+      channel.bufferedAmount >= 16_384 ||
+      command.worldEpoch !== this.#worldEpoch
+    )
+      return false;
+    this.#inputHistory.push(structuredClone(command));
+    while (this.#inputHistory.length > 4) this.#inputHistory.shift();
+    const packet = encodeInputBundle({
+      worldEpoch: command.worldEpoch,
+      commands: this.#inputHistory.map((candidate) => structuredClone(candidate)),
+    });
     this.#deferDisposable(() => {
       if (
-        channel?.readyState === "open" &&
-        channel === this.#ownerChannel &&
+        channel.readyState === "open" &&
+        channel === this.#inputChannel &&
         channel.bufferedAmount < 16_384
-      ) {
+      )
         channel.send(packet);
-      }
     });
+    return true;
   }
 
   requestManipulation(message: ManipulationRequestMessage): boolean {
@@ -174,7 +191,7 @@ export class GameSession {
   }
 
   sendManipulationState(message: ManipulationStatePacket): boolean {
-    const channel = this.#ownerChannel;
+    const channel = this.#inputChannel;
     if (
       channel?.readyState !== "open" ||
       channel.bufferedAmount >= 16_384 ||
@@ -185,7 +202,7 @@ export class GameSession {
     this.#deferDisposable(() => {
       if (
         channel.readyState === "open" &&
-        channel === this.#ownerChannel &&
+        channel === this.#inputChannel &&
         channel.bufferedAmount < 16_384
       )
         channel.send(packet);
@@ -195,13 +212,6 @@ export class GameSession {
 
   dropManipulation(message: ManipulationDropMessage): boolean {
     return this.#sendControl(message);
-  }
-
-  commitOwnerStates(states: NetworkObjectState[]): boolean {
-    const socket = this.#socket;
-    if (socket?.readyState !== WebSocket.OPEN || this.#worldEpoch === null) return false;
-    socket.send(encodeOwnerCommit({ worldEpoch: this.#worldEpoch, states }));
-    return true;
   }
 
   use(message: UseRequestMessage): boolean {
@@ -256,6 +266,8 @@ export class GameSession {
       this.#pendingLifecycles = [];
       this.#pendingClusters = [];
       this.#pendingOwnership = [];
+      this.#pendingCheckpoint = null;
+      this.#inputHistory = [];
       void this.#loadWorld(message, socket);
     } else if (message.type === "pong") {
       if (message.worldEpoch !== this.#worldEpoch) return;
@@ -305,6 +317,12 @@ export class GameSession {
         if (cluster.worldEpoch === this.#loadedWorldEpoch) this.#deliverCluster(cluster);
         else if (cluster.worldEpoch === this.#worldEpoch && this.#pendingClusters.length < 64)
           this.#pendingClusters.push(cluster);
+      } else if (tag === PREDICTION_CHECKPOINT_TAG) {
+        const checkpoint = decodePredictionCheckpoint(data);
+        if (checkpoint.worldEpoch !== this.#worldEpoch) return;
+        if (checkpoint.worldEpoch === this.#loadedWorldEpoch)
+          this.#callbacks.checkpoint(checkpoint, performance.now());
+        else this.#pendingCheckpoint = checkpoint;
       } else {
         throw new Error("unknown server binary packet");
       }
@@ -320,13 +338,13 @@ export class GameSession {
   }
 
   #sendAck(ack: ReturnType<StateReceiver["applyCluster"]>["ack"]): void {
-    const channel = this.#ownerChannel;
+    const channel = this.#inputChannel;
     if (channel?.readyState !== "open" || channel.bufferedAmount >= 16_384) return;
     const packet = encodeStateAck(ack);
     this.#deferDisposable(() => {
       if (
         channel.readyState === "open" &&
-        channel === this.#ownerChannel &&
+        channel === this.#inputChannel &&
         channel.bufferedAmount < 16_384
       )
         channel.send(packet);
@@ -339,16 +357,16 @@ export class GameSession {
     this.#closeRtc();
     this.#callbacks.transport?.("negotiating");
     const peer = new RTCPeerConnection({ iceServers: message.iceServers });
-    const owner = peer.createDataChannel("gurgur-owner-v6", {
+    const input = peer.createDataChannel("gurgur-input-v7", {
       ordered: false,
       maxRetransmits: 0,
     });
-    owner.addEventListener("open", () => this.#maybeTransportReady());
+    input.addEventListener("open", () => this.#maybeTransportReady());
     peer.addEventListener("datachannel", (event) => {
       const state = event.channel;
       if (
         this.#peerConnection !== peer ||
-        state.label !== "gurgur-state-v6" ||
+        state.label !== "gurgur-state-v7" ||
         this.#stateChannel
       ) {
         state.close();
@@ -370,7 +388,7 @@ export class GameSession {
         socket.close(4012, "state transport failed");
     });
     this.#peerConnection = peer;
-    this.#ownerChannel = owner;
+    this.#inputChannel = input;
     try {
       await peer.setRemoteDescription(message.description);
       await peer.setLocalDescription(await peer.createAnswer());
@@ -399,7 +417,7 @@ export class GameSession {
   #maybeTransportReady(): void {
     if (
       !this.#transportReady &&
-      this.#ownerChannel?.readyState === "open" &&
+      this.#inputChannel?.readyState === "open" &&
       this.#stateChannel?.readyState === "open"
     ) {
       this.#transportReady = true;
@@ -409,10 +427,10 @@ export class GameSession {
 
   #closeRtc(): void {
     if (this.#peerConnection) this.#callbacks.transport?.("disconnected");
-    this.#ownerChannel?.close();
+    this.#inputChannel?.close();
     this.#stateChannel?.close();
     this.#peerConnection?.close();
-    this.#ownerChannel = null;
+    this.#inputChannel = null;
     this.#stateChannel = null;
     this.#peerConnection = null;
     this.#transportReady = false;
@@ -494,6 +512,9 @@ export class GameSession {
       this.#pendingOwnership = [];
       for (const cluster of this.#pendingClusters) this.#deliverCluster(cluster);
       this.#pendingClusters = [];
+      if (this.#pendingCheckpoint?.worldEpoch === message.worldEpoch)
+        this.#callbacks.checkpoint(this.#pendingCheckpoint, performance.now());
+      this.#pendingCheckpoint = null;
       this.#callbacks.status("connected");
     } catch {
       if (generation === this.#worldLoadGeneration) socket.close(4011, "world load failed");

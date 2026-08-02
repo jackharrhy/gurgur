@@ -10,21 +10,23 @@ import {
   clusterStateDeltas,
   createStateDelta,
   decodeBootstrapState,
+  decodeInputBundle,
   decodeManipulationState,
-  decodeOwnerCommit,
-  decodeOwnedState,
   decodeOwnershipChanged,
+  decodePredictionCheckpoint,
   decodeStateAck,
   decodeStateCluster,
   encodeBootstrapState,
+  encodeInputBundle,
   encodeManipulationState,
-  encodeOwnerCommit,
-  encodeOwnedState,
   encodeOwnershipChanged,
+  encodePredictionCheckpoint,
   encodeStateAck,
   encodeStateCluster,
   fullStateDelta,
   isNewerSequence16,
+  PROTOCOL_VERSION,
+  type InputCommand,
   type NetworkBodyState,
   type NetworkObjectState,
   type NetworkPlayerState,
@@ -64,16 +66,11 @@ const player = (overrides: Partial<NetworkPlayerState> = {}): NetworkPlayerState
   ...overrides,
 });
 
-describe("protocol-v6 network state codecs", () => {
-  test("round-trips owner, bootstrap, ack, and reliable ownership packets", () => {
+describe("protocol-v7 network state codecs", () => {
+  test("round-trips bootstrap, ack, and reliable ownership packets", () => {
     const states: NetworkObjectState[] = [body(), player()];
-    expectStateList(decodeOwnedState(encodeOwnedState({ worldEpoch: 11, states })).states, states);
     expectStateList(
       decodeBootstrapState(encodeBootstrapState({ worldEpoch: 11, states })).states,
-      states,
-    );
-    expectStateList(
-      decodeOwnerCommit(encodeOwnerCommit({ worldEpoch: 11, states })).states,
       states,
     );
 
@@ -99,6 +96,41 @@ describe("protocol-v6 network state codecs", () => {
     expect(decodedChanged.requestId).toBe(91);
     expect(decodedChanged.ownerPlayerId).toEqual(player().id);
     expectState(decodedChanged.state, body());
+  });
+
+  test("round-trips four-command redundancy and a held-body prediction checkpoint", () => {
+    const commands = [1, 2, 3, 4].map((sequence) => input(sequence));
+    const bundle = decodeInputBundle(encodeInputBundle({ worldEpoch: 11, commands }));
+    expect(bundle.commands).toEqual(commands);
+
+    const checkpoint = {
+      worldEpoch: 11,
+      serverTick: 900,
+      lastProcessedInputSequence: 3,
+      player: player(),
+      held: {
+        claimVersion: 7,
+        startInputSequence: 2,
+        localAnchor: { x: 0, y: 0, z: 0 },
+        body: body(),
+        distance: 1.75,
+        relativeRotation: { x: 0, y: 0.25, z: 0, w: 0.968_245_8 },
+        targetPosition: { x: 2, y: 3, z: 4 },
+        targetRotation: { x: 0, y: 0, z: 0, w: 1 },
+        errorSeconds: 0.125,
+      },
+    };
+    const decoded = decodePredictionCheckpoint(encodePredictionCheckpoint(checkpoint));
+    expect(decoded.worldEpoch).toBe(checkpoint.worldEpoch);
+    expect(decoded.serverTick).toBe(checkpoint.serverTick);
+    expect(decoded.lastProcessedInputSequence).toBe(3);
+    expectState(decoded.player, checkpoint.player);
+    expectState(decoded.held!.body, checkpoint.held.body);
+    expect(decoded.held!.claimVersion).toBe(7);
+    expect(decoded.held!.startInputSequence).toBe(2);
+    expect(decoded.held!.localAnchor).toEqual({ x: 0, y: 0, z: 0 });
+    expect(decoded.held!.distance).toBeCloseTo(1.75);
+    expect(decoded.held!.targetPosition).toEqual(checkpoint.held.targetPosition);
   });
 
   test("round-trips a bounded disposable manipulation target", () => {
@@ -181,17 +213,37 @@ describe("protocol-v6 network state codecs", () => {
   });
 
   test("rejects truncation, trailing bytes, non-finite values, and packet overflow", () => {
-    const encoded = new Uint8Array(encodeOwnedState({ worldEpoch: 1, states: [body()] }));
-    expect(() => decodeOwnedState(encoded.subarray(0, encoded.length - 1))).toThrow("truncated");
+    const encoded = new Uint8Array(encodeBootstrapState({ worldEpoch: 1, states: [body()] }));
+    expect(() => decodeBootstrapState(encoded.subarray(0, encoded.length - 1))).toThrow(
+      "truncated",
+    );
     const trailing = new Uint8Array(encoded.length + 1);
     trailing.set(encoded);
-    expect(() => decodeOwnedState(trailing)).toThrow("trailing");
+    expect(() => decodeBootstrapState(trailing)).toThrow("trailing");
     expect(() =>
-      encodeOwnedState({
+      encodeBootstrapState({
         worldEpoch: 1,
         states: [body({ position: { x: Number.NaN, y: 0, z: 0 } })],
       }),
     ).toThrow("position");
+    expect(() =>
+      encodeInputBundle({
+        worldEpoch: 1,
+        commands: [input(1), input(2), input(3), input(4), input(5)],
+      }),
+    ).toThrow("command count is invalid");
+    expect(() =>
+      encodeInputBundle({
+        worldEpoch: 11,
+        commands: [input(2), input(1)],
+      }),
+    ).toThrow("ordered");
+    expect(() =>
+      encodeInputBundle({
+        worldEpoch: 11,
+        commands: [input(1, { moveX: Number.NaN })],
+      }),
+    ).toThrow("input command");
     expect(() =>
       encodeStateCluster({
         worldEpoch: 1,
@@ -204,6 +256,26 @@ describe("protocol-v6 network state codecs", () => {
     expect(binaryPacketTag(encoded)).toBeGreaterThan(0);
   });
 });
+
+function input(sequence: number, patch: Partial<InputCommand> = {}): InputCommand {
+  return {
+    type: "input",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch: 11,
+    sequence,
+    clientTick: sequence,
+    moveX: 0,
+    moveZ: 1,
+    lookYaw: 0.25,
+    lookPitch: -0.25,
+    buttons: 0,
+    jumpCounter: 2,
+    interactCounter: 3,
+    interactTarget: null,
+    primaryCounter: 4,
+    ...patch,
+  };
+}
 
 describe("per-recipient acknowledged state", () => {
   test("uses the reliable seed as a delta baseline and resends after 250 ms", () => {

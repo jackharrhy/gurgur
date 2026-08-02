@@ -26,8 +26,9 @@ apps/web/
   client.ts             gameplay client composition after WebGPU succeeds
   style.css
   session.ts            WebSocket control, WebRTC signaling, datagram dispatch
-  ownership-client.ts   authority lifecycle and worker message bridge
-  physics-worker.ts     60 Hz owned simulation and remote collision proxies
+  ownership-client.ts   prediction lifecycle and worker message bridge
+  physics-worker.ts     60 Hz prediction, replay, and collision proxies
+  prediction-trace.ts   bounded four-timeline feel diagnostics
   presentation.ts       local-step and buffered remote interpolation
   renderer.ts           Three.js scene, camera, objects, render loop
   input.ts              keyboard, pointer lock, gamepad, touch intent
@@ -50,7 +51,7 @@ automation; ordinary play does not expose entity-specific instrumentation.
 On non-production servers,
 `?follow=<runtime-index>:<generation>&yaw=<radians>&pitch=<radians>` binds only
 the presentation camera and pickup preview to a replicated runtime body. The
-local network player's ownership and input do not change. The browser
+local network player's identity, prediction target, and input do not change. The browser
 accepts the follow request only after the server's
 development capability route confirms it, reports acquisition through generic
 body data attributes, and otherwise falls back to the ordinary local view.
@@ -59,27 +60,35 @@ body data attributes, and otherwise falls back to the ordinary local view.
 
 There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
-objects are keyed by generation-bearing runtime identity. Locally owned objects
-interpolate consecutive completed 60 Hz worker steps. Remote objects render from
+objects are keyed by generation-bearing runtime identity. Locally predicted
+objects present the newest completed 60 Hz worker step with 100 ms visual error
+decay after reconciliation. Remote objects render from
 independent adaptive tracks between four and eight source ticks without
 extrapolation. Recent late arrivals and underruns raise only the affected track;
 delay falls slowly and never rewinds the render timeline. Associated Box3D
-bodies remain motion-disabled proxies on the fixed eight-tick collision track.
+bodies are motion-disabled proxies at the newest accepted authoritative state;
+checkpoint replay samples their retained source-tick history.
 
-After a reliable loose-prop claim grant, the renderer drives only that prop's
-mesh toward the local 60 Hz target over one fixed interval. The authoritative
-snapshot remains immutable and camera collision continues to read it. Release
-retains the current visual offset and decays it toward Bun's sampled body with
-linear correction capped at 2 m/s and angular correction capped at 2π rad/s.
-Lifecycle removal, reset, or replacement clears the speculative presenter.
-Fixed-authority contraption meshes do not use this shortcut.
+After a loose-prop claim appears in a Bun checkpoint, the worker creates a real
+dynamic Box3D body and runs the same fixed-tick grab controller as Bun. The
+renderer reads that predicted physical body, never the desired grab target.
+Checkpoint corrections restore physics immediately and preserve visible player
+and held-body motion with an additive 100 ms error offset. Ordinary corrections
+over one metre hard-snap; confirmed pickup and predicted release keep a bounded
+continuity path, including a 20 cm maximum presentation step while catching an
+extraordinary release separation.
+Nearby, touching, or supporting shared bodies blend to their collision-aligned
+pose over 100 ms and use distance/time hysteresis before returning to buffered
+presentation. Lifecycle removal, respawn, reset, or replacement clears the
+associated prediction and presentation history. Jointed contraptions remain
+server-only and buffered.
 
 Resizing updates renderer pixel ratio and camera projection. Losing visibility
 pauses presentation and input transmission. Leaving the page closes the
 WebSocket, RTCPeerConnection, data channels, speech worker, active speech sources, geometries,
 materials, and renderer resources.
 The canvas remains hidden against a black page until the renderer has followed a
-finite locally owned player pose in the current frame. Loading a new world
+finite locally predicted player pose in the current frame. Loading a new world
 closes that gate again, preventing a default-camera world frame from flashing
 before the player view is known.
 The third-person camera is a collision-tested boom anchored at the latest
@@ -183,8 +192,8 @@ discarded by the four-tick catch-up cap. Seeded disposable latency, jitter, and
 loss are available only through the test harness query parameters; reliable
 lifecycle remains separate.
 Client-feel diagnostics report adaptive render policy, each track's delay,
-underruns, the active speculative target, and its maximum observed authoritative
-error.
+underruns, input acknowledgement and replay count, contact/support identities,
+and authoritative, collision, predicted, and rendered player/prop transforms.
 Sprite presentation consumes only `PresentationSpec` and the hashed logical
 sprite manifest; it never compares mapper classnames. The player billboard source
 is a committed Blender scene sized to the shared

@@ -8,6 +8,7 @@ import {
   LIFECYCLE_TAG,
   NETWORK_FLAG_HELD,
   OWNERSHIP_CHANGED_TAG,
+  PREDICTION_CHECKPOINT_TAG,
   PROTOCOL_VERSION,
   STATE_CLUSTER_TAG,
   StateReceiver,
@@ -15,15 +16,17 @@ import {
   decodeBootstrapState,
   decodeLifecycle,
   decodeOwnershipChanged,
+  decodePredictionCheckpoint,
   decodeServerControl,
   decodeStateCluster,
   encodeManipulationState,
-  encodeOwnerCommit,
-  encodeOwnedState,
+  encodeInputBundle,
   encodeStateAck,
   type BootstrapStatePacket,
+  type InputCommand,
   type NetworkObjectState,
   type OwnershipChangedPacket,
+  type PredictionCheckpointPacket,
   type RuntimeId,
   type WelcomeMessage,
   type WorldManifestMessage,
@@ -37,8 +40,8 @@ afterEach(async () => {
   for (const dispose of cleanup.splice(0).toReversed()) await dispose();
 });
 
-describe("protocol-v6 real server transport", () => {
-  test("relays browser-owned state over unordered WebRTC from a reliable bootstrap", async () => {
+describe("protocol-v7 real server transport", () => {
+  test("drives server-owned player state from bundled input and returns prediction checkpoints", async () => {
     const { server } = await launch();
     const first = await connect(server.port);
     const observer = await connect(server.port);
@@ -52,73 +55,48 @@ describe("protocol-v6 real server transport", () => {
       first.world.runtimeEntities.find((entity) => same(entity.id, first.welcome.playerId)),
     ).toMatchObject({
       kind: "player",
-      ownerPlayerId: first.welcome.playerId,
+      ownerPlayerId: null,
       transferPolicy: "fixed",
     });
     expect((await fetch(`http://127.0.0.1:${server.port}/physics-worker.js`)).ok).toBe(true);
 
     const initial = first.receiver.state(first.welcome.playerId);
-    if (!initial || initial.kind !== "player") throw new Error("missing owned player bootstrap");
-    const published: NetworkObjectState = {
-      ...initial,
-      stateSequence: (initial.stateSequence + 1) & 0xffff,
-      position: { ...initial.position, x: initial.position.x + 1.5 },
-    };
+    if (!initial || initial.kind !== "player") throw new Error("missing player bootstrap");
     const relayedPromise = waitForState(
       observer,
       (state) =>
         state.kind === "player" &&
         same(state.id, first.welcome.playerId) &&
-        state.stateSequence === published.stateSequence,
+        Math.hypot(
+          state.position.x - initial.position.x,
+          state.position.y - initial.position.y,
+          state.position.z - initial.position.z,
+        ) > 0.02,
     );
-    first.owner.send(
-      Buffer.from(encodeOwnedState({ worldEpoch: first.world.worldEpoch, states: [published] })),
+    const acknowledged = waitForCheckpoint(
+      first,
+      (checkpoint) => checkpoint.lastProcessedInputSequence === 1,
     );
-    const relayed = await relayedPromise;
-    expect(relayed.position.x).toBeCloseTo(published.position.x, 5);
-    const delayed = {
-      ...published,
-      stateSequence: (published.stateSequence + 1) & 0xffff,
-      sourceTick: (published.sourceTick + 2) >>> 0,
-      position: { ...published.position, x: published.position.x + 0.25 },
-    };
-    const delayedPromise = waitForState(
-      observer,
-      (state) =>
-        state.kind === "player" &&
-        same(state.id, first.welcome.playerId) &&
-        state.stateSequence === delayed.stateSequence,
+    first.input.send(
+      Buffer.from(
+        encodeInputBundle({
+          worldEpoch: first.world.worldEpoch,
+          commands: [command(first, 1, { moveZ: 1 })],
+        }),
+      ),
     );
-    await Bun.sleep(100);
-    first.owner.send(
-      Buffer.from(encodeOwnedState({ worldEpoch: first.world.worldEpoch, states: [delayed] })),
-    );
-    const mappedDelayed = await delayedPromise;
-    expect((mappedDelayed.sourceTick - relayed.sourceTick) >>> 0).toBe(2);
+    const [relayed, checkpoint] = await Promise.all([relayedPromise, acknowledged]);
+    expect(
+      Math.hypot(
+        checkpoint.player.position.x - initial.position.x,
+        checkpoint.player.position.y - initial.position.y,
+        checkpoint.player.position.z - initial.position.z,
+      ),
+    ).toBeGreaterThan(0.02);
+    expect(relayed.stateSequence).toBeGreaterThan(0);
+    expect(checkpoint.serverTick).toBeGreaterThan(0);
     expect(observer.acks).toBeGreaterThan(0);
     expect(server.metrics().stateTransportClients).toBe(2);
-
-    const committed = {
-      ...delayed,
-      stateSequence: (delayed.stateSequence + 1) & 0xffff,
-      sourceTick: (delayed.sourceTick + 1) >>> 0,
-      position: { ...delayed.position, y: delayed.position.y + 0.25 },
-    };
-    const commitPromise = waitForOwnership(
-      observer,
-      (message) =>
-        same(message.id, first.welcome.playerId) &&
-        message.state.stateSequence === committed.stateSequence,
-    );
-    first.socket.send(
-      encodeOwnerCommit({
-        worldEpoch: first.world.worldEpoch,
-        states: [committed],
-      }),
-    );
-    const commit = await commitPromise;
-    expect(commit.ownerPlayerId).toEqual(first.welcome.playerId);
-    expect(commit.state.position.y).toBeCloseTo(committed.position.y, 5);
   });
 
   test("keeps a loose grab host-owned across exclusive claim, targets, and release", async () => {
@@ -131,7 +109,7 @@ describe("protocol-v6 real server transport", () => {
     const brush = bundle.brushes[prop.body!.brushIndices[0]!]!;
     const { server, adminToken } = await launch({
       worldBundle: bundle,
-      playerSpawn: { ...brush.center },
+      playerSpawn: { x: brush.center.x, y: 0.9, z: brush.center.z + 1.2 },
     });
     const first = await connect(server.port);
     const second = await connect(server.port);
@@ -147,49 +125,48 @@ describe("protocol-v6 real server transport", () => {
     if (!initial || initial.kind !== "body") throw new Error("missing prop bootstrap");
 
     expect(target).toMatchObject({ ownerPlayerId: null, transferPolicy: "fixed" });
-    first.owner.send(
+    const firstGrab = waitForCheckpoint(
+      first,
+      (checkpoint) => checkpoint.lastProcessedInputSequence === 1,
+    );
+    first.input.send(
       Buffer.from(
-        encodeOwnedState({
+        encodeInputBundle({
           worldEpoch: first.world.worldEpoch,
-          states: [
-            {
-              ...initial,
-              stateSequence: (initial.stateSequence + 1) & 0xffff,
-              position: { x: 9_000, y: 9_000, z: 9_000 },
-            },
-          ],
+          commands: [command(first, 1, { lookPitch: -0.18, primaryCounter: 1 })],
         }),
       ),
     );
-    await Bun.sleep(100);
-    expect(first.receiver.state(target.id)?.position.x).not.toBeCloseTo(9_000, 1);
+    const held = await firstGrab;
+    if (!held.held)
+      throw new Error(
+        `server did not acquire loose grab: ${JSON.stringify({ checkpoint: held, target: first.receiver.state(target.id) })}`,
+      );
+    expect(held.held.body.id).toEqual(target.id);
+    expect(held.held!.body.authorityVersion).toBe(initial.authorityVersion);
+    expect(target.ownerPlayerId).toBeNull();
 
-    const request = {
-      type: "manipulation-request" as const,
-      protocolVersion: PROTOCOL_VERSION,
-      worldEpoch: first.world.worldEpoch,
-      requestId: 10,
-      target: target.id,
-      authorityVersion: initial.authorityVersion,
-      localAnchor: { x: 0, y: 0, z: 0 },
-      holdDistance: 2,
-    };
-    const grantPromise = waitForText(first, "manipulation-changed");
-    const denialPromise = waitForText(second, "manipulation-denied");
-    first.socket.send(JSON.stringify(request));
-    second.socket.send(JSON.stringify({ ...request, requestId: 11 }));
-    const grant = await grantPromise;
-    expect(grant.manipulatorPlayerId).toEqual(first.welcome.playerId);
-    expect(grant.authorityVersion).toBe(initial.authorityVersion);
-    const denial = await denialPromise;
-    expect(denial).toMatchObject({ requestId: 11, reason: "busy" });
+    const secondRejected = waitForCheckpoint(
+      second,
+      (checkpoint) => checkpoint.lastProcessedInputSequence === 1,
+    );
+    second.input.send(
+      Buffer.from(
+        encodeInputBundle({
+          worldEpoch: second.world.worldEpoch,
+          commands: [command(second, 1, { lookPitch: -0.18, primaryCounter: 1 })],
+        }),
+      ),
+    );
+    expect((await secondRejected).held).toBeNull();
 
     const movedPromise = waitForState(
       second,
       (state) =>
         state.kind === "body" &&
         same(state.id, target.id) &&
-        state.position.y > initial.position.y + 0.05,
+        Math.hypot(state.position.x - initial.position.x, state.position.z - initial.position.z) >
+          0.1,
     );
     const hotSourceTicks: number[] = [];
     let collectHotStates = true;
@@ -198,22 +175,18 @@ describe("protocol-v6 real server transport", () => {
       if (collectHotStates) second.states.push(collectHotState);
     };
     second.states.push(collectHotState);
-    const claimVersion = Number(grant.claimVersion);
-    for (let sequence = 1; sequence <= 12; sequence += 1) {
-      first.owner.send(
+    for (let sequence = 2; sequence <= 12; sequence += 1) {
+      first.input.send(
         Buffer.from(
-          encodeManipulationState({
+          encodeInputBundle({
             worldEpoch: first.world.worldEpoch,
-            target: target.id,
-            authorityVersion: initial.authorityVersion,
-            claimVersion,
-            stateSequence: sequence,
-            targetPosition: {
-              x: initial.position.x,
-              y: initial.position.y + 0.8,
-              z: initial.position.z,
-            },
-            targetRotation: initial.rotation,
+            commands: [
+              command(first, sequence, {
+                lookYaw: 0.7,
+                lookPitch: -0.18,
+                primaryCounter: 1,
+              }),
+            ],
           }),
         ),
       );
@@ -232,19 +205,19 @@ describe("protocol-v6 real server transport", () => {
     ).toBeTrue();
     expect(moved.flags & NETWORK_FLAG_HELD).toBe(NETWORK_FLAG_HELD);
     expect(moved.authorityVersion).toBe(initial.authorityVersion);
-    const droppedPromise = waitForText(second, "manipulation-changed");
-    first.socket.send(
-      JSON.stringify({
-        type: "manipulation-drop",
-        protocolVersion: PROTOCOL_VERSION,
-        worldEpoch: first.world.worldEpoch,
-        target: target.id,
-        authorityVersion: initial.authorityVersion,
-        claimVersion,
-      }),
+    const droppedPromise = waitForCheckpoint(
+      first,
+      (checkpoint) => checkpoint.lastProcessedInputSequence === 13 && checkpoint.held === null,
     );
-    const dropped = await droppedPromise;
-    expect(dropped.manipulatorPlayerId).toBeNull();
+    first.input.send(
+      Buffer.from(
+        encodeInputBundle({
+          worldEpoch: first.world.worldEpoch,
+          commands: [command(first, 13, { primaryCounter: 2 })],
+        }),
+      ),
+    );
+    await droppedPromise;
     expect(target.ownerPlayerId).toBeNull();
 
     const resetWorld = waitForWorld(first, first.world.worldEpoch + 1);
@@ -328,7 +301,7 @@ describe("protocol-v6 real server transport", () => {
           ) > 0.01),
     );
     for (let sequence = 1; sequence <= 12; sequence += 1) {
-      first.owner.send(
+      first.input.send(
         Buffer.from(
           encodeManipulationState({
             worldEpoch: first.world.worldEpoch,
@@ -368,7 +341,7 @@ describe("protocol-v6 real server transport", () => {
 type TestClient = {
   socket: WebSocket;
   peer: RTCPeerConnection;
-  owner: RTCDataChannel;
+  input: RTCDataChannel;
   state: RTCDataChannel;
   welcome: WelcomeMessage;
   world: WorldManifestMessage;
@@ -376,6 +349,7 @@ type TestClient = {
   acks: number;
   states: Array<(state: NetworkObjectState) => void>;
   ownership: Array<(message: OwnershipChangedPacket) => void>;
+  checkpoints: Array<(message: PredictionCheckpointPacket) => void>;
   texts: Array<(message: Record<string, unknown>) => void>;
   worlds: Array<(message: WorldManifestMessage) => void>;
 };
@@ -386,8 +360,8 @@ async function launch(
     playerSpawn?: NonNullable<Parameters<typeof createGurgurServer>[0]>["playerSpawn"];
   } = {},
 ): Promise<{ server: GurgurServer; directory: string; adminToken: string }> {
-  const directory = await mkdtemp(join(tmpdir(), "gurgur-v6-"));
-  const adminToken = "protocol-v6-test";
+  const directory = await mkdtemp(join(tmpdir(), "gurgur-v7-"));
+  const adminToken = "protocol-v7-test";
   const server = await createGurgurServer({
     port: 0,
     hostname: "127.0.0.1",
@@ -407,7 +381,7 @@ function connect(port: number): Promise<TestClient> {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/game`);
     socket.binaryType = "arraybuffer";
     const peer = new RTCPeerConnection({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-    const owner = peer.createDataChannel("gurgur-owner-v6", {
+    const input = peer.createDataChannel("gurgur-input-v7", {
       ordered: false,
       maxRetransmits: 0,
     });
@@ -416,18 +390,19 @@ function connect(port: number): Promise<TestClient> {
     let welcome: WelcomeMessage | null = null;
     let world: WorldManifestMessage | null = null;
     let bootstrap: BootstrapStatePacket | null = null;
-    let ownerOpen = false;
+    let inputOpen = false;
     let stateOpen = false;
     let answerStarted = false;
     const stateListeners: TestClient["states"] = [];
     const ownershipListeners: TestClient["ownership"] = [];
+    const checkpointListeners: TestClient["checkpoints"] = [];
     const textListeners: TestClient["texts"] = [];
     const worldListeners: TestClient["worlds"] = [];
     let acks = 0;
     const client = (): TestClient => ({
       socket,
       peer,
-      owner,
+      input,
       state: state!,
       welcome: welcome!,
       world: world!,
@@ -437,21 +412,22 @@ function connect(port: number): Promise<TestClient> {
       },
       states: stateListeners,
       ownership: ownershipListeners,
+      checkpoints: checkpointListeners,
       texts: textListeners,
       worlds: worldListeners,
     });
-    const timeout = setTimeout(() => reject(new Error("timed out connecting v6 client")), 7_500);
+    const timeout = setTimeout(() => reject(new Error("timed out connecting v7 client")), 7_500);
     const done = (): void => {
-      if (!state || !welcome || !world || !bootstrap || !ownerOpen || !stateOpen) return;
+      if (!state || !welcome || !world || !bootstrap || !inputOpen || !stateOpen) return;
       clearTimeout(timeout);
       resolve(client());
     };
-    owner.stateChanged.subscribe((value) => {
-      ownerOpen = value === "open";
+    input.stateChanged.subscribe((value) => {
+      inputOpen = value === "open";
       done();
     });
     peer.onDataChannel.subscribe((channel) => {
-      if (channel.label !== "gurgur-state-v6" || state) {
+      if (channel.label !== "gurgur-state-v7" || state) {
         channel.close();
         return;
       }
@@ -462,12 +438,17 @@ function connect(port: number): Promise<TestClient> {
       });
       channel.onMessage.subscribe((packet) => {
         if (typeof packet === "string") return;
+        if (binaryPacketTag(packet) === PREDICTION_CHECKPOINT_TAG) {
+          const checkpoint = decodePredictionCheckpoint(packet);
+          for (const listener of checkpointListeners.splice(0)) listener(checkpoint);
+          return;
+        }
         const cluster = decodeStateCluster(packet);
         const received = receiver.applyCluster(cluster);
         for (const accepted of received.accepted)
           for (const listener of stateListeners.splice(0)) listener(accepted);
         if (received.ack.entries.length > 0) {
-          owner.send(Buffer.from(encodeStateAck(received.ack)));
+          input.send(Buffer.from(encodeStateAck(received.ack)));
           acks += 1;
         }
       });
@@ -532,10 +513,13 @@ function connect(port: number): Promise<TestClient> {
       } else if (tag === STATE_CLUSTER_TAG && state) {
         const cluster = decodeStateCluster(data);
         receiver.applyCluster(cluster);
+      } else if (tag === PREDICTION_CHECKPOINT_TAG) {
+        const checkpoint = decodePredictionCheckpoint(data);
+        for (const listener of checkpointListeners.splice(0)) listener(checkpoint);
       }
       done();
     });
-    socket.addEventListener("error", () => reject(new Error("v6 websocket failed")));
+    socket.addEventListener("error", () => reject(new Error("v7 websocket failed")));
   });
 }
 
@@ -546,11 +530,11 @@ function waitForState(
   return wait(client.states, predicate, "state");
 }
 
-function waitForOwnership(
+function waitForCheckpoint(
   client: TestClient,
-  predicate: (message: OwnershipChangedPacket) => boolean,
-): Promise<OwnershipChangedPacket> {
-  return wait(client.ownership, predicate, "ownership");
+  predicate: (checkpoint: PredictionCheckpointPacket) => boolean,
+): Promise<PredictionCheckpointPacket> {
+  return wait(client.checkpoints, predicate, "prediction checkpoint");
 }
 
 function waitForText(client: TestClient, type: string): Promise<Record<string, unknown>> {
@@ -584,6 +568,30 @@ function wait<T>(
 async function close(client: TestClient): Promise<void> {
   await client.peer.close();
   client.socket.close();
+}
+
+function command(
+  client: TestClient,
+  sequence: number,
+  patch: Partial<InputCommand> = {},
+): InputCommand {
+  return {
+    type: "input",
+    protocolVersion: PROTOCOL_VERSION,
+    worldEpoch: client.world.worldEpoch,
+    sequence,
+    clientTick: sequence,
+    moveX: 0,
+    moveZ: 0,
+    lookYaw: 0,
+    lookPitch: 0,
+    buttons: 0,
+    jumpCounter: 0,
+    interactCounter: 0,
+    interactTarget: null,
+    primaryCounter: 0,
+    ...patch,
+  };
 }
 
 function same(a: RuntimeId, b: RuntimeId): boolean {
