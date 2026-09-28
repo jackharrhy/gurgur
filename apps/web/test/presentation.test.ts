@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { PresentationBuffer } from "../src/presentation";
-import { PROXY_INTERPOLATION_MS, type NetworkBodyState } from "@gurgur/engine";
+import {
+  PROXY_INTERPOLATION_MS,
+  type NetworkBodyState,
+  type NetworkPlayerState,
+} from "@gurgur/engine";
+import {
+  correctedPredictionPose,
+  reconcilePredictionCorrection,
+} from "../src/prediction-correction";
 
 const state = (sequence: number, x: number): NetworkBodyState => ({
   kind: "body",
@@ -60,6 +68,48 @@ describe("source-tick proxy presentation", () => {
     expect(presentation.trackDelayTicks({ index: 2, generation: 1 })).toBe(4);
   });
 
+  test("buffers grounded walking players whose encoded velocities do not include horizontal movement", () => {
+    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    presentation.updateClock(0, 0, 0);
+    const arrivals = Array.from({ length: 32 }, (_, sequence) => {
+      const sourceAtMs = sequence * (1_000 / 30);
+      const player: NetworkPlayerState = {
+        ...state(sequence, sourceAtMs / 200),
+        kind: "player",
+        linearVelocity: { x: 0, y: 0, z: 0 },
+        yaw: 0,
+        verticalVelocity: 0,
+        grounded: true,
+        crouched: false,
+        lastJumpCounter: 0,
+        stepCooldown: 0,
+      };
+      return {
+        atMs: sourceAtMs + 75 + [0, 20, -20, 10, -10][sequence % 5]!,
+        state: player,
+      };
+    }).toSorted((left, right) => left.atMs - right.atMs);
+    let previous: number | null = null;
+    let eligible = 0;
+    let advancing = 0;
+    for (let frame = 0; frame <= 60; frame += 1) {
+      const nowMs = frame * (1_000 / 60);
+      while (arrivals.length > 0 && arrivals[0]!.atMs <= nowMs) {
+        const arrival = arrivals.shift()!;
+        presentation.pushNetwork([arrival.state], arrival.atMs);
+      }
+      const player = presentation.sample(nowMs)[0];
+      if (!player || nowMs <= 180) continue;
+      if (previous !== null) {
+        eligible += 1;
+        if (player.position.x - previous > 1e-5) advancing += 1;
+      }
+      previous = player.position.x;
+    }
+    expect(advancing).toBe(eligible);
+    expect(presentation.trackDelayTicks(state(0, 0).id)).toBeGreaterThan(4);
+  });
+
   test("turns 30 Hz state into continuous 60 and 120 Hz motion", () => {
     for (const displayHz of [60, 120]) {
       const presentation = new PresentationBuffer();
@@ -106,6 +156,36 @@ describe("source-tick proxy presentation", () => {
     expect(presentation.latestNetwork(state(1, 0).id)?.position.x).toBe(5);
   });
 
+  test("renders a reconciled local pose even when its sequence is unchanged", () => {
+    const presentation = new PresentationBuffer();
+    presentation.pushLocal([state(10, 10)], 100);
+    presentation.pushLocal([state(10, 7)], 100, true);
+    expect(presentation.sample(110)[0]!.position.x).toBe(7);
+  });
+
+  test("accepts a local replay timeline reset and immediately advances from it", () => {
+    const presentation = new PresentationBuffer();
+    presentation.pushLocal([state(10, 10)], 100);
+    presentation.pushLocal([state(8, 7)], 100, true);
+    expect(presentation.sample(110)[0]!.position.x).toBe(7);
+    presentation.pushLocal([state(9, 8)], 120);
+    expect(presentation.latestLocal(state(9, 0).id)!.position.x).toBe(8);
+    expect(presentation.sample(140)[0]!.position.x).toBe(8);
+  });
+
+  test("keeps a release checkpoint newer than an independently delivered state cluster", () => {
+    const presentation = new PresentationBuffer();
+    presentation.replaceReliable(state(10, 10), 100, false);
+    presentation.pushNetwork([state(9, 90)], 110);
+    presentation.pushNetwork([{ ...state(11, 90), authorityVersion: 0 }], 120);
+    presentation.pushNetwork([{ ...state(8, 90), sourceTick: 22 }], 130);
+    expect(presentation.latestNetwork(state(0, 0).id)!.position.x).toBe(10);
+    expect(presentation.sample(200)[0]!.position.x).toBe(10);
+    presentation.pushNetwork([{ ...state(0, 20), authorityVersion: 2 }], 210);
+    expect(presentation.latestNetwork(state(0, 0).id)!.position.x).toBe(20);
+    expect(presentation.sample(210)[0]!.position.x).toBe(20);
+  });
+
   test("samples source cadence instead of compressing a late packet burst", () => {
     const presentation = new PresentationBuffer();
     presentation.updateClock(0, 0, 0);
@@ -121,5 +201,70 @@ describe("source-tick proxy presentation", () => {
     expect(immediatelyBeforeBurst).toBeCloseTo(1.497, 2);
     expect(immediatelyAfterBurst).toBeCloseTo(1.503, 2);
     expect(immediatelyAfterBurst - immediatelyBeforeBurst).toBeLessThan(0.01);
+  });
+});
+
+describe("fixed-step predicted-body presentation", () => {
+  const stepMs = 1_000 / 60;
+
+  test("uses fixed production timestamps for batched updates at 60 and 120 Hz", () => {
+    for (const displayHz of [60, 120]) {
+      const presentation = new PresentationBuffer();
+      presentation.pushLocal([state(0, 0)], 0);
+      // The worker can deliver both completed steps in one main-thread turn.
+      presentation.pushLocal([state(1, 0.1)], stepMs);
+      presentation.pushLocal([state(2, 0.2)], 2 * stepMs);
+      let nextTick = 3;
+      for (let frame = 0; frame < 12; frame += 1) {
+        const nowMs = 2.5 * stepMs + frame * (1_000 / displayHz);
+        while (nextTick * stepMs <= nowMs) {
+          presentation.pushLocal([state(nextTick, nextTick * 0.1)], nextTick * stepMs);
+          nextTick += 1;
+        }
+        expect(presentation.sample(nowMs)[0]!.position.x).toBeCloseTo((nowMs / stepMs - 1) * 0.1);
+      }
+      expect(presentation.sample(10_000)[0]!.position.x).toBeCloseTo((nextTick - 1) * 0.1);
+    }
+  });
+
+  test("the local player stays immediate while its prop interpolates", () => {
+    const presentation = new PresentationBuffer();
+    const player = (sequence: number): NetworkPlayerState => ({
+      ...state(sequence, sequence),
+      kind: "player",
+      id: { index: 2, generation: 1 },
+      yaw: 0,
+      verticalVelocity: 0,
+      grounded: true,
+      crouched: false,
+      lastJumpCounter: 0,
+      stepCooldown: 0,
+    });
+    presentation.pushLocal([state(0, 0), player(0)], 0);
+    presentation.pushLocal([state(1, 1), player(1)], stepMs);
+    const samples = presentation.sample(1.5 * stepMs);
+    expect(samples.find((sample) => sample.id.index === 1)!.position.x).toBeCloseTo(0.5);
+    expect(samples.find((sample) => sample.id.index === 2)!.position.x).toBe(1);
+  });
+
+  test("rebases both interpolation endpoints before applying a reconciliation offset", () => {
+    const presentation = new PresentationBuffer();
+    const yaw = (angle: number) => ({ x: 0, y: Math.sin(angle / 2), z: 0, w: Math.cos(angle / 2) });
+    presentation.pushLocal([state(0, 0)], 0);
+    presentation.pushLocal([{ ...state(1, 0.1), rotation: yaw(0.1) }], stepMs);
+    const nowMs = 1.5 * stepMs;
+    const before = presentation.sample(nowMs)[0]!;
+    const previous = presentation.latestLocal(state(0, 0).id)!;
+    const reconciled = { ...state(1, 1.1), rotation: yaw(0.5) };
+    const correction = reconcilePredictionCorrection(previous, reconciled, null, nowMs, true)!;
+    presentation.pushLocal([reconciled], stepMs, true);
+    const after = presentation.sample(nowMs)[0]!;
+    expect(after.position.x).toBeCloseTo(1.05);
+    const rendered = correctedPredictionPose(after, correction, nowMs);
+    expect(rendered.position.x).toBeCloseTo(before.position.x);
+    expect(rendered.rotation.y).toBeCloseTo(before.rotation.y);
+    expect(rendered.rotation.w).toBeCloseTo(before.rotation.w);
+    presentation.pushLocal([{ ...state(2, 1.2), rotation: yaw(0.6) }], 2 * stepMs);
+    expect(presentation.sample(2.5 * stepMs)[0]!.position.x).toBeCloseTo(1.15);
   });
 });

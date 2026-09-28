@@ -72,7 +72,8 @@ capability flags; they do not advance physics.
 
 The host and browser loops execute at most four catch-up ticks per turn.
 Persistence captures host application state only at a completed tick boundary.
-Local prediction renders the newest completed worker step. Remote render tracks
+The local player renders the newest completed worker step; predicted loose props
+interpolate completed poses one fixed tick behind. Remote render tracks
 adapt independently from four to eight source ticks and never extrapolate.
 Nearby, touching, or supporting rigid bodies temporarily render from their
 collision-aligned pose; render timing never alters physics.

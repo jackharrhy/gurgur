@@ -1,6 +1,6 @@
 # Testing
 
-`bun run check` runs format verification, lint, TypeScript, 182 unit/simulation/
+`bun run check` runs format verification, lint, TypeScript, unit/simulation/
 integration tests, persistence/content tests, and real protocol-v7 server
 transport tests.
 
@@ -12,6 +12,9 @@ transport tests.
 - `bun run test:browser` runs real Chrome movement, pickup/release, contention,
   and jointed contraption scenarios.
 - `bun run test:browser movement|pickup|contention|contraption` selects one.
+- Pickup runs localhost, Typical, and Adverse flick-and-release scenarios;
+  `SMOKE_PROFILE=local|typical|adverse` selects one. Release and prediction traces
+  are saved under `reports/browser/`.
 - `bun run test:browser capture` runs the full 15-second paired debug capture,
   downloads it, decompresses it, and validates both timelines.
 
@@ -54,7 +57,7 @@ different claims and require different oracles.
    moving supports, dynamic reaction impulses, mass-independent target drive,
    stacked/compound bodies, joints, sensors, and deterministic replay.
 7. Real server/WebRTC tests prove Bun-owned players, input-bundle delivery,
-   checkpoints/acks, first-wins loose claims, 60 Hz held state, bounded release,
+   checkpoints/acks, first-wins loose claims, adjacent-tick held and released state, bounded release,
    reset, and server-only contraption manipulation.
 8. Presentation tests prove source-tick interpolation, per-track adaptive delay,
    no extrapolation, and monotonic delay changes. The prediction trace recorder
@@ -63,8 +66,12 @@ different claims and require different oracles.
    captures 900 authoritative 60 Hz frames and stops cleanly on world reset,
    player loss, or shutdown.
 9. Real Chrome tests exercise production Wasm, workers, input, reconciliation,
-   WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. Held
-   host/browser transforms are paired by source tick and must stay within 1 cm.
+   WebRTC impairment, Three.js/WebGPU, contention, and jointed objects. Fast
+   flick-and-release motion is traced for 1.5 seconds, then the settled body's
+   predicted and rendered poses must converge within 1 cm of authority.
+   Equal source ticks alone do not imply equal inputs: Bun consumes newest
+   delivered intent while the browser predicts pending commands. Exact physics
+   parity is checked with identical command streams in the adapter tests.
    A main-thread stall must not discard worker time; a worker stall must be
    measured.
 10. Side-by-side manual play against clean `main` remains required. Metrics can
@@ -83,8 +90,8 @@ Browser behavior gates require:
   forced behind the Adverse buffer;
 - a confirmed pickup creates a predicted dynamic body and begins physical
   movement without a mesh teleport;
-- the held browser and host simulation agree within 1 cm when compared at the
-  same source tick;
+- the released body's prediction and presentation converge within 1 cm after
+  its motion settles;
 - no pickup or release frame discontinuity exceeds the physical 25 cm gate,
   including loss while a recently released body remains on its 60 Hz hot path;
 - look changes affect the held physical body within the bounded input/worker/

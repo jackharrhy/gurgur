@@ -208,15 +208,7 @@ describe("protocol-v7 real server transport", () => {
     }
     const moved = await movedPromise;
     await Bun.sleep(100);
-    collectHotStates = false;
-    const pendingCollector = second.states.indexOf(collectHotState);
-    if (pendingCollector >= 0) second.states.splice(pendingCollector, 1);
-    expect(hotSourceTicks.length).toBeGreaterThanOrEqual(5);
-    expect(
-      hotSourceTicks
-        .slice(1)
-        .some((sourceTick, index) => sourceTick - (hotSourceTicks[index] as number) === 1),
-    ).toBeTrue();
+    expectHotStateCadence(hotSourceTicks);
     expect(moved.flags & NETWORK_FLAG_HELD).toBe(NETWORK_FLAG_HELD);
     expect(moved.authorityVersion).toBe(initial.authorityVersion);
     const droppedPromise = waitForCheckpoint(
@@ -233,6 +225,12 @@ describe("protocol-v7 real server transport", () => {
     );
     await droppedPromise;
     expect(target.ownerPlayerId).toBeNull();
+    hotSourceTicks.length = 0;
+    await Bun.sleep(200);
+    collectHotStates = false;
+    const pendingCollector = second.states.indexOf(collectHotState);
+    if (pendingCollector >= 0) second.states.splice(pendingCollector, 1);
+    expectHotStateCadence(hotSourceTicks);
 
     const resetWorld = waitForWorld(first, first.world.worldEpoch + 1);
     const reset = await fetch(`http://127.0.0.1:${server.port}/admin/reset`, {
@@ -615,6 +613,14 @@ function command(
 
 function same(a: RuntimeId, b: RuntimeId): boolean {
   return a.index === b.index && a.generation === b.generation;
+}
+
+function expectHotStateCadence(sourceTicks: number[]): void {
+  const ticks = [...new Set(sourceTicks)].toSorted((left, right) => left - right);
+  expect(ticks.length).toBeGreaterThanOrEqual(8);
+  const gaps = ticks.slice(1).map((tick, index) => tick - ticks[index]!);
+  const adjacentTicks = gaps.filter((gap) => gap === 1).length;
+  expect(adjacentTicks / gaps.length).toBeGreaterThanOrEqual(0.75);
 }
 
 async function waitForCondition(predicate: () => boolean): Promise<void> {

@@ -22,6 +22,7 @@ specification tentative.
 - [`0023-client-feel-presentation.md`](0023-client-feel-presentation.md) (superseded)
 - [`0024-source-style-networked-physics.md`](0024-source-style-networked-physics.md)
 - [`0025-bounded-contact-island-prediction.md`](0025-bounded-contact-island-prediction.md)
+- [`0026-predicted-prop-presentation.md`](0026-predicted-prop-presentation.md)
 
 Changing an accepted decision requires a replacement record, updated canonical
 docs, and evidence that the replacement satisfies the same product constraints.

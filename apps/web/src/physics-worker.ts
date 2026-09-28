@@ -49,6 +49,7 @@ import {
   type WorldMessage,
 } from "@gurgur/game";
 import type { PhysicsWorkerRequest, PhysicsWorkerResponse } from "./ownership-client";
+import { acceptsPredictionCheckpoint } from "./prediction-checkpoint";
 
 type LocalBody = {
   networkId: RuntimeId;
@@ -99,6 +100,7 @@ let nextInputSequence = 0;
 let predictionTick = 0;
 let predictionHistory: PredictionRecord[] = [];
 let lastAcknowledgedInputSequence = -1;
+let lastCheckpointServerTick: number | null = null;
 let lastAcknowledgedPrimaryCounter = 0;
 let predictionPrimaryCounter = 0;
 let lastPrimaryCounter = 0;
@@ -124,6 +126,7 @@ let nextManipulationRequestId = 1;
 let accumulator = 0;
 let discardedCatchUpSeconds = 0;
 let lastTimeMs = performance.now();
+let lastProducedAtMs: number | null = null;
 let timer: number | null = null;
 let worldBarrier = Promise.resolve();
 let respawnPosition = { x: 0, y: 0, z: 0 };
@@ -198,12 +201,14 @@ async function setWorld(
   predictionTick = 0;
   predictionHistory = [];
   lastAcknowledgedInputSequence = -1;
+  lastCheckpointServerTick = null;
   lastAcknowledgedPrimaryCounter = 0;
   predictionPrimaryCounter = 0;
   lastPrimaryCounter = 0;
   accumulator = 0;
   discardedCatchUpSeconds = 0;
   lastTimeMs = performance.now();
+  lastProducedAtMs = null;
   const spawn = message.bundle.playerSpawns.find((candidate) => candidate.name === "default");
   if (!spawn) throw new Error("world is missing the default player spawn");
   respawnPosition = {
@@ -284,25 +289,24 @@ function tick(): void {
     while (predictionHistory.length > PREDICTION_HISTORY_CAPACITY) predictionHistory.shift();
     accumulator -= PHYSICS_DT;
     steps += 1;
+    lastProducedAtMs = performance.timeOrigin + now - accumulator * 1_000;
+    const contacts = predictionContacts();
+    post({
+      type: "local-states",
+      states: result,
+      collisionStates: traceEnabled ? clientCollisionStates(contacts) : [],
+      producedAtMs: lastProducedAtMs,
+      discardedCatchUpSeconds,
+      reconciled: false,
+      inputSequence: command.sequence,
+      acknowledgment: lastAcknowledgedInputSequence < 0 ? null : lastAcknowledgedInputSequence,
+      replayCount: 0,
+      contactIds: contacts.contactIds,
+      supportIds: contacts.supportIds,
+      command: structuredClone(command),
+    });
   }
   if (steps === 0) return;
-  const localStates = localPredictedStates();
-  const contacts = predictionContacts();
-  const command = predictionHistory.at(-1)?.command ?? null;
-  post({
-    type: "local-states",
-    states: localStates,
-    collisionStates: traceEnabled ? clientCollisionStates(contacts) : [],
-    producedAtMs: now,
-    discardedCatchUpSeconds,
-    reconciled: false,
-    inputSequence: nextInputSequence - 1,
-    acknowledgment: lastAcknowledgedInputSequence < 0 ? null : lastAcknowledgedInputSequence,
-    replayCount: 0,
-    contactIds: contacts.contactIds,
-    supportIds: contacts.supportIds,
-    command: command ? structuredClone(command) : null,
-  });
   if (manipulation) {
     manipulation.stateSequence = (manipulation.stateSequence + 1) & 0xffff;
     const message: ManipulationStatePacket = {
@@ -331,9 +335,9 @@ function nextFixedCommand(): InputCommand {
   };
 }
 
-function simulateCommand(command: InputCommand, serverTick: number): void {
+function simulateCommand(command: InputCommand, serverTick: number, replay = false): void {
   if (!physics || !bundle || !localPlayer) return;
-  applyProxyTargets(serverTick);
+  applyProxyTargets(replay ? serverTick : undefined);
   const controller: PlayerControllerState = {
     position: { ...localPlayer.position },
     yaw: localPlayer.yaw,
@@ -446,12 +450,18 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
   if (
     !physics ||
     !localPlayerId ||
-    checkpoint.worldEpoch !== worldEpoch ||
-    !sameId(checkpoint.player.id, localPlayerId)
+    !localPlayer ||
+    !acceptsPredictionCheckpoint(checkpoint, {
+      worldEpoch,
+      player: localPlayer,
+      serverTick: lastCheckpointServerTick,
+      acknowledgedInputSequence: lastAcknowledgedInputSequence,
+    })
   )
     return;
+  if (checkpoint.player.authorityVersion > localPlayer.authorityVersion) resetPredictionHistory();
+  lastCheckpointServerTick = checkpoint.serverTick;
   const acknowledged = checkpoint.lastProcessedInputSequence ?? -1;
-  if (acknowledged < lastAcknowledgedInputSequence) return;
   const acknowledgedRecord = predictionHistory.find(
     (record) => record.command.sequence === acknowledged,
   );
@@ -474,6 +484,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
     clearGravityVisitor(localPlayerProxy);
     physics.destroy(localPlayerProxy);
   }
+  activePredictionContacts.clear();
   localPlayer = clonePlayer(checkpoint.player);
   predictionPrimaryCounter = lastAcknowledgedPrimaryCounter;
   localPlayerProxy = physics.createPlayerProxy(
@@ -508,7 +519,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
   for (let index = 0; index < pending.length; index += 1) {
     const command = pending[index]!;
     const replayTick = checkpoint.serverTick + index + 1;
-    simulateCommand(command, replayTick);
+    simulateCommand(command, replayTick, true);
     const result = localPredictedStates();
     predictionHistory.push({
       command,
@@ -518,6 +529,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
       proxyTick: replayTick,
     });
   }
+  restoreNewestProxies();
   const newestSequence = pending.at(-1)?.sequence ?? acknowledged;
   nextInputSequence = Math.max(nextInputSequence, newestSequence + 1);
   const contacts = predictionContacts();
@@ -526,7 +538,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
     type: "local-states",
     states: localPredictedStates(),
     collisionStates: traceEnabled ? clientCollisionStates(contacts) : [],
-    producedAtMs: performance.now(),
+    producedAtMs: lastProducedAtMs ?? performance.timeOrigin + performance.now(),
     discardedCatchUpSeconds,
     reconciled: true,
     inputSequence: newestSequence,
@@ -573,11 +585,25 @@ function restoreCheckpointBodies(checkpoint: PredictionCheckpointPacket): void {
       checkpointState &&
       (checkpointState.authorityVersion > body.state.authorityVersion ||
         (checkpointState.authorityVersion === body.state.authorityVersion &&
+          unwrapTick32(checkpointState.sourceTick, body.state.sourceTick) >=
+            body.state.sourceTick &&
           (checkpointState.stateSequence === body.state.stateSequence ||
             isNewerSequence16(checkpointState.stateSequence, body.state.stateSequence))))
-    )
+    ) {
       body.state = cloneBody(checkpointState);
+      rememberBodyState(body, checkpointState);
+    }
   }
+}
+
+function resetPredictionHistory(): void {
+  predictionHistory = [];
+  lastAcknowledgedInputSequence = -1;
+  lastCheckpointServerTick = null;
+  lastAcknowledgedPrimaryCounter = input?.primaryCounter ?? 0;
+  predictionPrimaryCounter = lastAcknowledgedPrimaryCounter;
+  predictedGrab = null;
+  activePredictionContacts.clear();
 }
 
 function clientCollisionStates(contacts: {
@@ -750,6 +776,13 @@ function applyNetworkStates(states: NetworkObjectState[]): void {
       continue;
     }
     if (state.authorityVersion < body.state.authorityVersion) continue;
+    if (
+      state.authorityVersion === body.state.authorityVersion &&
+      (unwrapTick32(state.sourceTick, body.state.sourceTick) < body.state.sourceTick ||
+        (state.stateSequence !== body.state.stateSequence &&
+          !isNewerSequence16(state.stateSequence, body.state.stateSequence)))
+    )
+      continue;
     body.state = cloneBody(state);
     rememberBodyState(body, state);
     if (bundle && descriptor?.kind === "world-entity")
@@ -760,11 +793,13 @@ function applyNetworkStates(states: NetworkObjectState[]): void {
 function applyOwnership(message: OwnershipChangedPacket): void {
   if (!physics || !localPlayerId || message.worldEpoch !== worldEpoch) return;
   const descriptor = descriptors.get(key(message.id));
+  if (descriptor && message.authorityVersion < descriptor.authorityVersion) return;
   if (descriptor) {
     descriptor.ownerPlayerId = message.ownerPlayerId ? { ...message.ownerPlayerId } : null;
     descriptor.authorityVersion = message.authorityVersion;
   }
   if (message.state.kind === "player" && sameId(message.id, localPlayerId)) {
+    if (localPlayer && message.state.authorityVersion < localPlayer.authorityVersion) return;
     if (
       localPlayer &&
       message.state.authorityVersion === localPlayer.authorityVersion &&
@@ -772,6 +807,26 @@ function applyOwnership(message: OwnershipChangedPacket): void {
       !isNewerSequence16(message.state.stateSequence, localPlayer.stateSequence)
     )
       return;
+    const discontinuity =
+      localPlayer === null || message.state.authorityVersion > localPlayer.authorityVersion;
+    if (discontinuity) {
+      resetPredictionHistory();
+      lastCheckpointServerTick = message.state.sourceTick;
+      for (const body of bodies.values()) {
+        if (!body.predicted) continue;
+        body.predicted = false;
+        physics.setBodyType(body.handle, "kinematic");
+      }
+      restoreNewestProxies();
+      if (localPlayerProxy) {
+        clearGravityVisitor(localPlayerProxy);
+        physics.destroy(localPlayerProxy);
+      }
+      localPlayerProxy = physics.createPlayerProxy(
+        message.state.position,
+        playerCapsule(message.state.crouched),
+      );
+    }
     localPlayer = clonePlayer(message.state);
     return;
   }
@@ -842,6 +897,15 @@ function applyLifecycle(message: LifecycleMessage): void {
       remotePlayers.delete(identity);
     }
     descriptors.delete(identity);
+    if (localPlayerId && sameId(id, localPlayerId)) {
+      if (localPlayerProxy) {
+        clearGravityVisitor(localPlayerProxy);
+        physics.destroy(localPlayerProxy);
+      }
+      localPlayerProxy = null;
+      localPlayer = null;
+      resetPredictionHistory();
+    }
     pendingManipulation.forEach((pending, requestId) => {
       if (sameId(pending.target, id)) pendingManipulation.delete(requestId);
     });
@@ -886,7 +950,7 @@ function updateRemotePlayer(state: NetworkPlayerState): void {
   }
 }
 
-function applyProxyTargets(serverTick: number): void {
+function applyProxyTargets(serverTick?: number): void {
   if (!physics || !bundle) return;
   for (const body of bodies.values()) {
     if (body.predicted) continue;
@@ -895,12 +959,37 @@ function applyProxyTargets(serverTick: number): void {
       descriptor?.kind === "world-entity" ? bundle.entities[descriptor.entityIndex] : null;
     if (entity?.body?.kind !== "dynamic-brush" && entity?.body?.kind !== "kinematic-brush")
       continue;
-    const state = sampleHistory(body.history, serverTick) ?? body.state;
+    const state =
+      serverTick === undefined
+        ? body.state
+        : (sampleHistory(body.history, serverTick) ?? body.state);
     physics.setKinematicTargetTransform(body.handle, state.position, state.rotation, PHYSICS_DT);
   }
   for (const remote of remotePlayers.values()) {
-    const state = sampleHistory(remote.history, serverTick) ?? remote.state;
+    const state =
+      serverTick === undefined
+        ? remote.state
+        : (sampleHistory(remote.history, serverTick) ?? remote.state);
     physics.setKinematicTargetTransform(remote.handle, state.position, state.rotation, PHYSICS_DT);
+  }
+}
+
+function restoreNewestProxies(): void {
+  if (!physics || !bundle) return;
+  for (const body of bodies.values()) {
+    if (body.predicted) continue;
+    const kind = bundle.entities[body.entityIndex]?.body?.kind;
+    if (kind !== "dynamic-brush" && kind !== "kinematic-brush") continue;
+    physics.setBodyTransform(body.handle, body.state.position, body.state.rotation);
+    physics.setBodyVelocity(body.handle, body.state.linearVelocity, body.state.angularVelocity);
+  }
+  for (const remote of remotePlayers.values()) {
+    physics.setBodyTransform(remote.handle, remote.state.position, remote.state.rotation);
+    physics.setBodyVelocity(
+      remote.handle,
+      remote.state.linearVelocity,
+      remote.state.angularVelocity,
+    );
   }
 }
 

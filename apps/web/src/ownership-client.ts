@@ -36,6 +36,7 @@ export type PhysicsWorkerResponse =
       type: "local-states";
       states: NetworkObjectState[];
       collisionStates: NetworkObjectState[];
+      /** Fixed-step boundary in the shared performance.timeOrigin + performance.now() clock. */
       producedAtMs: number;
       discardedCatchUpSeconds: number;
       reconciled: boolean;
@@ -108,7 +109,7 @@ export function createOwnershipClient(
     } else if (message.type === "local-states") {
       callbacks.localStates(
         message.states,
-        performance.now(),
+        message.producedAtMs - performance.timeOrigin,
         message.discardedCatchUpSeconds,
         message.reconciled,
         {

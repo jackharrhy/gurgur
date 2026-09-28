@@ -95,10 +95,18 @@ The browser retains 128 prediction records. On a checkpoint it:
 5. keeps only the checkpoint-selected loose set dynamic and returns every other
    body to its newest accepted authoritative proxy state.
 
-Physics correction is immediate. Rendering keeps continuity with an additive
-visual error offset that decays over 100 ms without suppressing new predicted
-motion. Player corrections over one metre ordinarily hard-snap. Predicted-body
-corrections and transitions out of the bounded set remain rate-bounded. Epoch,
+Checkpoints advance by server tick, including when successive checkpoints
+acknowledge the same input. Older ticks, acknowledgements, and authority
+generations cannot restore prediction. Cached authoritative body states also
+remain monotonic across checkpoint and state-cluster delivery.
+
+Physics correction is immediate. The newest local result replaces its previous
+presentation sample even when replay reuses a sequence or adjusts the predicted
+tick backward. Rendering accumulates the difference between the raw prediction
+before and after replay into a visual offset that decays over 100 ms. Normal
+physical motion does not restart that decay. Player corrections over one metre
+ordinarily hard-snap. Transitions out of the bounded set cap the final corrected
+presentation step; they never clamp the raw pose before adding its offset. Epoch,
 map, respawn, and lifecycle discontinuities replace history.
 
 ## Collision and presentation timelines
@@ -111,7 +119,9 @@ checkpoint-selected nearby loose bodies use their predicted physics bodies.
 
 Rendering remains a separate consumer:
 
-- local predicted state renders from the newest completed worker step;
+- the local player renders from the newest completed worker step; predicted
+  loose props interpolate completed poses one fixed tick behind, using worker
+  production timestamps rather than message arrival spacing;
 - ordinary remote tracks adapt independently between four and eight source
   ticks and never extrapolate beyond their newest sample;
 - a rigid body within 2 m of the local player, currently touching/supporting it,

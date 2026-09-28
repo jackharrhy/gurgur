@@ -294,7 +294,7 @@ export async function createGurgurServer(
       setTimeout(() => flushStateBroadcast(batch), 0);
       return;
     }
-    stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 1_000 / PHYSICS_HZ);
+    stateBroadcastTimer ??= setTimeout(flushStateBroadcast, 0);
   };
 
   const broadcastOwnership = (message: OwnershipChangedPacket): void => {

@@ -2,7 +2,64 @@
 
 This is the only status document. Canonical behavior lives in the sibling docs.
 
-Updated: 2026-08-02.
+Updated: 2026-09-28.
+
+## Flick-and-release investigation
+
+The September audit found and repaired several independent sources of prop
+glitches:
+
+- Held/released 60 Hz state was deferred for a whole tick, allowing the next
+  publication to overwrite it. Sending after the current simulation turn
+  preserves the hot cadence; a real WebRTC regression failed before the fix.
+- Local replay results were incorrectly rejected as duplicate or older network
+  samples. Local results now replace prediction; authoritative samples remain
+  monotonic across independent checkpoint and cluster delivery.
+- Equal-acknowledgement checkpoints could arrive out of order and restore old
+  physics. Worker admission now checks server tick and authority generation.
+- Collision proxies could remain on replay-time poses after reconciliation.
+  They now return to the newest authoritative state before live prediction.
+- Correction smoothing counted ordinary movement as error, ignored centimetre
+  and rotation-only corrections, and could apply a release offset after an
+  intermediate clamp in the wrong direction. Correction uses actual replay
+  deltas and caps only the final release-transition pose.
+- Immediate prop rendering could combine two valid physics ticks into one
+  visible jump. [Decision 0026](decisions/0026-predicted-prop-presentation.md)
+  adds one-tick interpolation for predicted props using normalized worker
+  production timestamps; player presentation remains immediate.
+- Remote walking players were classified inactive because their packet has no
+  horizontal velocity. Their render tracks now adapt to measured latency; the
+  deterministic Adverse regression improved from 15/49 to 49/49 advancing frames.
+
+Browser pickup now covers stronger flicks under localhost, Typical, and Adverse
+impairment with 1.5-second release traces and settled convergence. Identical
+source ticks are no longer used as a false identical-input physics oracle;
+the independent shared-controller traces retain that proof.
+
+Validation, 2026-09-28:
+
+- `bun run check`: formatting, lint, typecheck, and all 198 tests pass.
+- `bun run test:browser`: all scenarios pass. The three flick profiles record
+  91 release frames each at approximately 60 Hz; maximum steps are
+  15.38/8.04/8.78 cm for Local/Typical/Adverse, below the unchanged 25 cm gate.
+- `bun run test:browser capture`: paired 15-second diagnostic download passes.
+- `bun run test:network`: 16 players and 128 bodies pass all profiles with zero
+  correctness errors, discarded host time, or measured buffer underruns;
+  100% moving-oracle frame advancement at 60 and 120 Hz; approximately
+  0.82 Mbit/s per recipient; host tick p95/p99 of 2.32/3.58 ms.
+- Focused presentation tests exercise interpolation and reconciliation at both
+  60 and 120 Hz. The real Chrome display in this environment ran at 60 Hz.
+
+Follow-up defects found outside the flick/release path:
+
+- Ordinary void respawn resets state sequence without the documented authority
+  increment/reliable discontinuity; preserve command sequence when fixing it.
+- Gravity-field prediction restores the player's default gravity factor before
+  replay when its proxy is recreated. Checkpoint gravity restoration needs a
+  focused field-crossing regression.
+
+Manual side-by-side play against the reference remains outstanding. Automated
+tests cannot certify the absence of every perceptual flaw.
 
 ## Current state
 

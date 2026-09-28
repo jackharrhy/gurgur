@@ -39,6 +39,14 @@ import {
 } from "./camera";
 import { createPresentationLight, VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 import { PresentationBuffer } from "./presentation";
+import {
+  correctedPredictionPose,
+  predictionCorrection,
+  reconcilePredictionCorrection,
+  PREDICTION_CORRECTION_MS,
+  PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES,
+  type PredictionCorrection,
+} from "./prediction-correction";
 
 type MaterialTextureInfo = {
   url: string;
@@ -127,22 +135,11 @@ type PhysicsDebugView = {
   material: THREE.LineBasicNodeMaterial;
 };
 
-type PredictionCorrection = {
-  id: RuntimeId;
-  position: Vec3;
-  rotation: { x: number; y: number; z: number; w: number };
-  startedAtMs: number | null;
-  relative: boolean;
-};
-
 type InteractionPresentationTransition = {
   from: BodySnapshot;
   startedAtMs: number;
 };
 
-const PREDICTION_CORRECTION_MS = 100;
-const PREDICTION_HARD_SNAP_METRES = 1;
-const PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES = 0.2;
 const INTERACTION_PRESENTATION_ENTER_METRES = 2;
 const INTERACTION_PRESENTATION_EXIT_METRES = 2.5;
 const INTERACTION_PRESENTATION_HOLD_MS = 500;
@@ -788,51 +785,39 @@ export class WorldRenderer {
 
   applyLocalStates(
     states: readonly NetworkObjectState[],
-    receivedAtMs = performance.now(),
+    producedAtMs = performance.now(),
     reconciled = false,
   ): void {
-    this.#presentation.pushLocal(states, receivedAtMs);
+    const nowMs = performance.now();
+    for (const state of states) {
+      const identity = idKey(state.id);
+      const previous = this.#presentation.latestLocal(state.id);
+      if (reconciled && previous) {
+        const correction = reconcilePredictionCorrection(
+          previous,
+          state,
+          this.#predictionCorrections.get(identity) ?? null,
+          nowMs,
+          state.kind === "body",
+        );
+        if (correction) this.#predictionCorrections.set(identity, correction);
+        else this.#predictionCorrections.delete(identity);
+      } else if (!previous && state.kind === "body") {
+        this.#queuePredictionCorrection(state);
+      }
+    }
+    this.#presentation.pushLocal(states, producedAtMs, reconciled);
     this.#predictedBodyIds.clear();
     for (const state of states)
       if (state.kind === "body") this.#predictedBodyIds.add(idKey(state.id));
-    const player = states.find((state) => state.kind === "player");
-    if (player && reconciled) this.#queuePredictionCorrection(player, false);
-    if (reconciled)
-      for (const state of states)
-        if (state.kind === "body") this.#queuePredictionCorrection(state, true);
     const held = states.find(
       (state) => state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0,
     );
     if (held) {
-      const previousId = this.#predictedHeldId;
       const mesh = this.#meshes.get(idKey(held.id)) ?? null;
       this.#heldTarget = mesh;
       this.#predictedHeldId = { ...held.id };
-      if (mesh && (!previousId || idKey(previousId) !== idKey(held.id) || reconciled))
-        this.#queuePredictionCorrection(held, !previousId);
     } else if (states.some((state) => state.kind === "player") && this.#predictedHeldId) {
-      const id = this.#predictedHeldId;
-      const mesh = this.#meshes.get(idKey(id));
-      const remainsPredicted = states.some(
-        (state) => state.kind === "body" && idKey(state.id) === idKey(id),
-      );
-      if (!remainsPredicted) {
-        const authoritative = this.#presentation.latestNetwork(id);
-        if (mesh && authoritative) this.#queuePredictionCorrection(authoritative, true);
-        else if (mesh)
-          this.#predictionCorrections.set(idKey(id), {
-            id: { ...id },
-            position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
-            rotation: {
-              x: mesh.quaternion.x,
-              y: mesh.quaternion.y,
-              z: mesh.quaternion.z,
-              w: mesh.quaternion.w,
-            },
-            startedAtMs: null,
-            relative: false,
-          });
-      }
       this.#heldTarget = null;
       this.#predictedHeldId = null;
     }
@@ -864,7 +849,7 @@ export class WorldRenderer {
   }
 
   releaseLocalState(state: NetworkObjectState, receivedAtMs = performance.now()): void {
-    this.#queuePredictionCorrection(state, true);
+    this.#queuePredictionCorrection(state);
     this.#presentation.replaceReliable(state, receivedAtMs, false);
     this.applyNetworkInteractionState([state]);
   }
@@ -1525,124 +1510,34 @@ export class WorldRenderer {
     const identity = idKey(body.id);
     const correction = this.#predictionCorrections.get(identity);
     if (!correction) return body;
-    if (!correction.relative) {
-      correction.position = {
-        x: correction.position.x - body.position.x,
-        y: correction.position.y - body.position.y,
-        z: correction.position.z - body.position.z,
-      };
-      const bodyRotation = new THREE.Quaternion(
-        body.rotation.x,
-        body.rotation.y,
-        body.rotation.z,
-        body.rotation.w,
-      );
-      const rotationOffset = new THREE.Quaternion(
-        correction.rotation.x,
-        correction.rotation.y,
-        correction.rotation.z,
-        correction.rotation.w,
-      ).multiply(bodyRotation.invert());
-      correction.rotation = {
-        x: rotationOffset.x,
-        y: rotationOffset.y,
-        z: rotationOffset.z,
-        w: rotationOffset.w,
-      };
-      correction.relative = true;
-    }
-    correction.startedAtMs ??= nowMs;
-    const amount = Math.max(
-      0,
-      Math.min(1, (nowMs - correction.startedAtMs) / PREDICTION_CORRECTION_MS),
-    );
-    const remaining = 1 - amount;
-    const rotationOffset = new THREE.Quaternion().slerpQuaternions(
-      new THREE.Quaternion(0, 0, 0, 1),
-      new THREE.Quaternion(
-        correction.rotation.x,
-        correction.rotation.y,
-        correction.rotation.z,
-        correction.rotation.w,
-      ),
-      remaining,
-    );
-    const rotation = rotationOffset.multiply(
-      new THREE.Quaternion(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w),
-    );
+    const predicted =
+      this.#predictedBodyIds.has(identity) ||
+      (this.#localPlayer && identity === idKey(this.#localPlayer));
+    const mesh = this.#meshes.get(identity);
     const candidate = {
       ...body,
-      position: {
-        x: body.position.x + correction.position.x * remaining,
-        y: body.position.y + correction.position.y * remaining,
-        z: body.position.z + correction.position.z * remaining,
-      },
-      rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+      ...correctedPredictionPose(body, correction, nowMs, predicted ? undefined : mesh?.position),
     };
-    const mesh = this.#meshes.get(identity);
-    if (!mesh) {
-      if (amount >= 1) this.#predictionCorrections.delete(identity);
-      return candidate;
-    }
-    const step = Math.hypot(
-      candidate.position.x - mesh.position.x,
-      candidate.position.y - mesh.position.y,
-      candidate.position.z - mesh.position.z,
-    );
-    if (step <= PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) {
-      if (amount >= 1) this.#predictionCorrections.delete(identity);
-      return candidate;
-    }
-    const scale = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / step;
-    return {
-      ...candidate,
-      position: {
-        x: mesh.position.x + (candidate.position.x - mesh.position.x) * scale,
-        y: mesh.position.y + (candidate.position.y - mesh.position.y) * scale,
-        z: mesh.position.z + (candidate.position.z - mesh.position.z) * scale,
-      },
-    };
+    if (
+      nowMs - correction.startedAtMs! >= PREDICTION_CORRECTION_MS &&
+      candidate.position.x === body.position.x &&
+      candidate.position.y === body.position.y &&
+      candidate.position.z === body.position.z
+    )
+      this.#predictionCorrections.delete(identity);
+    return candidate;
   }
 
   #queuePredictionCorrection(
     state: Pick<NetworkObjectState, "id" | "position" | "rotation">,
-    allowLargeError: boolean,
   ): void {
     const identity = idKey(state.id);
     const mesh = this.#meshes.get(identity);
     if (!mesh) return;
-    const error = Math.hypot(
-      mesh.position.x - state.position.x,
-      mesh.position.y - state.position.y,
-      mesh.position.z - state.position.z,
+    this.#predictionCorrections.set(
+      identity,
+      predictionCorrection({ position: mesh.position, rotation: mesh.quaternion }, state),
     );
-    if (error <= 0.05 || (error > PREDICTION_HARD_SNAP_METRES && !allowLargeError)) {
-      if (error > PREDICTION_HARD_SNAP_METRES) this.#predictionCorrections.delete(identity);
-      return;
-    }
-    const stateRotation = new THREE.Quaternion(
-      state.rotation.x,
-      state.rotation.y,
-      state.rotation.z,
-      state.rotation.w,
-    );
-    const rotationOffset = mesh.quaternion.clone().multiply(stateRotation.invert());
-    this.#predictionCorrections.set(identity, {
-      id: { ...state.id },
-      position: {
-        x: mesh.position.x - state.position.x,
-        y: mesh.position.y - state.position.y,
-        z: mesh.position.z - state.position.z,
-      },
-      rotation: {
-        x: rotationOffset.x,
-        y: rotationOffset.y,
-        z: rotationOffset.z,
-        w: rotationOffset.w,
-      },
-      startedAtMs: null,
-      relative: true,
-    });
   }
 
   #interactionPresentation(bodies: BodySnapshot[], nowMs: number): BodySnapshot[] {
@@ -1686,9 +1581,8 @@ export class WorldRenderer {
       const desired = active ? (this.#presentation.latestNetwork(body.id) ?? body) : body;
       if (this.#predictionCorrections.has(identity)) {
         this.#interactionPresentationTransitions.delete(identity);
-        const presented = this.#limitInteractionPresentationStep(identity, desired);
-        this.#interactionPresented.set(identity, presented);
-        return presented;
+        this.#interactionPresented.set(identity, desired);
+        return desired;
       }
       const transition = this.#interactionPresentationTransitions.get(identity);
       if (!transition) {

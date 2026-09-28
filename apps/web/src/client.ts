@@ -3,7 +3,12 @@ import { GameSession } from "./session";
 import { createPlayerInput } from "./input";
 import { createOwnershipClient } from "./ownership-client";
 import { WorldAudio } from "./audio";
-import { NETWORK_FLAG_HELD, PROTOCOL_VERSION } from "@gurgur/engine";
+import {
+  NETWORK_FLAG_HELD,
+  PROTOCOL_VERSION,
+  isNewerSequence16,
+  unwrapTick32,
+} from "@gurgur/engine";
 import type {
   InputCommand,
   NetworkObjectState,
@@ -323,8 +328,20 @@ const updateObservedStates = (states: readonly NetworkObjectState[]): void => {
   }
 };
 const rememberAuthoritative = (states: readonly NetworkObjectState[]): void => {
-  for (const state of states)
-    authoritativeStates.set(`${state.id.index}:${state.id.generation}`, structuredClone(state));
+  for (const state of states) {
+    const identity = `${state.id.index}:${state.id.generation}`;
+    const previous = authoritativeStates.get(identity);
+    if (
+      previous &&
+      (state.authorityVersion < previous.authorityVersion ||
+        (state.authorityVersion === previous.authorityVersion &&
+          (unwrapTick32(state.sourceTick, previous.sourceTick) < previous.sourceTick ||
+            (state.stateSequence !== previous.stateSequence &&
+              !isNewerSequence16(state.stateSequence, previous.stateSequence)))))
+    )
+      continue;
+    authoritativeStates.set(identity, structuredClone(state));
+  }
 };
 const pose = (state: NetworkObjectState | null): PredictionTracePose | null =>
   state

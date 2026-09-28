@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -32,6 +32,14 @@ const ADVERSE_IMPAIRMENT: BrowserImpairment = {
   lossRate: 0.05,
   seed: 0x300,
 };
+const pickupProfiles = {
+  local: LOCAL_IMPAIRMENT,
+  typical: TYPICAL_IMPAIRMENT,
+  adverse: ADVERSE_IMPAIRMENT,
+};
+const pickupProfile = process.env.SMOKE_PROFILE;
+if (pickupProfile && !Object.hasOwn(pickupProfiles, pickupProfile))
+  throw new Error("SMOKE_PROFILE must be local, typical, or adverse");
 
 const scenario = process.env.SMOKE_SCENARIO ?? "all";
 const path = "content/maps/fixtures/network-boxes.map";
@@ -72,8 +80,11 @@ try {
     await movementAndBanding(chrome, peerChrome);
   }
   if (scenario === "all" || scenario === "pickup") {
-    await resetWorld();
-    await pickupAndRelease(chrome);
+    for (const [profile, impairment] of Object.entries(pickupProfiles)) {
+      if (pickupProfile && pickupProfile !== profile) continue;
+      await resetWorld();
+      await pickupAndRelease(chrome, profile, impairment);
+    }
   }
   if (scenario === "all" || scenario === "contention") {
     await resetWorld();
@@ -214,8 +225,12 @@ async function movementAndBanding(ownerBrowser: Browser, observerBrowser: Browse
   }
 }
 
-async function pickupAndRelease(browser: Browser): Promise<void> {
-  const page = await openPage(browser, ADVERSE_IMPAIRMENT);
+async function pickupAndRelease(
+  browser: Browser,
+  profile: string,
+  impairment: BrowserImpairment,
+): Promise<void> {
+  const page = await openPage(browser, impairment);
   try {
     try {
       await page.waitForFunction(
@@ -311,7 +326,7 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
         }),
       { target: targetId, previousLook: previousLookAt },
     );
-    await turnTouch(page, 150);
+    await turnTouch(page, 450);
     const responseMs = await predictedResponse;
     // Measure the beginning of physical motion, not the time required to cover
     // an arbitrary distance under the grab controller's acceleration limit.
@@ -328,22 +343,22 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
             state.position.x - start.x,
             state.position.y - start.y,
             state.position.z - start.z,
-          ) > 0.2
+          ) > 0.6
         );
       },
       { target: targetId, start: startPosition },
     );
     const releaseTrace = page.evaluate(
       (target) =>
-        new Promise<Array<{ x: number; y: number; z: number }>>((resolve) => {
-          const samples: Array<{ x: number; y: number; z: number }> = [];
+        new Promise<Array<{ x: number; y: number; z: number; atMs: number }>>((resolve) => {
+          const samples: Array<{ x: number; y: number; z: number; atMs: number }> = [];
           const startedAt = performance.now();
           const sample = (now: number): void => {
             const state = (window as unknown as SmokeWindow).__gurgurDiagnostics
               .presentation()
               .find((candidate) => candidate.runtimeId === target);
-            if (state) samples.push({ ...state.position });
-            if (now - startedAt >= 400) resolve(samples);
+            if (state) samples.push({ ...state.position, atMs: now });
+            if (now - startedAt >= 1_500) resolve(samples);
             else requestAnimationFrame(sample);
           };
           requestAnimationFrame(sample);
@@ -381,33 +396,53 @@ async function pickupAndRelease(browser: Browser): Promise<void> {
       (left, right) => right.distance - left.distance,
     )[0];
     const maximumFrameStep = worstReleaseStep?.distance ?? 0;
+    const predictionFrames = await page.evaluate(() =>
+      (window as unknown as SmokeWindow).__gurgurDiagnostics.predictionTrace(),
+    );
+    await mkdir("reports/browser", { recursive: true });
+    await Bun.write(
+      `reports/browser/pickup-${profile}.json`,
+      JSON.stringify({ profile, targetId, release: samples, prediction: predictionFrames }),
+    );
     if (samples.length < 10 || maximumFrameStep >= 0.25)
       throw new Error(
         `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step (${JSON.stringify(worstReleaseStep?.previous)} -> ${JSON.stringify(worstReleaseStep?.sample)})`,
       );
-    const sameTickHeldErrors = await page.evaluate(() => {
-      const frames = (window as unknown as SmokeWindow).__gurgurDiagnostics.predictionTrace();
-      const authoritative = new Map<number, { x: number; y: number; z: number }>();
-      const predicted = new Map<number, { x: number; y: number; z: number }>();
-      for (const frame of frames) {
-        const host = frame.held?.authoritative;
-        const local = frame.held?.predicted;
-        if (host?.sourceTick !== null && host?.sourceTick !== undefined)
-          authoritative.set(host.sourceTick, host.position);
-        if (local?.sourceTick !== null && local?.sourceTick !== undefined)
-          predicted.set(local.sourceTick, local.position);
-      }
-      return [...predicted].flatMap(([tick, local]) => {
-        const host = authoritative.get(tick);
-        return host ? [Math.hypot(host.x - local.x, host.y - local.y, host.z - local.z)] : [];
-      });
-    });
-    sameTickHeldErrors.sort((left, right) => left - right);
-    const maximumSameTickHeldError = sameTickHeldErrors.at(-1) ?? Number.POSITIVE_INFINITY;
-    if (sameTickHeldErrors.length < 5 || maximumSameTickHeldError > 0.01)
-      throw new Error(
-        `same-tick browser/host held simulation diverged: ${sameTickHeldErrors.length} samples, ${(maximumSameTickHeldError * 100).toFixed(2)}cm maximum error`,
-      );
+    // Equal source ticks can contain different inputs under jitter. Require
+    // convergence once this unobstructed throw settles; identical-command
+    // physics parity is covered by the independent adapter tests.
+    await page.waitForFunction(
+      (target) => {
+        const diagnostics = (window as unknown as SmokeWindow).__gurgurDiagnostics;
+        const frame = diagnostics.predictionTrace().at(-1);
+        const timelines = frame?.relevant.find(
+          (body) => `${body.id.index}:${body.id.generation}` === target,
+        )?.timelines;
+        const host = timelines?.authoritative;
+        const local = timelines?.predicted;
+        const rendered = diagnostics.presentation().find((body) => body.runtimeId === target);
+        if (!host?.linearVelocity || !local?.linearVelocity || !rendered) return false;
+        const speed = (velocity: { x: number; y: number; z: number }): number =>
+          Math.hypot(velocity.x, velocity.y, velocity.z);
+        const error = (posePosition: { x: number; y: number; z: number }): number =>
+          Math.hypot(
+            host.position.x - posePosition.x,
+            host.position.y - posePosition.y,
+            host.position.z - posePosition.z,
+          );
+        return (
+          speed(host.linearVelocity) < 0.02 &&
+          speed(local.linearVelocity) < 0.02 &&
+          error(local.position) < 0.01 &&
+          error(rendered.position) < 0.01
+        );
+      },
+      targetId,
+      { timeout: 5_000 },
+    );
+    console.log(
+      `pickup ${profile}: ${samples.length} release frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step`,
+    );
     await assertNoDiscardedWorkerTime(page);
   } finally {
     await page.close();

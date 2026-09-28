@@ -61,8 +61,10 @@ body data attributes, and otherwise falls back to the ordinary local view.
 
 There is one renderer, scene, camera rig, and animation loop for the lifetime of
 the play page. Map geometry is created from the compiled world bundle. Runtime
-objects are keyed by generation-bearing runtime identity. Locally predicted
-objects present the newest completed 60 Hz worker step with 100 ms visual error
+objects are keyed by generation-bearing runtime identity. The local player
+presents the newest completed 60 Hz worker step. Predicted loose props interpolate
+completed poses one tick behind on the worker's production timeline, smoothing
+batched message delivery without extrapolation. Both use 100 ms visual error
 decay after reconciliation. Remote objects render from
 independent adaptive tracks between four and eight source ticks without
 extrapolation. Recent late arrivals and underruns raise only the affected track;
@@ -80,9 +82,10 @@ tick; incoming host state updates the correction target without replacing the
 active local track.
 
 Checkpoint corrections restore physics immediately and preserve visible motion
-with an additive 100 ms error offset. Large player discontinuities hard-snap;
-predicted-body correction and exit from the bounded set use a 20 cm maximum
-presentation step. Other nearby, touching, or supporting shared bodies blend to
+with an additive 100 ms offset of the actual replay error. Unchanged prediction
+does not restart smoothing, and positional and rotational errors both decay.
+Large player discontinuities hard-snap; exit from the bounded set uses a 20 cm
+maximum final presentation step. Other nearby, touching, or supporting shared bodies blend to
 their collision-aligned pose over 100 ms and use distance/time hysteresis before
 returning to buffered presentation. Lifecycle removal, respawn, reset, or
 replacement clears the associated prediction and presentation history. Jointed
