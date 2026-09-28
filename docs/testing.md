@@ -29,6 +29,10 @@ seeded impairment:
 | Typical |  80 ms |  20 ms |   1% |
 | Adverse | 150 ms |  40 ms |   5% |
 
+The matrix drives separate production presentation buffers at 60 and 120 Hz.
+Their clock is anchored before simulated inbound delay, and packet deliveries
+and render samples are processed chronologically.
+
 ## Proof hierarchy
 
 A transport packet, an advancing mesh, and a plausible physical interaction are

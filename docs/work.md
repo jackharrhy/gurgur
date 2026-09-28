@@ -24,6 +24,10 @@ comments were inspected; generated and vendor content was excluded.
   build each object's four timelines through the same path.
 - Network harness entry points share one release-budget policy. The physics
   soak now repeats real falls and contacts instead of stepping an empty world.
+- The matrix uses independent adaptive buffers for 60/120 Hz, anchors its clock
+  before simulated inbound delay, and samples frames before later packet
+  deliveries. A shared mutable buffer and delivery-time clock anchor had hidden
+  timing errors in the earlier matrix measurements.
 - Server worker assets use one cached loader, and checkpoints accept one sampled
   state map instead of independently supplied copies of the same batch.
 - Six obsolete or redundant test cases were removed or merged. Codec bounds,
@@ -40,9 +44,11 @@ Validation after the final server cleanup:
 - `bun run check`: formatting, lint, typecheck, and all 192 tests pass.
 - `bun run test:browser`: all scenarios pass; Local/Typical/Adverse maximum
   release steps are 12.61/8.65/13.64 cm, below the unchanged 25 cm gate.
-- `bun run test:network`: 16 players/128 bodies pass with zero correctness or
-  stale-authority errors, measured underruns, or discarded host time; 100%
-  advancing frames at 60/120 Hz; 2.78/6.93 ms host tick p95/p99.
+- `bun run test:network` after the harness timing correction: 16 players/128
+  bodies pass with zero correctness or stale-authority errors and no discarded
+  host time. Local/Typical underruns are zero; Adverse is 0.95%, close to the
+  unchanged 1% limit. Eligible moving frames advance at 60/120 Hz; host tick
+  p95/p99 is 2.70/3.90 ms and traffic is approximately 1.03 Mbit/s per recipient.
 - `bun run test:browser capture` and `bun run build` pass.
 - `bun run soak physics`: 10,000 handle reuse cycles and 1,000,000 physics
   ticks pass. Two shorter runs also produced identical checksums.

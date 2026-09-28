@@ -74,7 +74,6 @@ type HarnessClient = {
   authorityVersions: Map<string, number>;
   outbound: UnreliableDatagramLink<ArrayBuffer>;
   inbound: UnreliableDatagramLink<ArrayBuffer>;
-  presentation: PresentationBuffer;
   player: NetworkPlayerState;
   nextInputMs: number;
   nextInputSequence: number;
@@ -91,6 +90,7 @@ type HarnessClient = {
 };
 
 type RenderMetrics = {
+  presentation: PresentationBuffer;
   nextMs: number;
   previousZ: number | null;
   previousOracleZ: number | null;
@@ -103,7 +103,7 @@ type RenderMetrics = {
 
 type PathOracle = {
   anchorTimelineTick: number;
-  anchorReceivedAtMs: number;
+  anchorSentAtMs: number;
   latestTimelineTick: number;
   samples: { timelineTick: number; z: number }[];
 };
@@ -275,6 +275,7 @@ function deliverOutbound(client: HarnessClient, nowMs: number): void {
 
 function deliverInbound(client: HarnessClient, nowMs: number): void {
   for (const packet of client.inbound.advance(nowMs)) {
+    samplePresentation(client, packet.deliveryAtMs);
     try {
       if (binaryPacketTag(packet.payload) !== STATE_CLUSTER_TAG) continue;
       const received = client.receiver.applyCluster(decodeStateCluster(packet.payload));
@@ -283,34 +284,38 @@ function deliverInbound(client: HarnessClient, nowMs: number): void {
         if (currentAuthority !== undefined && state.authorityVersion < currentAuthority)
           client.staleAuthorityAccepted += 1;
         if (state.kind !== "player" || same(state.id, client.welcome.playerId)) continue;
-        {
-          client.stateAgesMs.push(packet.deliveryAtMs - packet.sentAtMs);
-          client.presentation.pushNetwork([state], packet.deliveryAtMs);
-          if (!client.renderTarget) {
-            client.renderTarget = { ...state.id };
-            client.lastTargetStateAtMs = packet.deliveryAtMs;
-            client.pathOracle = {
-              anchorTimelineTick: state.sourceTick,
-              anchorReceivedAtMs: packet.deliveryAtMs,
-              latestTimelineTick: state.sourceTick,
-              samples: [{ timelineTick: state.sourceTick, z: state.position.z }],
-            };
-            client.presentation.updateClock(state.sourceTick, packet.deliveryAtMs, 0);
-          } else if (same(state.id, client.renderTarget)) {
-            if (client.pathOracle) {
-              const timelineTick = unwrapTick32(
-                state.sourceTick,
-                client.pathOracle.latestTimelineTick,
-              );
-              client.pathOracle.latestTimelineTick = timelineTick;
-              client.pathOracle.samples.push({ timelineTick, z: state.position.z });
-              while (client.pathOracle.samples.length > 256) client.pathOracle.samples.shift();
-            }
-            if (client.lastTargetStateAtMs !== null)
-              client.targetStateIntervalsMs.push(packet.deliveryAtMs - client.lastTargetStateAtMs);
-            client.lastTargetStateAtMs = packet.deliveryAtMs;
+        client.stateAgesMs.push(packet.deliveryAtMs - packet.sentAtMs);
+        if (!client.renderTarget) {
+          client.renderTarget = { ...state.id };
+          client.lastTargetStateAtMs = packet.deliveryAtMs;
+          client.pathOracle = {
+            anchorTimelineTick: state.sourceTick,
+            anchorSentAtMs: packet.sentAtMs,
+            latestTimelineTick: state.sourceTick,
+            samples: [{ timelineTick: state.sourceTick, z: state.position.z }],
+          };
+          for (const render of Object.values(client.renders))
+            render.presentation.updateClock(
+              state.sourceTick,
+              packet.deliveryAtMs,
+              packet.deliveryAtMs - packet.sentAtMs,
+            );
+        } else if (same(state.id, client.renderTarget)) {
+          if (client.pathOracle) {
+            const timelineTick = unwrapTick32(
+              state.sourceTick,
+              client.pathOracle.latestTimelineTick,
+            );
+            client.pathOracle.latestTimelineTick = timelineTick;
+            client.pathOracle.samples.push({ timelineTick, z: state.position.z });
+            while (client.pathOracle.samples.length > 256) client.pathOracle.samples.shift();
           }
+          if (client.lastTargetStateAtMs !== null)
+            client.targetStateIntervalsMs.push(packet.deliveryAtMs - client.lastTargetStateAtMs);
+          client.lastTargetStateAtMs = packet.deliveryAtMs;
         }
+        for (const render of Object.values(client.renders))
+          render.presentation.pushNetwork([state], packet.deliveryAtMs);
       }
       if (received.ack.entries.length > 0) {
         const ack = encodeStateAck(received.ack);
@@ -325,10 +330,10 @@ function deliverInbound(client: HarnessClient, nowMs: number): void {
 function samplePresentation(client: HarnessClient, nowMs: number): void {
   for (const displayHz of [60, 120] as const) {
     const render = client.renders[displayHz];
-    while (nowMs >= render.nextMs) {
+    while (nowMs > render.nextMs) {
       const target = client.renderTarget;
       if (target) {
-        const state = client.presentation
+        const state = render.presentation
           .sample(render.nextMs)
           .find((candidate) => same(candidate.id, target));
         if (state) {
@@ -336,10 +341,10 @@ function samplePresentation(client: HarnessClient, nowMs: number): void {
           if (oracle) {
             render.oracleFrames += 1;
             const delayTicks =
-              client.presentation.trackDelayTicks(target) ?? RENDER_INTERPOLATION_MAX_TICKS;
+              render.presentation.trackDelayTicks(target) ?? RENDER_INTERPOLATION_MAX_TICKS;
             const targetTimelineTick =
               oracle.anchorTimelineTick +
-              ((render.nextMs - oracle.anchorReceivedAtMs) / 1_000) * PHYSICS_HZ -
+              ((render.nextMs - oracle.anchorSentAtMs) / 1_000) * PHYSICS_HZ -
               delayTicks;
             if (targetTimelineTick > oracle.latestTimelineTick + 1e-6) {
               render.underrunFrames += 1;
@@ -409,7 +414,6 @@ function connectClient(
         authorityVersions,
         outbound: new UnreliableDatagramLink(profile, seed),
         inbound: new UnreliableDatagramLink(profile, seed + 1),
-        presentation: new PresentationBuffer(),
         player,
         nextInputMs: 0,
         nextInputSequence: 0,
@@ -420,6 +424,7 @@ function connectClient(
         targetStateIntervalsMs: [],
         renders: {
           60: {
+            presentation: new PresentationBuffer(),
             nextMs: 300,
             previousZ: null,
             previousOracleZ: null,
@@ -430,6 +435,7 @@ function connectClient(
             pathErrorsCm: [],
           },
           120: {
+            presentation: new PresentationBuffer(),
             nextMs: 300,
             previousZ: null,
             previousOracleZ: null,
