@@ -30,7 +30,6 @@ export function correctedPredictionPose(
   body: Pose,
   correction: PredictionCorrection,
   nowMs: number,
-  maximumStepFrom?: Vec3,
 ): Pose {
   correction.startedAtMs ??= nowMs;
   const remaining =
@@ -43,19 +42,6 @@ export function correctedPredictionPose(
     y: body.position.y + correction.position.y * remaining,
     z: body.position.z + correction.position.z * remaining,
   };
-  if (maximumStepFrom) {
-    const distance = Math.hypot(
-      position.x - maximumStepFrom.x,
-      position.y - maximumStepFrom.y,
-      position.z - maximumStepFrom.z,
-    );
-    if (distance > PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) {
-      const amount = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / distance;
-      position.x = maximumStepFrom.x + (position.x - maximumStepFrom.x) * amount;
-      position.y = maximumStepFrom.y + (position.y - maximumStepFrom.y) * amount;
-      position.z = maximumStepFrom.z + (position.z - maximumStepFrom.z) * amount;
-    }
-  }
   return {
     position,
     rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
@@ -83,4 +69,19 @@ export function reconcilePredictionCorrection(
 
 function quaternion(rotation: Pose["rotation"]): Quaternion {
   return new Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
+}
+
+export function limitPresentationPosition(position: Vec3, previous: Vec3): Vec3 {
+  const distance = Math.hypot(
+    position.x - previous.x,
+    position.y - previous.y,
+    position.z - previous.z,
+  );
+  if (distance <= PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) return position;
+  const amount = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / distance;
+  return {
+    x: previous.x + (position.x - previous.x) * amount,
+    y: previous.y + (position.y - previous.y) * amount,
+    z: previous.z + (position.z - previous.z) * amount,
+  };
 }

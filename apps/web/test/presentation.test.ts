@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { PresentationBuffer } from "../src/presentation";
 import {
-  PROXY_INTERPOLATION_MS,
+  PHYSICS_HZ,
+  RENDER_INTERPOLATION_MIN_TICKS,
   type NetworkBodyState,
   type NetworkPlayerState,
 } from "@gurgur/engine";
@@ -9,6 +10,8 @@ import {
   correctedPredictionPose,
   reconcilePredictionCorrection,
 } from "../src/prediction-correction";
+
+const renderDelayMs = (RENDER_INTERPOLATION_MIN_TICKS / PHYSICS_HZ) * 1_000;
 
 const state = (sequence: number, x: number): NetworkBodyState => ({
   kind: "body",
@@ -24,15 +27,9 @@ const state = (sequence: number, x: number): NetworkBodyState => ({
 });
 
 describe("source-tick proxy presentation", () => {
-  test("keeps fixed proxies conservative while adaptive rendering starts at four ticks", () => {
-    const proxy = new PresentationBuffer();
-    const render = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
-    expect(proxy.diagnostics().networkDelayTicks).toBe(8);
-    expect(render.diagnostics().networkDelayTicks).toBe(4);
-  });
-
   test("raises adaptive render delay on measured lateness without stepping its timeline backwards", () => {
-    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    const presentation = new PresentationBuffer();
+    expect(presentation.diagnostics().networkDelayTicks).toBe(4);
     presentation.updateClock(20, 1_000, 0);
     presentation.pushNetwork([{ ...state(6, 6), sourceTick: 12, flags: 1 }], 1_000);
     presentation.pushNetwork([{ ...state(10, 10), sourceTick: 20, flags: 1 }], 1_000.1);
@@ -47,7 +44,7 @@ describe("source-tick proxy presentation", () => {
   });
 
   test("adapts each authority track without making one late actor delay every host body", () => {
-    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    const presentation = new PresentationBuffer();
     presentation.pushNetwork(
       [
         { ...state(4, 4), id: { index: 1, generation: 1 }, sourceTick: 8, flags: 1 },
@@ -69,7 +66,7 @@ describe("source-tick proxy presentation", () => {
   });
 
   test("buffers grounded walking players whose encoded velocities do not include horizontal movement", () => {
-    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+    const presentation = new PresentationBuffer();
     presentation.updateClock(0, 0, 0);
     const arrivals = Array.from({ length: 32 }, (_, sequence) => {
       const sourceAtMs = sequence * (1_000 / 30);
@@ -119,7 +116,7 @@ describe("source-tick proxy presentation", () => {
         presentation.pushNetwork([state(sequence, time / 1_000)], time);
       }
       const values: number[] = [];
-      for (let time = PROXY_INTERPOLATION_MS; time <= 400; time += 1_000 / displayHz)
+      for (let time = renderDelayMs; time <= 400; time += 1_000 / displayHz)
         values.push(presentation.sample(time)[0]!.position.x);
       const movingFrames = values
         .slice(1)
@@ -133,27 +130,23 @@ describe("source-tick proxy presentation", () => {
     presentation.pushNetwork([state(0, 0)], 0);
     presentation.pushNetwork([state(1, 1)], 33);
     expect(presentation.sample(10_000)[0]!.position.x).toBe(1);
-    presentation.replaceReliable(state(0, 7), 100, false);
+    presentation.replaceReliable(state(0, 7), 100);
     expect(presentation.sample(100)[0]!.position.x).toBe(7);
   });
 
-  test("retains the authoritative checkpoint target beneath a local prediction track", () => {
-    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+  test("keeps authoritative corrections beneath a local track and removes both together", () => {
+    const presentation = new PresentationBuffer();
     presentation.pushNetwork([state(1, 3)], 10);
     presentation.pushLocal([state(2, 9)], 20);
     expect(presentation.sample(20)[0]!.position.x).toBe(9);
     expect(presentation.latestNetwork(state(1, 0).id)?.position.x).toBe(3);
-    presentation.remove(state(1, 0).id);
-    expect(presentation.latestNetwork(state(1, 0).id)).toBeNull();
-  });
-
-  test("observes authoritative corrections without replacing an active local body track", () => {
-    const presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
-    presentation.pushNetwork([state(1, 3)], 10);
-    presentation.pushLocal([state(2, 9)], 20);
-    presentation.pushNetwork([state(3, 5)], 30, new Set(["1:1"]));
+    presentation.pushNetwork([state(3, 5)], 30);
     expect(presentation.sample(30)[0]!.position.x).toBe(9);
     expect(presentation.latestNetwork(state(1, 0).id)?.position.x).toBe(5);
+    presentation.remove(state(1, 0).id);
+    expect(presentation.latestNetwork(state(1, 0).id)).toBeNull();
+    expect(presentation.latestLocal(state(1, 0).id)).toBeNull();
+    expect(presentation.sample(40)).toEqual([]);
   });
 
   test("renders a reconciled local pose even when its sequence is unchanged", () => {
@@ -175,7 +168,7 @@ describe("source-tick proxy presentation", () => {
 
   test("keeps a release checkpoint newer than an independently delivered state cluster", () => {
     const presentation = new PresentationBuffer();
-    presentation.replaceReliable(state(10, 10), 100, false);
+    presentation.replaceReliable(state(10, 10), 100);
     presentation.pushNetwork([state(9, 90)], 110);
     presentation.pushNetwork([{ ...state(11, 90), authorityVersion: 0 }], 120);
     presentation.pushNetwork([{ ...state(8, 90), sourceTick: 22 }], 130);
@@ -194,9 +187,8 @@ describe("source-tick proxy presentation", () => {
     presentation.pushNetwork([state(2, 2)], 100);
     presentation.pushNetwork([state(3, 3)], 100.1);
 
-    const immediatelyBeforeBurst = presentation.sample(PROXY_INTERPOLATION_MS + 49.9)[0]!.position
-      .x;
-    const immediatelyAfterBurst = presentation.sample(PROXY_INTERPOLATION_MS + 50.1)[0]!.position.x;
+    const immediatelyBeforeBurst = presentation.sample(renderDelayMs + 49.9)[0]!.position.x;
+    const immediatelyAfterBurst = presentation.sample(renderDelayMs + 50.1)[0]!.position.x;
 
     expect(immediatelyBeforeBurst).toBeCloseTo(1.497, 2);
     expect(immediatelyAfterBurst).toBeCloseTo(1.503, 2);

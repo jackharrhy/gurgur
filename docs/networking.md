@@ -84,9 +84,9 @@ tick. Delta encoding, packet construction, and data-channel writes run after the
 simulation step from that immutable batch, so network I/O does not consume the
 Box3D tick budget or change the checkpoint's source tick.
 
-The browser retains 128 prediction records. On a checkpoint it:
+The browser retains up to 128 pending commands. On a checkpoint it:
 
-1. discards acknowledged records;
+1. discards acknowledged commands;
 2. restores the authoritative player, optional held body, and bounded nearby
    loose-body set as dynamic bodies;
 3. restores every other proxy from source-tick history at the checkpoint tick;

@@ -328,8 +328,7 @@ async function pickupAndRelease(
     );
     await turnTouch(page, 450);
     const responseMs = await predictedResponse;
-    // Measure the beginning of physical motion, not the time required to cover
-    // an arbitrary distance under the grab controller's acceleration limit.
+    // The response budget measures motion onset; acceleration limits travel distance.
     if (responseMs >= 75)
       throw new Error(`predicted held-prop response took ${responseMs.toFixed(1)}ms`);
     await page.waitForFunction(
@@ -408,9 +407,7 @@ async function pickupAndRelease(
       throw new Error(
         `host release trace was discontinuous: ${samples.length} frames, ${(maximumFrameStep * 100).toFixed(2)}cm maximum step (${JSON.stringify(worstReleaseStep?.previous)} -> ${JSON.stringify(worstReleaseStep?.sample)})`,
       );
-    // Equal source ticks can contain different inputs under jitter. Require
-    // convergence once this unobstructed throw settles; identical-command
-    // physics parity is covered by the independent adapter tests.
+    // Equal source ticks can reflect different input histories under jitter.
     await page.waitForFunction(
       (target) => {
         const diagnostics = (window as unknown as SmokeWindow).__gurgurDiagnostics;
@@ -900,7 +897,7 @@ type SmokeWindow = {
   __gurgurDiagnostics: {
     clientFeel(): {
       presentation: {
-        networkDelayPolicy: "fixed-proxy" | "adaptive-render";
+        networkDelayPolicy: "adaptive-render";
         minimumNetworkDelayTicks: number;
         networkDelayTicks: number;
         desiredNetworkDelayTicks: number;

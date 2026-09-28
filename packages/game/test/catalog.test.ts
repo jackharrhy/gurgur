@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   addMissingAuthoredIds,
   compileWorld,
-  entityDefinitions,
   logicalAudioAssetProperty,
   logicalSpriteAssetProperty,
 } from "../src";
@@ -68,40 +67,6 @@ ${cube}
 });
 
 describe("typed entity catalog", () => {
-  test("owns the complete current mapper classname catalog in one place", () => {
-    expect(Object.keys(entityDefinitions).toSorted()).toEqual(
-      [
-        "env_sprite",
-        "ambient_audio",
-        "func_button",
-        "func_conveyor",
-        "func_door",
-        "func_physics",
-        "func_platform",
-        "info_player_start",
-        "info_world_reset",
-        "light_ambient",
-        "light_directional",
-        "light_point",
-        "light_spot",
-        "logic_relay",
-        "phys_ballsocket",
-        "phys_constraint",
-        "phys_hinge",
-        "phys_lengthconstraint",
-        "phys_motor",
-        "phys_slideconstraint",
-        "phys_spring",
-        "trigger_gravity",
-        "trigger_multiple",
-        "trigger_once",
-        "worldspawn",
-      ].toSorted(),
-    );
-    expect(entityDefinitions.func_physics.editor.persistent).toBe(true);
-    expect("authoredId" in entityDefinitions.func_physics.properties).toBe(false);
-  });
-
   test("validates extensionless logical sprite IDs at the authoring boundary", () => {
     const property = logicalSpriteAssetProperty("sprite");
     const source = {

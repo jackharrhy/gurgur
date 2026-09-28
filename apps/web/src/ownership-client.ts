@@ -72,21 +72,7 @@ export type OwnershipClient = {
 
 export function createOwnershipClient(
   callbacks: {
-    localStates(
-      states: NetworkObjectState[],
-      producedAtMs: number,
-      discardedCatchUpSeconds: number,
-      reconciled: boolean,
-      trace: {
-        inputSequence: number;
-        acknowledgment: number | null;
-        replayCount: number;
-        contactIds: RuntimeId[];
-        supportIds: RuntimeId[];
-        command: InputCommand | null;
-        collisionStates: NetworkObjectState[];
-      },
-    ): void;
+    localStates(frame: Extract<PhysicsWorkerResponse, { type: "local-states" }>): void;
     inputCommand(command: InputCommand): void;
     manipulationRequest(message: ManipulationRequestMessage): void;
     manipulationState(message: ManipulationStatePacket): void;
@@ -107,21 +93,10 @@ export function createOwnershipClient(
       for (const resolve of ready.get(message.worldEpoch) ?? []) resolve();
       ready.delete(message.worldEpoch);
     } else if (message.type === "local-states") {
-      callbacks.localStates(
-        message.states,
-        message.producedAtMs - performance.timeOrigin,
-        message.discardedCatchUpSeconds,
-        message.reconciled,
-        {
-          inputSequence: message.inputSequence,
-          acknowledgment: message.acknowledgment,
-          replayCount: message.replayCount,
-          contactIds: message.contactIds,
-          supportIds: message.supportIds,
-          command: message.command,
-          collisionStates: message.collisionStates,
-        },
-      );
+      callbacks.localStates({
+        ...message,
+        producedAtMs: message.producedAtMs - performance.timeOrigin,
+      });
     } else if (message.type === "input-command") {
       callbacks.inputCommand(message.command);
     } else if (message.type === "manipulation-request") {

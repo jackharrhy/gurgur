@@ -44,7 +44,7 @@ import {
   predictionCorrection,
   reconcilePredictionCorrection,
   PREDICTION_CORRECTION_MS,
-  PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES,
+  limitPresentationPosition,
   type PredictionCorrection,
 } from "./prediction-correction";
 
@@ -135,9 +135,11 @@ type PhysicsDebugView = {
   material: THREE.LineBasicNodeMaterial;
 };
 
-type InteractionPresentationTransition = {
-  from: BodySnapshot;
-  startedAtMs: number;
+type InteractionPresentation = {
+  untilMs: number;
+  active: boolean;
+  transition: { from: BodySnapshot; startedAtMs: number } | null;
+  presented: BodySnapshot | null;
 };
 
 const INTERACTION_PRESENTATION_ENTER_METRES = 2;
@@ -457,7 +459,7 @@ export class WorldRenderer {
   readonly #scene = new THREE.Scene();
   readonly #realityScene = new THREE.Scene();
   readonly #camera = new THREE.PerspectiveCamera(48, 1, 0.1, 180);
-  readonly #presentation = new PresentationBuffer({ networkDelayPolicy: "adaptive-render" });
+  readonly #presentation = new PresentationBuffer();
   readonly #meshes = new Map<string, THREE.Object3D>();
   #constraintVisuals: ConstraintVisual[] = [];
   readonly #materials = new Map<string, THREE.Material>();
@@ -484,13 +486,7 @@ export class WorldRenderer {
   #heldTarget: THREE.Object3D | null = null;
   #predictedHeldId: RuntimeId | null = null;
   readonly #predictionCorrections = new Map<string, PredictionCorrection>();
-  readonly #interactionPresentationUntil = new Map<string, number>();
-  readonly #interactionPresentationActive = new Set<string>();
-  readonly #interactionPresentationTransitions = new Map<
-    string,
-    InteractionPresentationTransition
-  >();
-  readonly #interactionPresented = new Map<string, BodySnapshot>();
+  readonly #interactionPresentations = new Map<string, InteractionPresentation>();
   readonly #predictionInteractionIds = new Set<string>();
   readonly #predictedBodyIds = new Set<string>();
   #outlinedTarget: THREE.Object3D | null = null;
@@ -582,10 +578,7 @@ export class WorldRenderer {
     this.#heldTarget = null;
     this.#predictedHeldId = null;
     this.#predictionCorrections.clear();
-    this.#interactionPresentationUntil.clear();
-    this.#interactionPresentationActive.clear();
-    this.#interactionPresentationTransitions.clear();
-    this.#interactionPresented.clear();
+    this.#interactionPresentations.clear();
     this.#predictionInteractionIds.clear();
     this.#predictedBodyIds.clear();
     this.#outlinedTarget = null;
@@ -694,10 +687,7 @@ export class WorldRenderer {
       this.#stopSpeech(identity, 0);
       this.#presentation.remove(id);
       this.#predictionCorrections.delete(identity);
-      this.#interactionPresentationUntil.delete(identity);
-      this.#interactionPresentationActive.delete(identity);
-      this.#interactionPresentationTransitions.delete(identity);
-      this.#interactionPresented.delete(identity);
+      this.#interactionPresentations.delete(identity);
       this.#predictedBodyIds.delete(identity);
       const mesh = this.#meshes.get(identity);
       if (mesh) {
@@ -779,7 +769,7 @@ export class WorldRenderer {
     states: readonly NetworkObjectState[],
     receivedAtMs = performance.now(),
   ): void {
-    this.#presentation.pushNetwork(states, receivedAtMs, this.#predictedBodyIds);
+    this.#presentation.pushNetwork(states, receivedAtMs);
     this.applyNetworkInteractionState(states);
   }
 
@@ -838,7 +828,8 @@ export class WorldRenderer {
     local: boolean,
     receivedAtMs = performance.now(),
   ): void {
-    this.#presentation.replaceReliable(state, receivedAtMs, local);
+    if (local) this.#presentation.pushLocal([state], receivedAtMs);
+    else this.#presentation.replaceReliable(state, receivedAtMs);
     const mesh = this.#meshes.get(idKey(state.id)) ?? null;
     if (local && state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0) {
       this.#heldTarget = mesh;
@@ -850,7 +841,7 @@ export class WorldRenderer {
 
   releaseLocalState(state: NetworkObjectState, receivedAtMs = performance.now()): void {
     this.#queuePredictionCorrection(state);
-    this.#presentation.replaceReliable(state, receivedAtMs, false);
+    this.#presentation.replaceReliable(state, receivedAtMs);
     this.applyNetworkInteractionState([state]);
   }
 
@@ -1516,8 +1507,10 @@ export class WorldRenderer {
     const mesh = this.#meshes.get(identity);
     const candidate = {
       ...body,
-      ...correctedPredictionPose(body, correction, nowMs, predicted ? undefined : mesh?.position),
+      ...correctedPredictionPose(body, correction, nowMs),
     };
+    if (!predicted && mesh)
+      candidate.position = limitPresentationPosition(candidate.position, mesh.position);
     if (
       nowMs - correction.startedAtMs! >= PREDICTION_CORRECTION_MS &&
       candidate.position.x === body.position.x &&
@@ -1547,12 +1540,15 @@ export class WorldRenderer {
     if (!local) return bodies;
     return bodies.map((body) => {
       const identity = idKey(body.id);
-      if (identity === idKey(local.id)) return body;
-      if (this.#predictedBodyIds.has(identity)) return body;
-      // Remote players are presentation-only and must keep their buffered motion.
-      // Interaction presentation is for shared rigid bodies whose collision pose
-      // can directly affect the locally predicted player or held prop.
-      if (this.#meshes.get(identity)?.userData.playerBillboard) return body;
+      const mesh = this.#meshes.get(identity);
+      if (identity === idKey(local.id) || this.#predictedBodyIds.has(identity)) return body;
+      // Remote players retain buffered motion; nearby rigid bodies match collision poses.
+      if (mesh?.userData.playerBillboard) return body;
+      let interaction = this.#interactionPresentations.get(identity);
+      if (!interaction) {
+        interaction = { untilMs: 0, active: false, transition: null, presented: null };
+        this.#interactionPresentations.set(identity, interaction);
+      }
       const distance = Math.hypot(
         body.position.x - local.position.x,
         body.position.y - local.position.y,
@@ -1562,101 +1558,64 @@ export class WorldRenderer {
         distance <= INTERACTION_PRESENTATION_ENTER_METRES ||
         this.#predictionInteractionIds.has(identity)
       )
-        this.#interactionPresentationUntil.set(identity, nowMs + INTERACTION_PRESENTATION_HOLD_MS);
-      else if (
-        distance > INTERACTION_PRESENTATION_EXIT_METRES &&
-        (this.#interactionPresentationUntil.get(identity) ?? 0) < nowMs
-      )
-        this.#interactionPresentationUntil.delete(identity);
-      const active = (this.#interactionPresentationUntil.get(identity) ?? 0) >= nowMs;
-      const wasActive = this.#interactionPresentationActive.has(identity);
-      if (active !== wasActive) {
-        this.#interactionPresentationTransitions.set(identity, {
-          from: this.#interactionPresented.get(identity) ?? body,
-          startedAtMs: nowMs,
-        });
-        if (active) this.#interactionPresentationActive.add(identity);
-        else this.#interactionPresentationActive.delete(identity);
+        interaction.untilMs = nowMs + INTERACTION_PRESENTATION_HOLD_MS;
+      else if (distance > INTERACTION_PRESENTATION_EXIT_METRES && interaction.untilMs < nowMs)
+        interaction.untilMs = 0;
+      const active = interaction.untilMs >= nowMs;
+      if (active !== interaction.active) {
+        interaction.transition = { from: interaction.presented ?? body, startedAtMs: nowMs };
+        interaction.active = active;
       }
       const desired = active ? (this.#presentation.latestNetwork(body.id) ?? body) : body;
       if (this.#predictionCorrections.has(identity)) {
-        this.#interactionPresentationTransitions.delete(identity);
-        this.#interactionPresented.set(identity, desired);
+        interaction.transition = null;
+        interaction.presented = desired;
         return desired;
       }
-      const transition = this.#interactionPresentationTransitions.get(identity);
-      if (!transition) {
-        const presented = active
-          ? this.#limitInteractionPresentationStep(identity, desired)
-          : desired;
-        if (active) this.#interactionPresented.set(identity, presented);
-        else this.#interactionPresented.delete(identity);
-        return presented;
+      let presented = desired;
+      if (interaction.transition) {
+        const { from, startedAtMs } = interaction.transition;
+        const amount = Math.max(
+          0,
+          Math.min(1, (nowMs - startedAtMs) / INTERACTION_PRESENTATION_BLEND_MS),
+        );
+        if (amount >= 1) interaction.transition = null;
+        else {
+          const rotation = new THREE.Quaternion(
+            from.rotation.x,
+            from.rotation.y,
+            from.rotation.z,
+            from.rotation.w,
+          ).slerp(
+            new THREE.Quaternion(
+              desired.rotation.x,
+              desired.rotation.y,
+              desired.rotation.z,
+              desired.rotation.w,
+            ),
+            amount,
+          );
+          presented = {
+            ...desired,
+            position: {
+              x: from.position.x + (desired.position.x - from.position.x) * amount,
+              y: from.position.y + (desired.position.y - from.position.y) * amount,
+              z: from.position.z + (desired.position.z - from.position.z) * amount,
+            },
+            rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+          };
+        }
       }
-      const amount = Math.max(
-        0,
-        Math.min(1, (nowMs - transition.startedAtMs) / INTERACTION_PRESENTATION_BLEND_MS),
-      );
-      if (amount >= 1) {
-        this.#interactionPresentationTransitions.delete(identity);
-        const presented = active
-          ? this.#limitInteractionPresentationStep(identity, desired)
-          : desired;
-        if (active) this.#interactionPresented.set(identity, presented);
-        else this.#interactionPresented.delete(identity);
-        return presented;
-      }
-      const rotation = new THREE.Quaternion().slerpQuaternions(
-        new THREE.Quaternion(
-          transition.from.rotation.x,
-          transition.from.rotation.y,
-          transition.from.rotation.z,
-          transition.from.rotation.w,
-        ),
-        new THREE.Quaternion(
-          desired.rotation.x,
-          desired.rotation.y,
-          desired.rotation.z,
-          desired.rotation.w,
-        ),
-        amount,
-      );
-      const presented = {
-        ...desired,
-        position: {
-          x:
-            transition.from.position.x + (desired.position.x - transition.from.position.x) * amount,
-          y:
-            transition.from.position.y + (desired.position.y - transition.from.position.y) * amount,
-          z:
-            transition.from.position.z + (desired.position.z - transition.from.position.z) * amount,
-        },
-        rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
-      };
-      const limited = this.#limitInteractionPresentationStep(identity, presented);
-      this.#interactionPresented.set(identity, limited);
-      return limited;
+      if (active || interaction.transition) {
+        if (mesh)
+          presented = {
+            ...presented,
+            position: limitPresentationPosition(presented.position, mesh.position),
+          };
+        interaction.presented = presented;
+      } else interaction.presented = null;
+      return presented;
     });
-  }
-
-  #limitInteractionPresentationStep(identity: string, body: BodySnapshot): BodySnapshot {
-    const mesh = this.#meshes.get(identity);
-    if (!mesh) return body;
-    const step = Math.hypot(
-      body.position.x - mesh.position.x,
-      body.position.y - mesh.position.y,
-      body.position.z - mesh.position.z,
-    );
-    if (step <= PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES) return body;
-    const amount = PREDICTION_CORRECTION_MAX_FRAME_STEP_METRES / step;
-    return {
-      ...body,
-      position: {
-        x: mesh.position.x + (body.position.x - mesh.position.x) * amount,
-        y: mesh.position.y + (body.position.y - mesh.position.y) * amount,
-        z: mesh.position.z + (body.position.z - mesh.position.z) * amount,
-      },
-    };
   }
 
   #orientBillboards(): void {

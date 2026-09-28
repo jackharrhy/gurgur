@@ -4,6 +4,7 @@ export * from "./fixed-step-clock";
 export * from "./map-format";
 export * from "./materials";
 export * from "./network-codec";
+export * from "./network-state";
 export * from "./physics";
 export * from "./protocol";
 export * from "./state-replication";

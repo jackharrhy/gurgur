@@ -23,8 +23,7 @@ function configureShadow(
   mapSize: number,
 ): void {
   light.shadow.mapSize.set(mapSize, mapSize);
-  // Three r185's WebGPU shadow comparison no longer needs the legacy offsets.
-  // A normal-space offset visibly detached spotlight shadows at brush corners.
+  // Normal bias detaches WebGPU spotlight shadows at brush corners.
   light.shadow.bias = 0;
   light.shadow.normalBias = 0;
 }

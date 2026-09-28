@@ -132,31 +132,6 @@ describe("per-object authority host", () => {
     }
   });
 
-  test("keeps every loose prop Bun-owned while players submit commands only", async () => {
-    const bundle = await fixture("network-push-corridor");
-    const store = new WorldStore(":memory:");
-    const game = await WorldHost.create(
-      store,
-      () => {},
-      () => {},
-      { worldBundle: bundle },
-    );
-    try {
-      game.connectPlayer("command-only-browser");
-      const target = runtimeId(game, "corridor.light");
-      const targetState = bodyState(game, target);
-      expect(descriptorFor(game, target).transferPolicy).toBe("fixed");
-      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
-      for (let tick = 0; tick < 120; tick += 1) game.advance(PHYSICS_DT);
-      expect(descriptorFor(game, target).ownerPlayerId).toBeNull();
-      expect(descriptorFor(game, target).authorityVersion).toBe(targetState.authorityVersion);
-      expect(Number.isFinite(bodyState(game, target).position.x)).toBe(true);
-    } finally {
-      game.stop();
-      store.close();
-    }
-  });
-
   test("drives a loose grab through one host control claim without authority transfer", async () => {
     const bundle = await fixture("network-push-corridor");
     const playerSpawn = spawnNear(bundle, "corridor.light");
@@ -174,6 +149,7 @@ describe("per-object authority host", () => {
       const competitor = game.connectPlayer("competing-grabber");
       const target = runtimeId(game, "corridor.light");
       const initial = bodyState(game, target);
+      expect(descriptorFor(game, target).transferPolicy).toBe("fixed");
       game.acceptInput(player, grabInput(game, 1, target, 1));
       game.acceptInput(competitor, grabInput(game, 1, target, 1));
       game.advance(PHYSICS_DT);

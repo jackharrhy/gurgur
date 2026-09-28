@@ -639,34 +639,6 @@ function validateInputCommand(command: InputCommand, worldEpoch: number): void {
   }
 }
 
-export function isNewerSequence16(candidate: number, current: number): boolean {
-  const difference = (candidate - current) & 0xffff;
-  return difference !== 0 && difference < 0x8000;
-}
-
-export function cloneNetworkState(state: NetworkObjectState): NetworkObjectState {
-  if (state.kind === "player") {
-    return {
-      ...state,
-      kind: "player",
-      id: { ...state.id },
-      position: { ...state.position },
-      rotation: { ...state.rotation },
-      linearVelocity: { ...state.linearVelocity },
-      angularVelocity: { ...state.angularVelocity },
-    };
-  }
-  return {
-    ...state,
-    kind: "body",
-    id: { ...state.id },
-    position: { ...state.position },
-    rotation: { ...state.rotation },
-    linearVelocity: { ...state.linearVelocity },
-    angularVelocity: { ...state.angularVelocity },
-  };
-}
-
 function encodeStateList(tag: number, worldEpoch: number, states: StateDelta[]): ArrayBuffer {
   const writer = new Writer();
   writer.u8(tag);

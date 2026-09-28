@@ -4,6 +4,52 @@ This is the only status document. Canonical behavior lives in the sibling docs.
 
 Updated: 2026-09-28.
 
+## Maintainability pass
+
+The branch review applied the pragmatic-code, thermo-nuclear review,
+prune-tests, and prune-comments skills. All 40 test files and authored production
+comments were inspected; generated and vendor content was excluded.
+
+- Prediction retains pending commands only. Unread per-command player/body
+  snapshots and unused local grab claim bookkeeping were removed.
+- Local presentation uses two completed samples; adaptive network tracks keep
+  their own delay history. The unused fixed-proxy mode and discarded player
+  controller interpolation were removed. The multiplayer harness now exercises
+  the same adaptive render policy as the game instead of the fixed-mode default.
+- Interaction presentation uses one per-body record instead of four synchronized
+  collections. Correction offsets and the shared final position cap compose
+  directly.
+- State cloning and authoritative freshness share one engine implementation.
+  Worker output crosses the client bridge as one typed frame, and diagnostics
+  build each object's four timelines through the same path.
+- Network harness entry points share one release-budget policy. The physics
+  soak now repeats real falls and contacts instead of stepping an empty world.
+- Server worker assets use one cached loader, and checkpoints accept one sampled
+  state map instead of independently supplied copies of the same batch.
+- Six obsolete or redundant test cases were removed or merged. Codec bounds,
+  physics parity, real transport, and the flick/release regressions remain.
+  Two ineffective assertions were repaired, and map tests use the production
+  parser instead of maintaining a second parser.
+
+The codec is below 1,000 lines again. The worker and renderer remain larger;
+this pass kept physics lifecycle/replay ordering together and removed duplicated
+state before considering a broader split of those modules.
+
+Validation after the final server cleanup:
+
+- `bun run check`: formatting, lint, typecheck, and all 192 tests pass.
+- `bun run test:browser`: all scenarios pass; Local/Typical/Adverse maximum
+  release steps are 12.61/8.65/13.64 cm, below the unchanged 25 cm gate.
+- `bun run test:network`: 16 players/128 bodies pass with zero correctness or
+  stale-authority errors, measured underruns, or discarded host time; 100%
+  advancing frames at 60/120 Hz; 2.78/6.93 ms host tick p95/p99.
+- `bun run test:browser capture` and `bun run build` pass.
+- `bun run soak physics`: 10,000 handle reuse cycles and 1,000,000 physics
+  ticks pass. Two shorter runs also produced identical checksums.
+- Differential checks against the first fix commit matched 1,797 presentation
+  snapshots within floating-point precision and 600 interaction frames exactly.
+  The unified network budget policy matched 53 previous boundary cases.
+
 ## Flick-and-release investigation
 
 The September audit found and repaired several independent sources of prop
@@ -117,8 +163,8 @@ The automated surface now includes:
   penetration and bounded grounded-transition budget;
 - server-authoritative pickup, release, contention, disconnect, reset, and
   jointed manipulation through real Bun/WebRTC;
-- production Chrome movement, physical pickup/release, same-source-tick
-  host/browser held-state agreement, contention, and contraption scenarios;
+- production Chrome movement, physical pickup/release continuity and settled
+  host/browser convergence, contention, and contraption scenarios;
 - a bounded trace with command/ack/replay/contact/support data and
   authoritative, collision, predicted, and rendered transforms;
 - a `?debug`/`F8` 15-second capture pairs that browser trace with 900 Bun

@@ -6,8 +6,8 @@ import { WorldAudio } from "./audio";
 import {
   NETWORK_FLAG_HELD,
   PROTOCOL_VERSION,
-  isNewerSequence16,
-  unwrapTick32,
+  cloneNetworkState,
+  isStaleNetworkState,
 } from "@gurgur/engine";
 import type {
   InputCommand,
@@ -174,13 +174,7 @@ const diagnosticBodies = new Map<
     };
   }
 >();
-const presentedStates = new Map<
-  string,
-  {
-    position: { x: number; y: number; z: number };
-    rotation: { x: number; y: number; z: number; w: number };
-  }
->();
+const presentedStates = new Map<string, Pick<PredictionTracePose, "position" | "rotation">>();
 const observedStates = new Map<
   string,
   {
@@ -331,16 +325,8 @@ const rememberAuthoritative = (states: readonly NetworkObjectState[]): void => {
   for (const state of states) {
     const identity = `${state.id.index}:${state.id.generation}`;
     const previous = authoritativeStates.get(identity);
-    if (
-      previous &&
-      (state.authorityVersion < previous.authorityVersion ||
-        (state.authorityVersion === previous.authorityVersion &&
-          (unwrapTick32(state.sourceTick, previous.sourceTick) < previous.sourceTick ||
-            (state.stateSequence !== previous.stateSequence &&
-              !isNewerSequence16(state.stateSequence, previous.stateSequence)))))
-    )
-      continue;
-    authoritativeStates.set(identity, structuredClone(state));
+    if (previous && isStaleNetworkState(state, previous)) continue;
+    authoritativeStates.set(identity, cloneNetworkState(state));
   }
 };
 const pose = (state: NetworkObjectState | null): PredictionTracePose | null =>
@@ -356,7 +342,7 @@ const pose = (state: NetworkObjectState | null): PredictionTracePose | null =>
       }
     : null;
 const renderedPose = (
-  state: (typeof presentedStates extends Map<string, infer T> ? T : never) | null,
+  state: Pick<PredictionTracePose, "position" | "rotation"> | null,
 ): PredictionTracePose | null =>
   state
     ? {
@@ -371,7 +357,8 @@ const renderedPose = (
     : null;
 const owner = createOwnershipClient(
   {
-    localStates(states, producedAtMs, discardedCatchUpSeconds, reconciled, trace) {
+    localStates(trace) {
+      const { states, producedAtMs, discardedCatchUpSeconds, reconciled } = trace;
       workerDiscardedCatchUpSeconds = discardedCatchUpSeconds;
       document.body.dataset.workerDiscardedCatchUpSeconds = String(discardedCatchUpSeconds);
       document.body.dataset.ownerStateAt = String(performance.now());
@@ -400,16 +387,15 @@ const owner = createOwnershipClient(
         const collisionById = new Map(
           trace.collisionStates.map((state) => [`${state.id.index}:${state.id.generation}`, state]),
         );
-        const playerKey = `${predictedPlayer.id.index}:${predictedPlayer.id.generation}`;
-        const renderedPlayer = presentedStates.get(playerKey) ?? null;
-        const authoritativePlayer = authoritativeStates.get(playerKey) ?? null;
-        const collisionPlayer = collisionById.get(playerKey) ?? null;
-        const heldKey = predictedBody
-          ? `${predictedBody.id.index}:${predictedBody.id.generation}`
-          : null;
-        const authoritativeHeld = heldKey ? (authoritativeStates.get(heldKey) ?? null) : null;
-        const renderedHeld = heldKey ? (presentedStates.get(heldKey) ?? null) : null;
-        const collisionHeld = heldKey ? (collisionById.get(heldKey) ?? null) : null;
+        const timelines = (id: RuntimeId) => {
+          const identity = `${id.index}:${id.generation}`;
+          return {
+            authoritative: pose(authoritativeStates.get(identity) ?? null),
+            collision: pose(collisionById.get(identity) ?? null),
+            predicted: pose(predictedById.get(identity) ?? null),
+            rendered: renderedPose(presentedStates.get(identity) ?? null),
+          };
+        };
         const frame: PredictionTraceFrame = {
           atMs: producedAtMs,
           worldEpoch: currentWorld?.worldEpoch ?? 0,
@@ -421,33 +407,13 @@ const owner = createOwnershipClient(
           command: trace.command ? structuredClone(trace.command) : null,
           contactIds: trace.contactIds,
           supportIds: trace.supportIds,
-          player: {
-            authoritative: pose(authoritativePlayer),
-            collision: pose(collisionPlayer),
-            predicted: pose(predictedPlayer),
-            rendered: renderedPose(renderedPlayer),
-          },
-          held: predictedBody
-            ? {
-                authoritative: pose(authoritativeHeld),
-                collision: pose(collisionHeld),
-                predicted: pose(predictedBody),
-                rendered: renderedPose(renderedHeld),
-              }
-            : null,
-          relevant: trace.collisionStates.map((collision) => {
-            const identity = `${collision.id.index}:${collision.id.generation}`;
-            return {
-              id: { ...collision.id },
-              kind: collision.kind,
-              timelines: {
-                authoritative: pose(authoritativeStates.get(identity) ?? null),
-                collision: pose(collision),
-                predicted: pose(predictedById.get(identity) ?? null),
-                rendered: renderedPose(presentedStates.get(identity) ?? null),
-              },
-            };
-          }),
+          player: timelines(predictedPlayer.id),
+          held: predictedBody ? timelines(predictedBody.id) : null,
+          relevant: trace.collisionStates.map((collision) => ({
+            id: { ...collision.id },
+            kind: collision.kind,
+            timelines: timelines(collision.id),
+          })),
         };
         if (activeDebugPhysicsCaptureId && debugCaptureAssembler)
           debugCaptureAssembler.record(activeDebugPhysicsCaptureId, frame);

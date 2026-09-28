@@ -1,11 +1,6 @@
 import { STATE_RESEND_MS } from "./config";
-import {
-  applyStateDelta,
-  cloneNetworkState,
-  clusterStateDeltas,
-  createStateDelta,
-  isNewerSequence16,
-} from "./network-codec";
+import { applyStateDelta, clusterStateDeltas, createStateDelta } from "./network-codec";
+import { cloneNetworkState, isNewerSequence16 } from "./network-state";
 import type { NetworkObjectState, RuntimeId, StateAckPacket, StateClusterPacket } from "./types";
 
 type SentState = {

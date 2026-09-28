@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Quaternion } from "three";
 import {
   correctedPredictionPose,
+  limitPresentationPosition,
   predictionCorrection,
   reconcilePredictionCorrection,
 } from "../src/prediction-correction";
@@ -36,12 +37,21 @@ describe("prediction correction offsets", () => {
   test("release applies its offset to the raw host pose before bounding the displayed step", () => {
     const authoritative = pose(0);
     const correction = predictionCorrection(pose(10), authoritative);
-    let rendered = correctedPredictionPose(authoritative, correction, 0, pose(10).position);
-    expect(rendered.position.x).toBe(10);
-    rendered = correctedPredictionPose(authoritative, correction, 1_000 / 60, rendered.position);
-    expect(rendered.position.x).toBeCloseTo(9.8);
-    rendered = correctedPredictionPose(authoritative, correction, 2_000 / 60, rendered.position);
-    expect(rendered.position.x).toBeCloseTo(9.6);
+    let rendered = limitPresentationPosition(
+      correctedPredictionPose(authoritative, correction, 0).position,
+      pose(10).position,
+    );
+    expect(rendered.x).toBe(10);
+    rendered = limitPresentationPosition(
+      correctedPredictionPose(authoritative, correction, 1_000 / 60).position,
+      rendered,
+    );
+    expect(rendered.x).toBeCloseTo(9.8);
+    rendered = limitPresentationPosition(
+      correctedPredictionPose(authoritative, correction, 2_000 / 60).position,
+      rendered,
+    );
+    expect(rendered.x).toBeCloseTo(9.6);
   });
 
   test("unchanged checkpoints do not slow a moving prop or restart a pending correction", () => {

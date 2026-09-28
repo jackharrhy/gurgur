@@ -15,7 +15,7 @@ test("worker production timestamps survive delayed delivery on the browser clock
   try {
     Object.defineProperty(globalThis, "Worker", { configurable: true, value: TestWorker });
     const client = createOwnershipClient({
-      localStates: (_states, producedAtMs) => timestamps.push(producedAtMs),
+      localStates: ({ producedAtMs }) => timestamps.push(producedAtMs),
       inputCommand() {},
       manipulationRequest() {},
       manipulationState() {},

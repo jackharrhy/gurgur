@@ -23,7 +23,9 @@ describe("authored material texture assets", () => {
       const first = await loadMaterialTextureManifest(pathToFileURL(`${directory}/`));
       await Bun.write(texturePath, pngHeader(1448, 1086, 2));
       const second = await loadMaterialTextureManifest(pathToFileURL(`${directory}/`));
-      expect(first.textures["GURGUR/CONCRETE"]).not.toBe(second.textures["GURGUR/CONCRETE"]);
+      expect(first.textures["GURGUR/CONCRETE"]!.url).not.toBe(
+        second.textures["GURGUR/CONCRETE"]!.url,
+      );
       expect(first.textures["GURGUR/CONCRETE"]).toMatchObject({
         width: 1448,
         height: 1086,

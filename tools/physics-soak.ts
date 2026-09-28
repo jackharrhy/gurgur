@@ -28,12 +28,41 @@ try {
       throw new Error(`handle churn failed at cycle ${cycle}`);
     lastGeneration = body.generation;
     if (!world.destroy(body)) throw new Error(`destroy failed at cycle ${cycle}`);
+    if (world.destroy(body)) throw new Error(`stale handle survived cycle ${cycle}`);
   }
+  world.createBox({
+    type: "static",
+    position: { x: 0, y: -0.5, z: 0 },
+    halfExtents: { x: 2, y: 0.5, z: 2 },
+  });
+  const dropPosition = { x: 0, y: 2, z: 0 };
+  const rotation = { x: 0, y: 0, z: 0, w: 1 };
+  const zeroVelocity = { x: 0, y: 0, z: 0 };
+  const fallingBody = world.createBox({
+    type: "dynamic",
+    position: dropPosition,
+    halfExtents: { x: 0.25, y: 0.25, z: 0.25 },
+  });
   const hasher = createHash("sha256");
   const checkpointInterval = Math.max(1, Math.floor(tickCount / 10));
   for (let tick = 1; tick <= tickCount; tick += 1) {
+    if (tick > 1 && (tick - 1) % 120 === 0) {
+      world.setBodyTransform(fallingBody, dropPosition, rotation);
+      world.setBodyVelocity(fallingBody, zeroVelocity, zeroVelocity);
+      world.setBodyAwake(fallingBody, true);
+    }
     world.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
     if (tick % checkpointInterval === 0 || tick === tickCount) {
+      const state = world.state(fallingBody);
+      if (
+        ![
+          ...Object.values(state.position),
+          ...Object.values(state.rotation),
+          ...Object.values(state.linearVelocity),
+          ...Object.values(state.angularVelocity),
+        ].every(Number.isFinite)
+      )
+        throw new Error(`non-finite body state at tick ${tick}`);
       hasher.update(`${tick}:${JSON.stringify(world.snapshot())}\n`);
     }
   }

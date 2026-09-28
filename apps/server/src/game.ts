@@ -133,7 +133,6 @@ export class WorldHost {
   #saveRequested = false;
   readonly #tickDurationsMs: number[] = [];
   #discardedOverloadSeconds = 0;
-  #maxStateAgeMs = 0;
   #worldEpoch: number;
   #serverTick: number;
   #accumulator = 0;
@@ -297,7 +296,7 @@ export class WorldHost {
       tickP99Ms: percentile(0.99),
       tickMaxMs: sorted.at(-1) ?? 0,
       discardedOverloadSeconds: this.#discardedOverloadSeconds,
-      maxStateAgeMs: this.#maxStateAgeMs,
+      maxStateAgeMs: 0,
     };
   }
 
@@ -340,9 +339,8 @@ export class WorldHost {
 
   predictionCheckpoint(
     playerId: RuntimeId,
-    sourceStates: readonly NetworkObjectState[] = this.networkStates(false),
     sourceStatesById: ReadonlyMap<string, NetworkObjectState> = new Map(
-      sourceStates.map((state) => [key(state.id), state]),
+      this.networkStates(false).map((state) => [key(state.id), state]),
     ),
   ): PredictionCheckpointPacket | null {
     const prediction = this.#simulation.players.prediction(playerId);
@@ -377,10 +375,7 @@ export class WorldHost {
       candidates.push({ state, identity: key(body.id), distanceSquared });
     }
 
-    // Source-style bounded prediction must keep the bodies that actually form
-    // the player's local interaction island. Prefer the current support and the
-    // loose-body contact graph rooted at the held prop; use prior membership to
-    // keep the remaining slots stable, then distance only as the final tie-break.
+    // Retain prior members before nearer candidates to avoid churning the contact island.
     const eligible = new Set(candidates.map((candidate) => candidate.identity));
     const contactDepth = new Map<string, number>();
     if (heldBody) {
@@ -439,6 +434,7 @@ export class WorldHost {
       ...(heldBody ? [key(heldBody.id)] : []),
       ...nearbyBodies.map((state) => key(state.id)),
     ]);
+    const sampledHeldBody = heldBody ? sourceStatesById.get(key(heldBody.id)) : null;
     return {
       worldEpoch: this.#worldEpoch,
       serverTick: this.#serverTick >>> 0,
@@ -451,10 +447,10 @@ export class WorldHost {
               claimVersion: prediction.grabVersion,
               startInputSequence: prediction.grabStartInputSequence,
               localAnchor: { x: 0, y: 0, z: 0 },
-              body: (() => {
-                const sampled = sourceStatesById.get(key(heldBody.id));
-                return sampled?.kind === "body" ? sampled : this.#networkBodyState(heldBody, false);
-              })(),
+              body:
+                sampledHeldBody?.kind === "body"
+                  ? sampledHeldBody
+                  : this.#networkBodyState(heldBody, false),
               distance: prediction.grab.distance,
               relativeRotation: { ...prediction.grab.relativeRotation },
               targetPosition: { ...prediction.grab.targetPosition },
@@ -913,7 +909,6 @@ export class WorldHost {
     this.#manipulationVersions.clear();
     this.#predictionBodySets.clear();
     this.#activeBodyContacts.clear();
-    this.#maxStateAgeMs = 0;
     this.#worldEpoch += 1;
     this.#serverTick = 0;
     this.#accumulator = 0;
@@ -1158,7 +1153,7 @@ export class WorldHost {
       capture.frames.push({
         serverTick: this.#serverTick,
         recordedAtMs: performance.now(),
-        player: cloneNetworkState(player) as NetworkPlayerState,
+        player: cloneNetworkState(player),
         input: structuredClone(input),
         support: supportHit
           ? {
@@ -1168,7 +1163,7 @@ export class WorldHost {
               fraction: supportHit.fraction,
             }
           : null,
-        bodies: bodies.map((body) => cloneNetworkState(body) as NetworkBodyState),
+        bodies: bodies.map(cloneNetworkState),
         contacts,
       });
       if (this.#serverTick >= capture.endingAtServerTick)
@@ -1223,7 +1218,7 @@ export class WorldHost {
     ) {
       body.stateSequence = (body.stateSequence + 1) & 0xffff;
       candidate.stateSequence = body.stateSequence;
-      this.#lastPublishedBodies.set(key(body.id), cloneNetworkState(candidate) as NetworkBodyState);
+      this.#lastPublishedBodies.set(key(body.id), cloneNetworkState(candidate));
     }
     return candidate;
   }

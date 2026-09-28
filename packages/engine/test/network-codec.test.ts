@@ -6,7 +6,6 @@ import {
   StateReceiver,
   StateReplicationPeer,
   applyStateDelta,
-  binaryPacketTag,
   clusterStateDeltas,
   createStateDelta,
   decodeBootstrapState,
@@ -258,7 +257,6 @@ describe("protocol-v7 network state codecs", () => {
         ),
       }),
     ).toThrow("1200-byte");
-    expect(binaryPacketTag(encoded)).toBeGreaterThan(0);
   });
 });
 

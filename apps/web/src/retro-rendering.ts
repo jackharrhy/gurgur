@@ -4,9 +4,7 @@ import { bayer16 } from "three/addons/tsl/math/Bayer.js";
 import { RETRO_COLOR_INTERVALS } from "./retro-color";
 import { VOLUMETRIC_LIGHT_LAYER } from "./lighting";
 
-// The public TSL declarations recursively encode complete shader graphs. Keeping
-// graph composition behind this boundary prevents TypeScript 7 from attempting
-// unbounded structural expansion while application-facing types remain precise.
+// Avoid TypeScript 7's unbounded expansion of TSL's recursive shader types.
 const tsl: Record<string, any> = TSL;
 
 // Exact silhouettes accumulate stencil coverage before the expanded hull draws.
@@ -17,8 +15,6 @@ export const INTERACTION_OUTLINE_RENDER_ORDER = 1_000;
 export const PLAYER_RENDER_ORDER = 2_000;
 
 function animatedTexture(textureMap: THREE.Texture, name: string) {
-  // Texture motion stays comfortable at every viewing angle by retaining
-  // perspective-correct UV interpolation.
   const retroUv = tsl.uv();
 
   if (name.includes("WATER")) {

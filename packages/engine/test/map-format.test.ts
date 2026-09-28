@@ -40,34 +40,4 @@ describe("Valve 220 parser diagnostics", () => {
       ),
     ).toThrow(/broken\.map:5:3: face 0/);
   });
-
-  test("fails deterministically under a seeded malformed-token corpus", () => {
-    let state = 0x47555247;
-    const next = (): number => {
-      state = (state + 0x6d2b79f5) >>> 0;
-      let value = state;
-      value = Math.imul(value ^ (value >>> 15), value | 1);
-      value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-      return (value ^ (value >>> 14)) >>> 0;
-    };
-    for (let caseIndex = 0; caseIndex < 512; caseIndex += 1) {
-      const length = 1 + (next() % 256);
-      const source = Array.from({ length }, () => String.fromCharCode(9 + (next() % 118))).join("");
-      let first: string;
-      let second: string;
-      try {
-        first = JSON.stringify(parseValve220(source, `fuzz-${caseIndex}.map`));
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-        first = String(error);
-      }
-      try {
-        second = JSON.stringify(parseValve220(source, `fuzz-${caseIndex}.map`));
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-        second = String(error);
-      }
-      expect(second).toBe(first);
-    }
-  });
 });

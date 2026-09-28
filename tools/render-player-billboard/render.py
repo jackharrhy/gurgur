@@ -1,5 +1,3 @@
-"""Render Gurgur's directional player billboard from its authored Blender scene."""
-
 from __future__ import annotations
 
 import argparse

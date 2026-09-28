@@ -2,10 +2,10 @@ import {
   PHYSICS_HZ,
   NETWORK_FLAG_AWAKE,
   NETWORK_FLAG_HELD,
-  PROXY_INTERPOLATION_TICKS,
   RENDER_INTERPOLATION_MAX_TICKS,
   RENDER_INTERPOLATION_MIN_TICKS,
-  isNewerSequence16,
+  cloneNetworkState,
+  isStaleNetworkState,
   unwrapTick32,
   type BodySnapshot,
   type NetworkObjectState,
@@ -19,30 +19,23 @@ type TimedState = {
   state: NetworkObjectState;
 };
 
-type Track = {
+type NetworkTrack = {
   delayTicks: number;
   desiredDelayTicks: number;
   underrunRequiredTicks: number;
   underrunHoldUntilMs: number;
-  lastAdaptiveSampleMs: number | null;
+  lastAdaptiveSampleMs: number;
   underrunSamples: number;
-  latenessSamples: LatenessSample[];
-  timeline: "host" | "local";
-  authorityVersion: number;
+  latenessSamples: Array<{ receivedAtMs: number; ticks: number }>;
   samples: TimedState[];
 };
 
-type ClockAnchor = {
-  serverTick: number;
-  localAtServerTickMs: number;
-};
-
-export type PresentationBufferOptions = {
-  networkDelayPolicy?: "fixed-proxy" | "adaptive-render";
-};
+type LocalSample = { producedAtMs: number; state: NetworkObjectState };
+type LocalTrack = { previous: LocalSample | null; current: LocalSample };
+type ClockAnchor = { serverTick: number; localAtServerTickMs: number };
 
 export type PresentationBufferDiagnostics = {
-  networkDelayPolicy: "fixed-proxy" | "adaptive-render";
+  networkDelayPolicy: "adaptive-render";
   minimumNetworkDelayTicks: number;
   networkDelayTicks: number;
   desiredNetworkDelayTicks: number;
@@ -50,25 +43,21 @@ export type PresentationBufferDiagnostics = {
   trackDelayTicks: Record<string, number>;
 };
 
-type LatenessSample = { receivedAtMs: number; ticks: number };
-
+const LOCAL_BODY_DELAY_MS = 1_000 / PHYSICS_HZ;
 const LATENESS_WINDOW_MS = 10_000;
 const UNDERRUN_HOLD_MS = 500;
 const DELAY_BUILD_RATE_TICKS_PER_TICK = 0.9;
 const DELAY_RELEASE_RATE_TICKS_PER_SECOND = 2;
 
 export class PresentationBuffer {
-  readonly #tracks = new Map<string, Track>();
+  readonly #networkTracks = new Map<string, NetworkTrack>();
+  readonly #localTracks = new Map<string, LocalTrack>();
   readonly #latestNetwork = new Map<string, NetworkObjectState>();
-  readonly #networkDelayPolicy: "fixed-proxy" | "adaptive-render";
   #clock: ClockAnchor | null = null;
 
-  constructor(options: PresentationBufferOptions = {}) {
-    this.#networkDelayPolicy = options.networkDelayPolicy ?? "fixed-proxy";
-  }
-
   reset(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    this.#tracks.clear();
+    this.#networkTracks.clear();
+    this.#localTracks.clear();
     this.#latestNetwork.clear();
     this.#clock = null;
     this.pushNetwork(states, receivedAtMs);
@@ -88,233 +77,37 @@ export class PresentationBuffer {
     };
   }
 
-  pushNetwork(
-    states: readonly NetworkObjectState[],
-    receivedAtMs: number,
-    preserveLocalIds: ReadonlySet<string> = new Set(),
-  ): void {
-    const hostStates: NetworkObjectState[] = [];
+  pushNetwork(states: readonly NetworkObjectState[], receivedAtMs: number): void {
     for (const state of states) {
       const identity = idKey(state.id);
       const previous = this.#latestNetwork.get(identity);
-      if (
-        previous &&
-        (state.authorityVersion < previous.authorityVersion ||
-          (state.authorityVersion === previous.authorityVersion &&
-            (unwrapTick32(state.sourceTick, previous.sourceTick) < previous.sourceTick ||
-              (state.stateSequence !== previous.stateSequence &&
-                !isNewerSequence16(state.stateSequence, previous.stateSequence)))))
-      )
-        continue;
-      this.#latestNetwork.set(identity, cloneState(state));
-      if (!preserveLocalIds.has(identity)) hostStates.push(state);
-    }
-    this.#push(hostStates, receivedAtMs);
-    this.#observeNetworkLateness(hostStates, receivedAtMs);
-  }
-
-  pushLocal(states: readonly NetworkObjectState[], producedAtMs: number, reconciled = false): void {
-    for (const state of states) {
-      const track = this.#tracks.get(idKey(state.id));
-      if (
-        state.kind === "player" ||
-        !track ||
-        track.timeline !== "local" ||
-        track.authorityVersion !== state.authorityVersion
-      ) {
-        this.replaceReliable(state, producedAtMs, true);
-        continue;
+      if (previous && isStaleNetworkState(state, previous)) continue;
+      const snapshot = cloneNetworkState(state);
+      this.#latestNetwork.set(identity, snapshot);
+      if (this.#localTracks.has(identity)) continue;
+      let track = this.#networkTracks.get(identity);
+      if (!track || track.samples[0]!.state.authorityVersion !== state.authorityVersion) {
+        track = createNetworkTrack(snapshot, receivedAtMs);
+        this.#networkTracks.set(identity, track);
+      } else {
+        const latest = track.samples.at(-1)!;
+        if (latest.state.stateSequence === state.stateSequence) continue;
+        const timelineTick = unwrapTick32(state.sourceTick, latest.timelineTick);
+        const sample = { receivedAtMs, timelineTick, state: snapshot };
+        if (timelineTick === latest.timelineTick) track.samples[track.samples.length - 1] = sample;
+        else track.samples.push(sample);
+        while (track.samples.length > 64) track.samples.shift();
+        const cutoff = timelineTick - PHYSICS_HZ * 2;
+        while (track.samples.length > 2 && track.samples[1]!.timelineTick < cutoff)
+          track.samples.shift();
       }
-      const previous = track.samples.at(-1)!;
-      if (reconciled) {
-        // Both endpoints must move together before the renderer applies its visual offset.
-        const offset = {
-          x: state.position.x - previous.state.position.x,
-          y: state.position.y - previous.state.position.y,
-          z: state.position.z - previous.state.position.z,
-        };
-        const rotationOffset = quaternion(state.rotation).multiply(
-          quaternion(previous.state.rotation).invert(),
-        );
-        for (const sample of track.samples) {
-          sample.state.position.x += offset.x;
-          sample.state.position.y += offset.y;
-          sample.state.position.z += offset.z;
-          const rotation = rotationOffset.clone().multiply(quaternion(sample.state.rotation));
-          sample.state.rotation = { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w };
-        }
-        previous.state = cloneState(state);
-        continue;
-      }
-      const sample = {
-        receivedAtMs: producedAtMs,
-        timelineTick: (producedAtMs / 1_000) * PHYSICS_HZ,
-        state: cloneState(state),
-      };
-      if (sample.timelineTick === previous.timelineTick)
-        track.samples[track.samples.length - 1] = sample;
-      else track.samples.push(sample);
-      while (track.samples.length > 2) track.samples.shift();
-    }
-  }
-
-  replaceReliable(state: NetworkObjectState, receivedAtMs: number, local: boolean): void {
-    const delayTicks =
-      !local && this.#networkDelayPolicy === "adaptive-render"
-        ? RENDER_INTERPOLATION_MIN_TICKS
-        : local
-          ? state.kind === "body"
-            ? 1
-            : 0
-          : PROXY_INTERPOLATION_TICKS;
-    this.#tracks.set(idKey(state.id), {
-      delayTicks,
-      desiredDelayTicks: delayTicks,
-      underrunRequiredTicks: RENDER_INTERPOLATION_MIN_TICKS,
-      underrunHoldUntilMs: 0,
-      lastAdaptiveSampleMs: receivedAtMs,
-      underrunSamples: 0,
-      latenessSamples: [],
-      timeline: local ? "local" : "host",
-      authorityVersion: state.authorityVersion,
-      samples: [
-        {
-          receivedAtMs,
-          timelineTick:
-            local && state.kind === "body" ? (receivedAtMs / 1_000) * PHYSICS_HZ : state.sourceTick,
-          state: cloneState(state),
-        },
-      ],
-    });
-    if (!local) this.#latestNetwork.set(idKey(state.id), cloneState(state));
-  }
-
-  remove(id: RuntimeId): void {
-    this.#tracks.delete(idKey(id));
-    this.#latestNetwork.delete(idKey(id));
-  }
-
-  sample(nowMs: number): BodySnapshot[] {
-    return [...this.#tracks.values()].flatMap((track) => {
-      const latest = track.samples.at(-1);
-      if (!latest) return [];
-      this.#adaptNetworkDelay(track, nowMs);
-      const clockTick =
-        track.timeline === "local"
-          ? latest.state.kind === "body"
-            ? (nowMs / 1_000) * PHYSICS_HZ
-            : latest.timelineTick
-          : this.#clock
-            ? alignClockTick(
-                this.#clock.serverTick +
-                  ((nowMs - this.#clock.localAtServerTickMs) / 1_000) * PHYSICS_HZ,
-                latest.timelineTick,
-              )
-            : latest.timelineTick + (Math.max(0, nowMs - latest.receivedAtMs) / 1_000) * PHYSICS_HZ;
-      const sample = sampleTrack(track, clockTick - track.delayTicks);
-      return sample ? [toBodySnapshot(sample)] : [];
-    });
-  }
-
-  diagnostics(): PresentationBufferDiagnostics {
-    const delays = [...this.#tracks.values()]
-      .filter((track) => track.timeline === "host")
-      .map((track) => track.delayTicks);
-    const desired = [...this.#tracks.values()]
-      .filter((track) => track.timeline === "host")
-      .map((track) => track.desiredDelayTicks);
-    const fallback =
-      this.#networkDelayPolicy === "adaptive-render"
-        ? RENDER_INTERPOLATION_MIN_TICKS
-        : PROXY_INTERPOLATION_TICKS;
-    return {
-      networkDelayPolicy: this.#networkDelayPolicy,
-      minimumNetworkDelayTicks: delays.length > 0 ? Math.min(...delays) : fallback,
-      networkDelayTicks: delays.length > 0 ? Math.max(...delays) : fallback,
-      desiredNetworkDelayTicks: desired.length > 0 ? Math.max(...desired) : fallback,
-      underrunSamples: [...this.#tracks.values()].reduce(
-        (sum, track) => sum + track.underrunSamples,
-        0,
-      ),
-      trackDelayTicks: Object.fromEntries(
-        [...this.#tracks.entries()].map(([key, track]) => [key, track.delayTicks]),
-      ),
-    };
-  }
-
-  trackDelayTicks(id: RuntimeId): number | null {
-    return this.#tracks.get(idKey(id))?.delayTicks ?? null;
-  }
-
-  latestNetwork(id: RuntimeId): BodySnapshot | null {
-    const latest = this.#latestNetwork.get(idKey(id));
-    return latest ? toBodySnapshot(latest) : null;
-  }
-
-  latestLocal(id: RuntimeId): BodySnapshot | null {
-    const track = this.#tracks.get(idKey(id));
-    const latest = track?.timeline === "local" ? track.samples.at(-1) : null;
-    return latest ? toBodySnapshot(latest.state) : null;
-  }
-
-  #push(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    for (const state of states) {
-      const key = idKey(state.id);
-      let track = this.#tracks.get(key);
-      if (
-        !track ||
-        track.authorityVersion !== state.authorityVersion ||
-        track.timeline !== "host"
-      ) {
-        const initialDelay =
-          this.#networkDelayPolicy === "adaptive-render"
-            ? RENDER_INTERPOLATION_MIN_TICKS
-            : PROXY_INTERPOLATION_TICKS;
-        track = {
-          delayTicks: initialDelay,
-          desiredDelayTicks: initialDelay,
-          underrunRequiredTicks: RENDER_INTERPOLATION_MIN_TICKS,
-          underrunHoldUntilMs: 0,
-          lastAdaptiveSampleMs: receivedAtMs,
-          underrunSamples: 0,
-          latenessSamples: [],
-          timeline: "host",
-          authorityVersion: state.authorityVersion,
-          samples: [],
-        };
-        this.#tracks.set(key, track);
-      }
-      const previous = track.samples.at(-1);
-      if (previous?.state.stateSequence === state.stateSequence) continue;
-      const timelineTick = previous
-        ? unwrapTick32(state.sourceTick, previous.timelineTick)
-        : state.sourceTick;
-      if (previous && timelineTick < previous.timelineTick) continue;
-      const sample = {
-        receivedAtMs,
-        timelineTick,
-        state: cloneState(state),
-      };
-      if (previous && timelineTick === previous.timelineTick)
-        track.samples[track.samples.length - 1] = sample;
-      else track.samples.push(sample);
-      while (track.samples.length > 64) track.samples.shift();
-      const cutoff = timelineTick - PHYSICS_HZ * 2;
-      while (track.samples.length > 2 && track.samples[1]!.timelineTick < cutoff)
-        track.samples.shift();
-    }
-  }
-
-  #observeNetworkLateness(states: readonly NetworkObjectState[], receivedAtMs: number): void {
-    if (this.#networkDelayPolicy !== "adaptive-render" || !this.#clock) return;
-    for (const state of states) {
-      const track = this.#tracks.get(idKey(state.id));
-      const latest = track?.samples.at(-1);
-      if (!track || track.timeline !== "host" || latest?.receivedAtMs !== receivedAtMs) continue;
-      if (!activeNetworkState(state)) continue;
+      if (!this.#clock || !activeNetworkState(state)) continue;
       track.latenessSamples.push({
         receivedAtMs,
-        ticks: Math.max(0, this.#clockTick(track, receivedAtMs) - latest.timelineTick),
+        ticks: Math.max(
+          0,
+          this.#clockTick(track, receivedAtMs) - track.samples.at(-1)!.timelineTick,
+        ),
       });
       this.#pruneLateness(track, receivedAtMs);
       const measured = this.#measuredDelayTicks(track);
@@ -325,24 +118,133 @@ export class PresentationBuffer {
     }
   }
 
-  #adaptNetworkDelay(track: Track, nowMs: number): void {
-    if (
-      this.#networkDelayPolicy !== "adaptive-render" ||
-      track.timeline !== "host" ||
-      !Number.isFinite(nowMs)
-    )
-      return;
-    const previousAt = track.lastAdaptiveSampleMs ?? nowMs;
-    const elapsedSeconds = Math.max(0, (nowMs - previousAt) / 1_000);
+  pushLocal(states: readonly NetworkObjectState[], producedAtMs: number, reconciled = false): void {
+    for (const state of states) {
+      const identity = idKey(state.id);
+      const track = this.#localTracks.get(identity);
+      this.#networkTracks.delete(identity);
+      if (
+        state.kind === "player" ||
+        !track ||
+        track.current.state.authorityVersion !== state.authorityVersion
+      ) {
+        this.#localTracks.set(identity, {
+          previous: null,
+          current: { producedAtMs, state: cloneNetworkState(state) },
+        });
+        continue;
+      }
+      if (reconciled) {
+        // Shift the older endpoint with the correction; render interpolation must not undo it.
+        if (track.previous) {
+          const previous = track.previous.state;
+          const current = track.current.state;
+          previous.position.x += state.position.x - current.position.x;
+          previous.position.y += state.position.y - current.position.y;
+          previous.position.z += state.position.z - current.position.z;
+          const rotation = quaternion(state.rotation)
+            .multiply(quaternion(current.rotation).invert())
+            .multiply(quaternion(previous.rotation));
+          previous.rotation = { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w };
+        }
+        track.current.state = cloneNetworkState(state);
+      } else {
+        if (producedAtMs !== track.current.producedAtMs) track.previous = track.current;
+        track.current = { producedAtMs, state: cloneNetworkState(state) };
+      }
+    }
+  }
+
+  replaceReliable(state: NetworkObjectState, receivedAtMs: number): void {
+    const identity = idKey(state.id);
+    const snapshot = cloneNetworkState(state);
+    this.#localTracks.delete(identity);
+    this.#networkTracks.set(identity, createNetworkTrack(snapshot, receivedAtMs));
+    this.#latestNetwork.set(identity, snapshot);
+  }
+
+  remove(id: RuntimeId): void {
+    const identity = idKey(id);
+    this.#networkTracks.delete(identity);
+    this.#localTracks.delete(identity);
+    this.#latestNetwork.delete(identity);
+  }
+
+  sample(nowMs: number): BodySnapshot[] {
+    const bodies: BodySnapshot[] = [];
+    for (const track of this.#networkTracks.values()) {
+      this.#adaptNetworkDelay(track, nowMs);
+      bodies.push(sampleTrack(track, this.#clockTick(track, nowMs) - track.delayTicks));
+    }
+    for (const { previous, current } of this.#localTracks.values()) {
+      if (!previous) {
+        bodies.push(toBodySnapshot(current.state));
+        continue;
+      }
+      const amount = clamp(
+        (nowMs - LOCAL_BODY_DELAY_MS - previous.producedAtMs) /
+          (current.producedAtMs - previous.producedAtMs),
+        0,
+        1,
+      );
+      if (amount <= 0) bodies.push(toBodySnapshot(previous.state));
+      else if (amount >= 1) bodies.push(toBodySnapshot(current.state));
+      else bodies.push(interpolate(previous.state, current.state, amount));
+    }
+    return bodies;
+  }
+
+  diagnostics(): PresentationBufferDiagnostics {
+    const tracks = [...this.#networkTracks.values()];
+    const delays = tracks.map((track) => track.delayTicks);
+    const desired = tracks.map((track) => track.desiredDelayTicks);
+    const trackDelayTicks: Record<string, number> = {};
+    for (const [identity, track] of this.#networkTracks)
+      trackDelayTicks[identity] = track.delayTicks;
+    for (const [identity, track] of this.#localTracks)
+      trackDelayTicks[identity] = track.current.state.kind === "body" ? 1 : 0;
+    return {
+      networkDelayPolicy: "adaptive-render",
+      minimumNetworkDelayTicks: delays.length
+        ? Math.min(...delays)
+        : RENDER_INTERPOLATION_MIN_TICKS,
+      networkDelayTicks: delays.length ? Math.max(...delays) : RENDER_INTERPOLATION_MIN_TICKS,
+      desiredNetworkDelayTicks: desired.length
+        ? Math.max(...desired)
+        : RENDER_INTERPOLATION_MIN_TICKS,
+      underrunSamples: tracks.reduce((sum, track) => sum + track.underrunSamples, 0),
+      trackDelayTicks,
+    };
+  }
+
+  trackDelayTicks(id: RuntimeId): number | null {
+    const identity = idKey(id);
+    const local = this.#localTracks.get(identity);
+    if (local) return local.current.state.kind === "body" ? 1 : 0;
+    return this.#networkTracks.get(identity)?.delayTicks ?? null;
+  }
+
+  latestNetwork(id: RuntimeId): BodySnapshot | null {
+    const latest = this.#latestNetwork.get(idKey(id));
+    return latest ? toBodySnapshot(latest) : null;
+  }
+
+  latestLocal(id: RuntimeId): BodySnapshot | null {
+    const track = this.#localTracks.get(idKey(id));
+    return track ? toBodySnapshot(track.current.state) : null;
+  }
+
+  #adaptNetworkDelay(track: NetworkTrack, nowMs: number): void {
+    if (!Number.isFinite(nowMs)) return;
+    const elapsedSeconds = Math.max(0, (nowMs - track.lastAdaptiveSampleMs) / 1_000);
     track.lastAdaptiveSampleMs = nowMs;
     this.#pruneLateness(track, nowMs);
 
-    const latest = track.samples.at(-1);
-    const required = latest
-      ? Math.ceil(Math.max(0, this.#clockTick(track, nowMs) - latest.timelineTick + 1))
-      : RENDER_INTERPOLATION_MIN_TICKS;
+    const latest = track.samples.at(-1)!;
+    const required = Math.ceil(
+      Math.max(0, this.#clockTick(track, nowMs) - latest.timelineTick + 1),
+    );
     const underrun =
-      latest !== undefined &&
       track.samples.length >= 2 &&
       latest.timelineTick - track.samples[0]!.timelineTick >= RENDER_INTERPOLATION_MIN_TICKS &&
       nowMs - latest.receivedAtMs <= 250 &&
@@ -374,7 +276,7 @@ export class PresentationBuffer {
     }
   }
 
-  #measuredDelayTicks(track: Track): number {
+  #measuredDelayTicks(track: NetworkTrack): number {
     const sorted = track.latenessSamples.map((sample) => sample.ticks).toSorted((a, b) => a - b);
     const p95 = sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
     return clamp(
@@ -384,7 +286,7 @@ export class PresentationBuffer {
     );
   }
 
-  #clockTick(track: Track, nowMs: number): number {
+  #clockTick(track: NetworkTrack, nowMs: number): number {
     const latest = track.samples.at(-1)!;
     return this.#clock
       ? alignClockTick(
@@ -394,11 +296,24 @@ export class PresentationBuffer {
       : latest.timelineTick + (Math.max(0, nowMs - latest.receivedAtMs) / 1_000) * PHYSICS_HZ;
   }
 
-  #pruneLateness(track: Track, nowMs: number): void {
+  #pruneLateness(track: NetworkTrack, nowMs: number): void {
     const cutoff = nowMs - LATENESS_WINDOW_MS;
     while (track.latenessSamples.length > 0 && track.latenessSamples[0]!.receivedAtMs < cutoff)
       track.latenessSamples.shift();
   }
+}
+
+function createNetworkTrack(state: NetworkObjectState, receivedAtMs: number): NetworkTrack {
+  return {
+    delayTicks: RENDER_INTERPOLATION_MIN_TICKS,
+    desiredDelayTicks: RENDER_INTERPOLATION_MIN_TICKS,
+    underrunRequiredTicks: RENDER_INTERPOLATION_MIN_TICKS,
+    underrunHoldUntilMs: 0,
+    lastAdaptiveSampleMs: receivedAtMs,
+    underrunSamples: 0,
+    latenessSamples: [],
+    samples: [{ receivedAtMs, timelineTick: state.sourceTick, state }],
+  };
 }
 
 function activeNetworkState(state: NetworkObjectState): boolean {
@@ -416,13 +331,12 @@ function activeNetworkState(state: NetworkObjectState): boolean {
   );
 }
 
-function sampleTrack(track: Track, targetTick: number): NetworkObjectState | null {
+function sampleTrack(track: NetworkTrack, targetTick: number): BodySnapshot {
   const samples = track.samples;
-  if (samples.length === 0) return null;
   if (samples.length === 1 || targetTick <= samples[0]!.timelineTick)
-    return cloneState(samples[0]!.state);
+    return toBodySnapshot(samples[0]!.state);
   const latest = samples.at(-1)!;
-  if (targetTick >= latest.timelineTick) return cloneState(latest.state);
+  if (targetTick >= latest.timelineTick) return toBodySnapshot(latest.state);
   for (let index = 1; index < samples.length; index += 1) {
     const next = samples[index]!;
     if (next.timelineTick < targetTick) continue;
@@ -431,7 +345,7 @@ function sampleTrack(track: Track, targetTick: number): NetworkObjectState | nul
     const amount = span <= 0 ? 1 : (targetTick - previous.timelineTick) / span;
     return interpolate(previous.state, next.state, amount);
   }
-  return cloneState(latest.state);
+  return toBodySnapshot(latest.state);
 }
 
 function alignClockTick(clockTick: number, reference: number): number {
@@ -443,28 +357,15 @@ function interpolate(
   previous: NetworkObjectState,
   next: NetworkObjectState,
   amount: number,
-): NetworkObjectState {
-  const common = {
-    ...next,
+): BodySnapshot {
+  return {
     id: { ...next.id },
     position: mixVec3(previous.position, next.position, amount),
     rotation: mixQuat(previous.rotation, next.rotation, amount),
     linearVelocity: mixVec3(previous.linearVelocity, next.linearVelocity, amount),
     angularVelocity: mixVec3(previous.angularVelocity, next.angularVelocity, amount),
+    flags: next.flags,
   };
-  if (next.kind === "player" && previous.kind === "player") {
-    return {
-      ...common,
-      kind: "player",
-      yaw: mixAngle(previous.yaw, next.yaw, amount),
-      verticalVelocity: mix(previous.verticalVelocity, next.verticalVelocity, amount),
-      grounded: next.grounded,
-      crouched: next.crouched,
-      lastJumpCounter: next.lastJumpCounter,
-      stepCooldown: mix(previous.stepCooldown, next.stepCooldown, amount),
-    };
-  }
-  return { ...common, kind: "body" };
 }
 
 function toBodySnapshot(state: NetworkObjectState): BodySnapshot {
@@ -475,29 +376,6 @@ function toBodySnapshot(state: NetworkObjectState): BodySnapshot {
     linearVelocity: { ...state.linearVelocity },
     angularVelocity: { ...state.angularVelocity },
     flags: state.flags,
-  };
-}
-
-function cloneState(state: NetworkObjectState): NetworkObjectState {
-  if (state.kind === "player") {
-    return {
-      ...state,
-      kind: "player",
-      id: { ...state.id },
-      position: { ...state.position },
-      rotation: { ...state.rotation },
-      linearVelocity: { ...state.linearVelocity },
-      angularVelocity: { ...state.angularVelocity },
-    };
-  }
-  return {
-    ...state,
-    kind: "body",
-    id: { ...state.id },
-    position: { ...state.position },
-    rotation: { ...state.rotation },
-    linearVelocity: { ...state.linearVelocity },
-    angularVelocity: { ...state.angularVelocity },
   };
 }
 
@@ -536,11 +414,6 @@ function mixQuat(
 
 function quaternion(rotation: BodySnapshot["rotation"]): Quaternion {
   return new Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
-}
-
-function mixAngle(a: number, b: number, amount: number): number {
-  const difference = Math.atan2(Math.sin(b - a), Math.cos(b - a));
-  return a + difference * amount;
 }
 
 function mix(a: number, b: number, amount: number): number {

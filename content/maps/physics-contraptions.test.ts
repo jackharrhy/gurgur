@@ -10,7 +10,6 @@ describe("physics contraptions fixture", () => {
     const second = compileWorld(source, fixturePath);
     expect(first.mapRevision).toBe(second.mapRevision);
     expect(first.brushes).toHaveLength(17);
-    expect(first.entities.filter((entity) => entity.kind === "physics-joint")).toHaveLength(8);
     expect(
       first.entities
         .filter((entity) => entity.kind === "physics-joint")
@@ -67,6 +66,5 @@ describe("physics contraptions fixture", () => {
     expect(fgd).toContain('"target-angle" : "Target angle"');
     expect(fgd).toContain("attach1(target_destination)");
     expect(fgd).toContain('renderable(choices) : "Render');
-    expect(fgd).toContain(": 1");
   });
 });

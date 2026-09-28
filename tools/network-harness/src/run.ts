@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { runRealNetworkHarness } from "./real-harness";
+import { networkBudgetFailures } from "./release-budgets";
 
 const quick = process.env.HARNESS_QUICK === "1";
 const report = await runRealNetworkHarness({
@@ -13,34 +14,5 @@ await Bun.write(path, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ path, ...report }));
 
 const blocking = process.env.HARNESS_NONBLOCKING !== "1";
-const failures = blocking
-  ? [
-      ...report.correctnessErrors,
-      ...(report.profiles.typical!.stateAgeP95Ms >= 200 ? ["Typical state age"] : []),
-      ...(report.profiles.adverse!.stateAgeP95Ms >= 300 ? ["Adverse state age"] : []),
-      ...(report.profiles.typical!.presentationPathErrorP95Cm >= 2
-        ? ["Typical presentation path error"]
-        : []),
-      ...(report.profiles.adverse!.presentationPathErrorP95Cm >= 5
-        ? ["Adverse presentation path error"]
-        : []),
-      ...(report.profiles.typical!.bufferUnderrunPercent >= 0.1
-        ? ["Typical presentation underrun"]
-        : []),
-      ...(report.profiles.adverse!.bufferUnderrunPercent >= 1
-        ? ["Adverse presentation underrun"]
-        : []),
-      ...(report.profiles.local!.advancingFramePercent < 95 ? ["Local banding"] : []),
-      ...(report.profiles.typical!.advancingFramePercent < 95 ? ["Typical banding"] : []),
-      ...Object.entries(report.profiles).flatMap(([name, profile]) =>
-        profile.averageBitsPerSecondPerRecipient >= 2_000_000 ? [`${name} recipient traffic`] : [],
-      ),
-      ...(Object.values(report.profiles).some((profile) => profile.staleAuthorityAccepted !== 0)
-        ? ["stale authority accepted"]
-        : []),
-      ...(report.server.tickP95Ms >= 8 ? ["host p95"] : []),
-      ...(report.server.tickP99Ms >= 12 ? ["host p99"] : []),
-      ...(report.server.discardedOverloadSeconds !== 0 ? ["host discarded fixed-step time"] : []),
-    ]
-  : [];
+const failures = blocking ? networkBudgetFailures(report) : [];
 if (failures.length > 0) throw new Error(`network harness failed: ${failures.join(", ")}`);

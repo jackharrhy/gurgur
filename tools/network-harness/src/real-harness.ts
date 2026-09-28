@@ -8,7 +8,7 @@ import {
   OWNERSHIP_CHANGED_TAG,
   PHYSICS_HZ,
   PROTOCOL_VERSION,
-  PROXY_INTERPOLATION_TICKS,
+  RENDER_INTERPOLATION_MAX_TICKS,
   STATE_CLUSTER_TAG,
   StateReceiver,
   binaryPacketTag,
@@ -336,7 +336,7 @@ function samplePresentation(client: HarnessClient, nowMs: number): void {
           if (oracle) {
             render.oracleFrames += 1;
             const delayTicks =
-              client.presentation.trackDelayTicks(target) ?? PROXY_INTERPOLATION_TICKS;
+              client.presentation.trackDelayTicks(target) ?? RENDER_INTERPOLATION_MAX_TICKS;
             const targetTimelineTick =
               oracle.anchorTimelineTick +
               ((render.nextMs - oracle.anchorReceivedAtMs) / 1_000) * PHYSICS_HZ -

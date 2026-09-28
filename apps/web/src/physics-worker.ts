@@ -12,8 +12,11 @@ import {
   NETWORK_FLAG_HELD,
   PhysicsWorld,
   accumulateFixedStepTime,
+  cloneNetworkState,
   isNewerSequence16,
+  isStaleNetworkState,
   unwrapTick32,
+  type BodySnapshot,
   type InputCommand,
   type LifecycleMessage,
   type ManipulationChangedMessage,
@@ -69,14 +72,6 @@ type RemotePlayer = {
   history: NetworkPlayerState[];
 };
 
-type PredictionRecord = {
-  command: InputCommand;
-  serverTick: number;
-  player: NetworkPlayerState;
-  held: NetworkBodyState | null;
-  proxyTick: number;
-};
-
 type LocalGravityField = {
   entityIndex: number;
   handle: RuntimeId;
@@ -98,7 +93,7 @@ let localPlayerProxy: RuntimeId | null = null;
 let input: InputCommand | null = null;
 let nextInputSequence = 0;
 let predictionTick = 0;
-let predictionHistory: PredictionRecord[] = [];
+let pendingCommands: InputCommand[] = [];
 let lastAcknowledgedInputSequence = -1;
 let lastCheckpointServerTick: number | null = null;
 let lastAcknowledgedPrimaryCounter = 0;
@@ -117,7 +112,7 @@ let manipulation: {
   claimVersion: number;
   stateSequence: number;
 } | null = null;
-let predictedGrab: { grab: PropGrab; claimVersion: number } | null = null;
+let predictedGrab: PropGrab | null = null;
 let pendingManipulation = new Map<
   number,
   { target: RuntimeId; targetState: HostManipulationTarget; authorityVersion: number }
@@ -199,7 +194,7 @@ async function setWorld(
   input = null;
   nextInputSequence = 0;
   predictionTick = 0;
-  predictionHistory = [];
+  pendingCommands = [];
   lastAcknowledgedInputSequence = -1;
   lastCheckpointServerTick = null;
   lastAcknowledgedPrimaryCounter = 0;
@@ -229,7 +224,7 @@ async function setWorld(
     if (!state) continue;
     if (descriptor.kind === "player" && state.kind === "player") {
       if (sameId(descriptor.id, playerId)) {
-        localPlayer = clonePlayer(state);
+        localPlayer = cloneNetworkState(state);
         localPlayerProxy = physics.createPlayerProxy(state.position, playerCapsule(state.crouched));
       } else {
         const handle = physics.createPlayerProxy(state.position, playerCapsule(state.crouched));
@@ -237,8 +232,8 @@ async function setWorld(
           networkId: { ...descriptor.id },
           handle,
           crouched: state.crouched,
-          state: clonePlayer(state),
-          history: [clonePlayer(state)],
+          state: cloneNetworkState(state),
+          history: [cloneNetworkState(state)],
         });
       }
       continue;
@@ -279,14 +274,8 @@ function tick(): void {
     post({ type: "input-command", command });
     simulateCommand(command, localPlayer.sourceTick + 1);
     const result = localPredictedStates();
-    predictionHistory.push({
-      command: structuredClone(command),
-      serverTick: localPlayer.sourceTick,
-      player: clonePlayer(localPlayer),
-      held: clonePredictedBody(result),
-      proxyTick: localPlayer.sourceTick,
-    });
-    while (predictionHistory.length > PREDICTION_HISTORY_CAPACITY) predictionHistory.shift();
+    pendingCommands.push(command);
+    while (pendingCommands.length > PREDICTION_HISTORY_CAPACITY) pendingCommands.shift();
     accumulator -= PHYSICS_DT;
     steps += 1;
     lastProducedAtMs = performance.timeOrigin + now - accumulator * 1_000;
@@ -394,13 +383,11 @@ function simulateCommand(command: InputCommand, serverTick: number, replay = fal
   };
   if (command.primaryCounter !== predictionPrimaryCounter) {
     predictionPrimaryCounter = command.primaryCounter;
-    if (predictedGrab) releasePredictedGrab();
+    predictedGrab = null;
   }
   dropSupportedPredictedGrab();
-  if (predictedGrab) {
-    if (!stepPropGrab(physicsEngine(), predictedGrab.grab, playerPose(command)))
-      releasePredictedGrab();
-  }
+  if (predictedGrab && !stepPropGrab(physicsEngine(), predictedGrab, playerPose(command)))
+    predictedGrab = null;
   if (manipulation)
     stepHostManipulationTarget(physicsEngine(), manipulation.target, playerPose(command));
   const events = physics.step(PHYSICS_DT, PHYSICS_SUBSTEPS);
@@ -410,19 +397,16 @@ function simulateCommand(command: InputCommand, serverTick: number, replay = fal
 
 function localPredictedStates(): NetworkObjectState[] {
   if (!localPlayer) return [];
-  const states: NetworkObjectState[] = [clonePlayer(localPlayer)];
+  const states: NetworkObjectState[] = [cloneNetworkState(localPlayer)];
   if (!physics) return states;
   for (const body of bodies.values()) {
     if (!body.predicted) continue;
     const state = physics.state(body.handle);
-    const locallyHeld = predictedGrab !== null && sameId(predictedGrab.grab.target, body.networkId);
+    const locallyHeld = predictedGrab !== null && sameId(predictedGrab.target, body.networkId);
     states.push({
       ...body.state,
       kind: "body",
       id: { ...body.networkId },
-      // Local prediction is its own immediate presentation timeline. Reusing
-      // the last authoritative sequence makes PresentationBuffer discard every
-      // simulated pose until another network state happens to arrive.
       stateSequence: localPlayer.stateSequence,
       sourceTick: localPlayer.sourceTick,
       position: { ...state.position },
@@ -436,14 +420,6 @@ function localPredictedStates(): NetworkObjectState[] {
     });
   }
   return states;
-}
-
-function clonePredictedBody(states: readonly NetworkObjectState[]): NetworkBodyState | null {
-  const body = states.find(
-    (state): state is NetworkBodyState =>
-      state.kind === "body" && (state.flags & NETWORK_FLAG_HELD) !== 0,
-  );
-  return body ? cloneBody(body) : null;
 }
 
 function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
@@ -462,30 +438,19 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
   if (checkpoint.player.authorityVersion > localPlayer.authorityVersion) resetPredictionHistory();
   lastCheckpointServerTick = checkpoint.serverTick;
   const acknowledged = checkpoint.lastProcessedInputSequence ?? -1;
-  const acknowledgedRecord = predictionHistory.find(
-    (record) => record.command.sequence === acknowledged,
-  );
-  const grabStartRecord =
-    checkpoint.held?.startInputSequence === null ||
-    checkpoint.held?.startInputSequence === undefined
-      ? null
-      : predictionHistory.find(
-          (record) => record.command.sequence === checkpoint.held!.startInputSequence,
-        );
-  if (acknowledgedRecord || grabStartRecord)
-    lastAcknowledgedPrimaryCounter =
-      acknowledgedRecord?.command.primaryCounter ?? grabStartRecord!.command.primaryCounter;
+  const acknowledgedCommand =
+    pendingCommands.find((command) => command.sequence === acknowledged) ??
+    pendingCommands.find((command) => command.sequence === checkpoint.held?.startInputSequence);
+  if (acknowledgedCommand) lastAcknowledgedPrimaryCounter = acknowledgedCommand.primaryCounter;
   lastAcknowledgedInputSequence = acknowledged;
-  const pending = predictionHistory
-    .filter((record) => record.command.sequence > acknowledged)
-    .map((record) => structuredClone(record.command));
+  pendingCommands = pendingCommands.filter((command) => command.sequence > acknowledged);
 
   if (localPlayerProxy) {
     clearGravityVisitor(localPlayerProxy);
     physics.destroy(localPlayerProxy);
   }
   activePredictionContacts.clear();
-  localPlayer = clonePlayer(checkpoint.player);
+  localPlayer = cloneNetworkState(checkpoint.player);
   predictionPrimaryCounter = lastAcknowledgedPrimaryCounter;
   localPlayerProxy = physics.createPlayerProxy(
     localPlayer.position,
@@ -494,46 +459,29 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
 
   restoreCheckpointBodies(checkpoint);
 
-  if (checkpoint.held) {
-    const body = bodies.get(key(checkpoint.held.body.id));
-    if (body) {
-      if (predictedGrab && !sameId(predictedGrab.grab.target, body.networkId))
-        releasePredictedGrab();
-      predictedGrab = {
-        claimVersion: checkpoint.held.claimVersion,
-        grab: {
-          target: { ...checkpoint.held.body.id },
-          distance: checkpoint.held.distance,
-          relativeRotation: { ...checkpoint.held.relativeRotation },
-          targetPosition: { ...checkpoint.held.targetPosition },
-          targetRotation: { ...checkpoint.held.targetRotation },
-          errorSeconds: checkpoint.held.errorSeconds,
-        },
-      };
-    } else releasePredictedGrab();
-  } else {
-    releasePredictedGrab();
-  }
+  const held = checkpoint.held;
+  predictedGrab =
+    held && bodies.has(key(held.body.id))
+      ? {
+          target: { ...held.body.id },
+          distance: held.distance,
+          relativeRotation: { ...held.relativeRotation },
+          targetPosition: { ...held.targetPosition },
+          targetRotation: { ...held.targetRotation },
+          errorSeconds: held.errorSeconds,
+        }
+      : null;
 
-  predictionHistory = [];
-  for (let index = 0; index < pending.length; index += 1) {
-    const command = pending[index]!;
+  for (let index = 0; index < pendingCommands.length; index += 1) {
+    const command = pendingCommands[index]!;
     const replayTick = checkpoint.serverTick + index + 1;
     simulateCommand(command, replayTick, true);
-    const result = localPredictedStates();
-    predictionHistory.push({
-      command,
-      serverTick: replayTick,
-      player: clonePlayer(localPlayer),
-      held: clonePredictedBody(result),
-      proxyTick: replayTick,
-    });
   }
   restoreNewestProxies();
-  const newestSequence = pending.at(-1)?.sequence ?? acknowledged;
+  const command = pendingCommands.at(-1) ?? null;
+  const newestSequence = command?.sequence ?? acknowledged;
   nextInputSequence = Math.max(nextInputSequence, newestSequence + 1);
   const contacts = predictionContacts();
-  const command = predictionHistory.at(-1)?.command ?? null;
   post({
     type: "local-states",
     states: localPredictedStates(),
@@ -543,7 +491,7 @@ function applyCheckpoint(checkpoint: PredictionCheckpointPacket): void {
     reconciled: true,
     inputSequence: newestSequence,
     acknowledgment: acknowledged < 0 ? null : acknowledged,
-    replayCount: pending.length,
+    replayCount: pendingCommands.length,
     contactIds: contacts.contactIds,
     supportIds: contacts.supportIds,
     command: command ? structuredClone(command) : null,
@@ -581,23 +529,15 @@ function restoreCheckpointBodies(checkpoint: PredictionCheckpointPacket): void {
     );
     if (body.predicted)
       physics.setBodyAwake(body.handle, (authoritative.flags & NETWORK_FLAG_AWAKE) !== 0);
-    if (
-      checkpointState &&
-      (checkpointState.authorityVersion > body.state.authorityVersion ||
-        (checkpointState.authorityVersion === body.state.authorityVersion &&
-          unwrapTick32(checkpointState.sourceTick, body.state.sourceTick) >=
-            body.state.sourceTick &&
-          (checkpointState.stateSequence === body.state.stateSequence ||
-            isNewerSequence16(checkpointState.stateSequence, body.state.stateSequence))))
-    ) {
-      body.state = cloneBody(checkpointState);
+    if (checkpointState && !isStaleNetworkState(checkpointState, body.state)) {
+      body.state = cloneNetworkState(checkpointState);
       rememberBodyState(body, checkpointState);
     }
   }
 }
 
 function resetPredictionHistory(): void {
-  predictionHistory = [];
+  pendingCommands = [];
   lastAcknowledgedInputSequence = -1;
   lastCheckpointServerTick = null;
   lastAcknowledgedPrimaryCounter = input?.primaryCounter ?? 0;
@@ -613,14 +553,14 @@ function clientCollisionStates(contacts: {
   if (!physics || !localPlayer || !localPlayerProxy) return [];
   const playerPhysics = physics.state(localPlayerProxy);
   const player: NetworkPlayerState = {
-    ...clonePlayer(localPlayer),
+    ...cloneNetworkState(localPlayer),
     position: { ...playerPhysics.position },
     rotation: { ...playerPhysics.rotation },
     linearVelocity: { ...playerPhysics.linearVelocity },
     angularVelocity: { ...playerPhysics.angularVelocity },
   };
   const forced = new Set([...contacts.contactIds, ...contacts.supportIds].map((id) => key(id)));
-  if (predictedGrab) forced.add(key(predictedGrab.grab.target));
+  if (predictedGrab) forced.add(key(predictedGrab.target));
   const radiusSquared = TRACE_RADIUS_METRES * TRACE_RADIUS_METRES;
   const candidates: Array<{ distanceSquared: number; state: NetworkObjectState }> = [];
   for (const body of bodies.values()) {
@@ -630,7 +570,7 @@ function clientCollisionStates(contacts: {
     candidates.push({
       distanceSquared,
       state: {
-        ...cloneBody(body.state),
+        ...cloneNetworkState(body.state),
         sourceTick: body.predicted ? localPlayer.sourceTick : body.state.sourceTick,
         position: { ...bodyPhysics.position },
         rotation: { ...bodyPhysics.rotation },
@@ -639,9 +579,7 @@ function clientCollisionStates(contacts: {
         flags:
           (body.state.flags & ~(NETWORK_FLAG_AWAKE | NETWORK_FLAG_HELD)) |
           (bodyPhysics.awake ? NETWORK_FLAG_AWAKE : 0) |
-          (predictedGrab && sameId(predictedGrab.grab.target, body.networkId)
-            ? NETWORK_FLAG_HELD
-            : 0),
+          (predictedGrab && sameId(predictedGrab.target, body.networkId) ? NETWORK_FLAG_HELD : 0),
       },
     });
   }
@@ -652,7 +590,7 @@ function clientCollisionStates(contacts: {
     candidates.push({
       distanceSquared,
       state: {
-        ...clonePlayer(remote.state),
+        ...cloneNetworkState(remote.state),
         position: { ...remotePhysics.position },
         rotation: { ...remotePhysics.rotation },
         linearVelocity: { ...remotePhysics.linearVelocity },
@@ -667,10 +605,6 @@ function clientCollisionStates(contacts: {
       .slice(0, TRACE_MAX_NEARBY_OBJECTS)
       .map(({ state }) => state),
   ];
-}
-
-function releasePredictedGrab(): void {
-  predictedGrab = null;
 }
 
 function dropSupportedPredictedGrab(): void {
@@ -688,9 +622,9 @@ function dropSupportedPredictedGrab(): void {
     support &&
     support.normal.y >= PLAYER_WALKABLE_NORMAL_Y &&
     supportId &&
-    sameId(supportId, predictedGrab.grab.target)
+    sameId(supportId, predictedGrab.target)
   )
-    releasePredictedGrab();
+    predictedGrab = null;
 }
 
 function processInputEdges(): void {
@@ -775,15 +709,8 @@ function applyNetworkStates(states: NetworkObjectState[]): void {
       localToNetwork.set(key(created.handle), { ...state.id });
       continue;
     }
-    if (state.authorityVersion < body.state.authorityVersion) continue;
-    if (
-      state.authorityVersion === body.state.authorityVersion &&
-      (unwrapTick32(state.sourceTick, body.state.sourceTick) < body.state.sourceTick ||
-        (state.stateSequence !== body.state.stateSequence &&
-          !isNewerSequence16(state.stateSequence, body.state.stateSequence)))
-    )
-      continue;
-    body.state = cloneBody(state);
+    if (isStaleNetworkState(state, body.state)) continue;
+    body.state = cloneNetworkState(state);
     rememberBodyState(body, state);
     if (bundle && descriptor?.kind === "world-entity")
       applySurfaceMotor(physics, bundle, descriptor.entityIndex, body.handle, state.flags);
@@ -827,7 +754,7 @@ function applyOwnership(message: OwnershipChangedPacket): void {
         playerCapsule(message.state.crouched),
       );
     }
-    localPlayer = clonePlayer(message.state);
+    localPlayer = cloneNetworkState(message.state);
     return;
   }
   if (message.state.kind === "player") {
@@ -844,7 +771,7 @@ function applyOwnership(message: OwnershipChangedPacket): void {
     }
   }
   if (!body) return;
-  body.state = cloneBody(message.state);
+  body.state = cloneNetworkState(message.state);
   rememberBodyState(body, message.state);
   physics.setBodyTransform(body.handle, message.state.position, message.state.rotation);
   physics.setBodyVelocity(body.handle, message.state.linearVelocity, message.state.angularVelocity);
@@ -939,13 +866,13 @@ function updateRemotePlayer(state: NetworkPlayerState): void {
       networkId: { ...state.id },
       handle: physics.createPlayerProxy(state.position, playerCapsule(state.crouched)),
       crouched: state.crouched,
-      state: clonePlayer(state),
-      history: [clonePlayer(state)],
+      state: cloneNetworkState(state),
+      history: [cloneNetworkState(state)],
     };
     remotePlayers.set(identity, remote);
   } else {
     remote.crouched = state.crouched;
-    remote.state = clonePlayer(state);
+    remote.state = cloneNetworkState(state);
     rememberPlayerState(remote, state);
   }
 }
@@ -1115,8 +1042,8 @@ function createBody(
       networkId: { ...descriptor.id },
       handle,
       entityIndex: descriptor.entityIndex,
-      state: cloneBody(state),
-      history: [cloneBody(state)],
+      state: cloneNetworkState(state),
+      history: [cloneNetworkState(state)],
       predictable: false,
       predicted: false,
     };
@@ -1161,8 +1088,8 @@ function createBody(
     networkId: { ...descriptor.id },
     handle,
     entityIndex: descriptor.entityIndex,
-    state: cloneBody(state),
-    history: [cloneBody(state)],
+    state: cloneNetworkState(state),
+    history: [cloneNetworkState(state)],
     predictable:
       entity.kind === "physics-prop" &&
       entity.interaction === "grab" &&
@@ -1238,66 +1165,45 @@ function playerPose(command: InputCommand = input!) {
 function rememberBodyState(body: LocalBody, state: NetworkBodyState): void {
   if (body.history.at(-1)?.authorityVersion !== state.authorityVersion) body.history = [];
   if (body.history.at(-1)?.stateSequence === state.stateSequence) return;
-  body.history.push(cloneBody(state));
+  body.history.push(cloneNetworkState(state));
   while (body.history.length > PREDICTION_HISTORY_CAPACITY) body.history.shift();
 }
 
 function rememberPlayerState(player: RemotePlayer, state: NetworkPlayerState): void {
   if (player.history.at(-1)?.authorityVersion !== state.authorityVersion) player.history = [];
   if (player.history.at(-1)?.stateSequence === state.stateSequence) return;
-  player.history.push(clonePlayer(state));
+  player.history.push(cloneNetworkState(state));
   while (player.history.length > PREDICTION_HISTORY_CAPACITY) player.history.shift();
 }
 
-function sampleHistory<T extends NetworkObjectState>(
-  history: readonly T[],
+function sampleHistory(
+  history: readonly NetworkObjectState[],
   targetTick: number,
-): T | null {
+): Required<BodySnapshot> | null {
   if (history.length === 0) return null;
   const timed = history.map((state) => ({
     state,
     tick: unwrapTick32(state.sourceTick, targetTick),
   }));
-  if (targetTick <= timed[0]!.tick) return cloneNetwork(timed[0]!.state);
+  if (targetTick <= timed[0]!.tick) return timed[0]!.state;
   const latest = timed.at(-1)!;
-  if (targetTick >= latest.tick) return cloneNetwork(latest.state);
+  if (targetTick >= latest.tick) return latest.state;
   for (let index = 1; index < timed.length; index += 1) {
     const next = timed[index]!;
     if (next.tick < targetTick) continue;
     const previous = timed[index - 1]!;
     const span = next.tick - previous.tick;
     const amount = span <= 0 ? 1 : (targetTick - previous.tick) / span;
-    return interpolateNetwork(previous.state, next.state, amount);
-  }
-  return cloneNetwork(latest.state);
-}
-
-function interpolateNetwork<T extends NetworkObjectState>(previous: T, next: T, amount: number): T {
-  const common = {
-    ...next,
-    id: { ...next.id },
-    position: mixVec3(previous.position, next.position, amount),
-    rotation: mixQuat(previous.rotation, next.rotation, amount),
-    linearVelocity: mixVec3(previous.linearVelocity, next.linearVelocity, amount),
-    angularVelocity: mixVec3(previous.angularVelocity, next.angularVelocity, amount),
-  };
-  if (previous.kind === "player" && next.kind === "player") {
     return {
-      ...common,
-      kind: "player",
-      yaw: mixAngle(previous.yaw, next.yaw, amount),
-      verticalVelocity: mix(previous.verticalVelocity, next.verticalVelocity, amount),
-      grounded: next.grounded,
-      crouched: next.crouched,
-      lastJumpCounter: next.lastJumpCounter,
-      stepCooldown: mix(previous.stepCooldown, next.stepCooldown, amount),
-    } as T;
+      id: { ...next.state.id },
+      position: mixVec3(previous.state.position, next.state.position, amount),
+      rotation: mixQuat(previous.state.rotation, next.state.rotation, amount),
+      linearVelocity: mixVec3(previous.state.linearVelocity, next.state.linearVelocity, amount),
+      angularVelocity: mixVec3(previous.state.angularVelocity, next.state.angularVelocity, amount),
+      flags: next.state.flags,
+    };
   }
-  return { ...common, kind: "body" } as T;
-}
-
-function cloneNetwork<T extends NetworkObjectState>(state: T): T {
-  return (state.kind === "player" ? clonePlayer(state) : cloneBody(state)) as T;
+  return latest.state;
 }
 
 function mixVec3(a: NetworkBodyState["position"], b: NetworkBodyState["position"], amount: number) {
@@ -1316,34 +1222,8 @@ function mixQuat(a: NetworkBodyState["rotation"], b: NetworkBodyState["rotation"
   return { x: value.x / length, y: value.y / length, z: value.z / length, w: value.w / length };
 }
 
-function mixAngle(a: number, b: number, amount: number): number {
-  return a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * amount;
-}
-
 function mix(a: number, b: number, amount: number): number {
   return a + (b - a) * amount;
-}
-
-function cloneBody(state: NetworkBodyState): NetworkBodyState {
-  return {
-    ...state,
-    id: { ...state.id },
-    position: { ...state.position },
-    rotation: { ...state.rotation },
-    linearVelocity: { ...state.linearVelocity },
-    angularVelocity: { ...state.angularVelocity },
-  };
-}
-
-function clonePlayer(state: NetworkPlayerState): NetworkPlayerState {
-  return {
-    ...state,
-    id: { ...state.id },
-    position: { ...state.position },
-    rotation: { ...state.rotation },
-    linearVelocity: { ...state.linearVelocity },
-    angularVelocity: { ...state.angularVelocity },
-  };
 }
 
 function playerCapsule(crouched: boolean) {

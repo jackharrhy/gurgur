@@ -340,11 +340,8 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
 
   const step = (): void => {
     for (const player of players()) {
-      // Input commands are a sampled intent stream, not a reliable work queue. If
-      // delivery stalls, Bun has already advanced by repeating the last intent;
-      // replaying every late sample would apply that elapsed time twice and leave
-      // the server permanently behind a 60 Hz producer. Consume the newest sample
-      // and retain older samples only long enough to recover action-counter edges.
+      // Prior intent already covered elapsed ticks; replaying late movement would count them twice.
+      // Older arrivals recover action edges only.
       const received = player.inputQueue;
       const pending = received.at(-1) ?? null;
       player.inputQueue = [];
@@ -387,9 +384,7 @@ export function createGamePlayers(options: GamePlayersOptions): GamePlayers {
         player.lastPrimaryCounter = command.primaryCounter;
         for (let edge = 0; edge < primaryEdges; edge += 1) tryGrab(player, command);
       }
-      // A carried body cannot also be the player's ground entity. Source drops
-      // this case for the same reason: otherwise the grab controller, support
-      // velocity, and player movement form a positive feedback loop.
+      // A carried support feeds its motion back into the grab controller; drop it to break the loop.
       dropSupportedGrab(player);
       updateGrab(player);
       player.stateSequence = (player.stateSequence + 1) & 0xffff;

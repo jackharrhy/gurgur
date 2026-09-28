@@ -29,8 +29,7 @@ export function stepCameraBoom(
   deltaSeconds: number,
 ): CameraBoomState {
   const safeDistance = Math.max(0, Math.min(CAMERA_BOOM_LENGTH, hardSafeDistance));
-  // Safety is a hard constraint: smoothing inward would leave the camera behind
-  // collision for one or more rendered frames.
+  // Smoothing inward would leave the camera behind collision for a rendered frame.
   if (safeDistance < state.distance) {
     return {
       distance: safeDistance,

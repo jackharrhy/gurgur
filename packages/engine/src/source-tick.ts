@@ -1,8 +1,4 @@
-/**
- * Anchors one fixed-step clock to an authority clock. The offset is immutable
- * for the lifetime of an authority epoch: later packet delay can neither
- * stretch nor compress the source cadence.
- */
+/** Packet delays must not change the tick offset within an authority epoch. */
 export class SourceTickMapper {
   static readonly MAX_FUTURE_LEAD_TICKS = 12;
 

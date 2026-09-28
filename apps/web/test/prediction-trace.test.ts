@@ -7,6 +7,7 @@ describe("prediction trace recorder", () => {
     const frame = sample(1);
     recorder.record(frame);
     frame.player.predicted!.position.x = 999;
+    expect(recorder.frames()[0]!.player.predicted!.position.x).toBe(1);
     recorder.record(sample(2));
     recorder.record(sample(3));
     const frames = recorder.frames();

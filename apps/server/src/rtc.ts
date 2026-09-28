@@ -26,9 +26,7 @@ export function prepareMdnsIceDescription<T extends "offer" | "answer">(descript
   if (!hasMdnsCandidate) return description;
   return {
     type: description.type,
-    // Werift resolves mDNS candidates itself. Do not tell its ICE agent that
-    // gathering is over while that asynchronous resolution—or an inbound
-    // connectivity check that creates a peer-reflexive candidate—is pending.
+    // Keep gathering open for Werift's asynchronous mDNS resolution and peer-reflexive candidates.
     sdp: lines.filter((line) => line !== "a=end-of-candidates").join("\r\n"),
   };
 }

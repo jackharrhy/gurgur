@@ -71,9 +71,8 @@ type SessionRecord = {
   socketGeneration: number;
   disconnectTimer: Timer | null;
 };
-let sourceSpeechWorker: Promise<Blob> | null = null;
-let sourcePhysicsWorker: Promise<Blob> | null = null;
-let sourceDebugCaptureWorker: Promise<Blob> | null = null;
+type BrowserWorkerName = "speech-worker" | "physics-worker" | "debug-capture-worker";
+const sourceWorkers = new Map<BrowserWorkerName, Promise<Blob>>();
 const LINTALKER_SCRIPT_SHA256 = "6e25db22cdf4093cf281affbe5f140c7feec6b391663565ba9a00d86aee4264c";
 const LINTALKER_WASM_SHA256 = "7f9c4522da11019ed54e81d634bd21edfded63ecebf1c509da5f5db11cc2925b";
 
@@ -144,22 +143,11 @@ export async function createGurgurServer(
     new URL("../../../node_modules/box3d.js/dist/box3d.wasm", import.meta.url),
   );
   const box3dWasm = (await adjacentWasm.exists()) ? adjacentWasm : sourceWasm;
-  const adjacentSpeechWorker = Bun.file(new URL("../../web/src/speech-worker.js", import.meta.url));
-  const speechWorker = (await adjacentSpeechWorker.exists())
-    ? adjacentSpeechWorker
-    : await buildSourceSpeechWorker();
-  const adjacentPhysicsWorker = Bun.file(
-    new URL("../../web/src/physics-worker.js", import.meta.url),
-  );
-  const physicsWorker = (await adjacentPhysicsWorker.exists())
-    ? adjacentPhysicsWorker
-    : await buildSourcePhysicsWorker();
-  const adjacentDebugCaptureWorker = Bun.file(
-    new URL("../../web/src/debug-capture-worker.js", import.meta.url),
-  );
-  const debugCaptureWorker = (await adjacentDebugCaptureWorker.exists())
-    ? adjacentDebugCaptureWorker
-    : await buildSourceDebugCaptureWorker();
+  const [speechWorker, physicsWorker, debugCaptureWorker] = await Promise.all([
+    loadBrowserWorker("speech-worker"),
+    loadBrowserWorker("physics-worker"),
+    loadBrowserWorker("debug-capture-worker"),
+  ]);
   const lintalkerScript = Bun.file(
     new URL("../../../third_party/lintalker/wintalker.js", import.meta.url),
   );
@@ -267,10 +255,7 @@ export async function createGurgurServer(
         `${state.id.index}:${state.id.generation}`,
         cloneNetworkState(state),
       );
-    // Capture owner checkpoints from the exact same 30 Hz world sample, then
-    // perform delta encoding and data-channel writes after the simulation tick.
-    // This keeps I/O work out of Box3D's fixed-step budget without allowing an
-    // arbitrary later host tick to leak into the checkpoint.
+    // Checkpoints and state must share a tick; encode and send outside the physics step.
     if (game.serverTick % Math.max(1, PHYSICS_HZ / STATE_PUBLISH_HZ) === 0) {
       if (stateBroadcastTimer) clearTimeout(stateBroadcastTimer);
       stateBroadcastTimer = null;
@@ -283,7 +268,7 @@ export async function createGurgurServer(
       for (const socket of clients) {
         const playerId = socket.data.playerId;
         if (!playerId || socket.data.stateChannel?.readyState !== "open") continue;
-        const checkpoint = game.predictionCheckpoint(playerId, batchStates, statesById);
+        const checkpoint = game.predictionCheckpoint(playerId, statesById);
         if (checkpoint) checkpoints.set(`${playerId.index}:${playerId.generation}`, checkpoint);
       }
       const batch: StateBroadcastBatch = {
@@ -1106,46 +1091,24 @@ function toManifest(world: WorldMessage): WorldManifestMessage {
   };
 }
 
-function buildSourceSpeechWorker(): Promise<Blob> {
-  sourceSpeechWorker ??= Bun.build({
-    entrypoints: [new URL("../../web/src/speech-worker.ts", import.meta.url).pathname],
-    target: "browser",
-    format: "iife",
-    minify: true,
-  }).then((result) => {
-    if (!result.success || !result.outputs[0])
-      throw new Error("failed to build browser speech worker");
-    return result.outputs[0];
-  });
-  return sourceSpeechWorker;
-}
-
-function buildSourcePhysicsWorker(): Promise<Blob> {
-  sourcePhysicsWorker ??= Bun.build({
-    entrypoints: [new URL("../../web/src/physics-worker.ts", import.meta.url).pathname],
-    target: "browser",
-    format: "esm",
-    minify: true,
-  }).then((result) => {
-    if (!result.success || !result.outputs[0])
-      throw new Error("failed to build browser physics worker");
-    return result.outputs[0];
-  });
-  return sourcePhysicsWorker;
-}
-
-function buildSourceDebugCaptureWorker(): Promise<Blob> {
-  sourceDebugCaptureWorker ??= Bun.build({
-    entrypoints: [new URL("../../web/src/debug-capture-worker.ts", import.meta.url).pathname],
-    target: "browser",
-    format: "esm",
-    minify: true,
-  }).then((result) => {
-    if (!result.success || !result.outputs[0])
-      throw new Error("failed to build browser debug capture worker");
-    return result.outputs[0];
-  });
-  return sourceDebugCaptureWorker;
+async function loadBrowserWorker(name: BrowserWorkerName): Promise<Blob> {
+  const adjacent = Bun.file(new URL(`../../web/src/${name}.js`, import.meta.url));
+  if (await adjacent.exists()) return adjacent;
+  let source = sourceWorkers.get(name);
+  if (!source) {
+    source = Bun.build({
+      entrypoints: [new URL(`../../web/src/${name}.ts`, import.meta.url).pathname],
+      target: "browser",
+      format: name === "speech-worker" ? "iife" : "esm",
+      minify: true,
+    }).then((result) => {
+      if (!result.success || !result.outputs[0])
+        throw new Error(`failed to build browser ${name.replaceAll("-", " ")}`);
+      return result.outputs[0];
+    });
+    sourceWorkers.set(name, source);
+  }
+  return source;
 }
 
 async function fileHash(file: Blob): Promise<string> {

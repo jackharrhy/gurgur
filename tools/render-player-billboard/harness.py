@@ -1,5 +1,3 @@
-"""Canonical code-first camera sampling for the player billboard harness."""
-
 from __future__ import annotations
 
 import math
@@ -17,9 +15,7 @@ ORTHOGRAPHIC_SCALE_METERS = 2.15
 FRAME_SIZE_PIXELS = 64
 PIXEL_FILTER_SIZE = 0.01
 
-# Dense around the horizon, progressively fewer azimuth samples near the poles.
-# This covers the runtime camera's approximately +/-77 degree pitch range without
-# wasting a full 16 captures where latitude circles become very small.
+# Cover the camera's +/-77 degree pitch range with fewer redundant views near the poles.
 VIEW_RINGS: tuple[tuple[float, int], ...] = (
     (-75.0, 8),
     (-56.25, 12),

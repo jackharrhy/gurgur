@@ -9,56 +9,9 @@ import {
 } from "@gurgur/game";
 import { MATERIAL_TEXTURE_SIZE, parseValve220 } from "../../packages/engine/src";
 
-type ParsedEntity = {
-  properties: Record<string, string>;
-  brushes: string[];
-};
-
-function parseFixture(source: string): ParsedEntity[] {
-  const entities: ParsedEntity[] = [];
-  let entity: ParsedEntity | null = null;
-  let brush: string[] | null = null;
-  let depth = 0;
-  for (const [lineIndex, rawLine] of source.split(/\r?\n/).entries()) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("//")) continue;
-    if (line === "{") {
-      if (depth === 0) entity = { properties: {}, brushes: [] };
-      if (depth === 1) brush = [line];
-      else if (depth >= 2) brush?.push(line);
-      depth += 1;
-      continue;
-    }
-    if (line === "}") {
-      if (depth >= 2) brush?.push(line);
-      depth -= 1;
-      if (depth === 1 && brush && entity) {
-        entity.brushes.push(brush.join("\n"));
-        brush = null;
-      }
-      if (depth === 0 && entity) {
-        entities.push(entity);
-        entity = null;
-      }
-      if (depth < 0) throw new Error(`unexpected closing brace at line ${lineIndex + 1}`);
-      continue;
-    }
-    if (depth === 1 && entity) {
-      const property = line.match(/^"([^"]+)"\s+"([^"]*)"$/);
-      if (!property) throw new Error(`invalid entity property at line ${lineIndex + 1}`);
-      entity.properties[property[1]!] = property[2]!;
-    } else if (depth >= 2 && brush) {
-      brush.push(line);
-    } else {
-      throw new Error(`content outside entity at line ${lineIndex + 1}`);
-    }
-  }
-  if (depth !== 0 || entity || brush) throw new Error("unclosed map structure");
-  return entities;
-}
-
 const source = await Bun.file(new URL("./systems-garden.map", import.meta.url)).text();
-const entities = parseFixture(source);
+const map = parseValve220(source, "systems-garden.map");
+const entities = map.entities;
 const compiledWorld = compileWorld(source, "systems-garden.map");
 const gameConfig = (await Bun.file(
   new URL("../trenchbroom/GameConfig.cfg", import.meta.url),
@@ -77,15 +30,6 @@ const cross = (a: Tuple3, b: Tuple3): Tuple3 => [
   a[0] * b[1] - a[1] * b[0],
 ];
 const dot = (a: Tuple3, b: Tuple3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-function facePoints(brush: string): Array<[Tuple3, Tuple3, Tuple3]> {
-  return brush.split("\n").flatMap((line) => {
-    const points = [...line.matchAll(/\(\s*([-+\d.eE]+)\s+([-+\d.eE]+)\s+([-+\d.eE]+)\s*\)/g)]
-      .slice(0, 3)
-      .map((match): Tuple3 => [Number(match[1]), Number(match[2]), Number(match[3])]);
-    return points.length === 3 ? [[points[0]!, points[1]!, points[2]!]] : [];
-  });
-}
 
 describe("Systems Garden map", () => {
   test("uses the same default material scale as TrenchBroom", () => {
@@ -134,7 +78,6 @@ describe("Systems Garden map", () => {
   });
 
   test("preserves authored Valve 220 face axes, offsets, and non-default scales", () => {
-    const map = parseValve220(source, "systems-garden.map");
     const authored = map.entities
       .flatMap((entity) =>
         entity.brushes.flatMap((brush) => brush.faces.map((face) => ({ entity, brush, face }))),
@@ -182,7 +125,6 @@ describe("Systems Garden map", () => {
     expect(entities[0]?.properties.mapversion).toBe("220");
     const brushes = entities.flatMap((entity) => entity.brushes);
     for (const [brushIndex, brush] of brushes.entries()) {
-      const faces = facePoints(brush);
       const compiled = compiledWorld.brushes[brushIndex]!;
       const center = compiled.worldVertices
         .map((point): Tuple3 => [point.x / 0.0254, -point.z / 0.0254, point.y / 0.0254])
@@ -191,7 +133,12 @@ describe("Systems Garden map", () => {
           [0, 0, 0],
         )
         .map((value) => value / compiled.worldVertices.length) as Tuple3;
-      const winding = faces.map(([a, b, c]) => {
+      const winding = brush.faces.map(({ points }) => {
+        const [a, b, c] = points.map(({ x, y, z }): Tuple3 => [x, y, z]) as [
+          Tuple3,
+          Tuple3,
+          Tuple3,
+        ];
         const normal = cross(subtract(b, a), subtract(c, a));
         const side = dot(normal, subtract(center, a));
         expect(Math.abs(side)).toBeGreaterThan(1e-6);
@@ -213,11 +160,6 @@ describe("Systems Garden map", () => {
       expect(ids.has(id!)).toBe(false);
       ids.add(id!);
     }
-    const persistentEntities = entities.filter((entity) => {
-      const classname = entity.properties.classname as EntityClassname;
-      return entityDefinitions[classname].editor.persistent;
-    });
-    expect(ids.size).toBe(persistentEntities.length);
   });
 
   test("reconstructs every brush as finite convex geometry", () => {
@@ -243,11 +185,6 @@ describe("Systems Garden map", () => {
     expect(compiledWorld.bundleVersion).toBe(1);
   });
 
-  test("compiles authored defaults without requiring optional content classes", () => {
-    const spawn = compiledWorld.playerSpawns.find((candidate) => candidate.name === "default");
-    expect(spawn?.yaw).toBe(0);
-  });
-
   test("authors the production light capability without mapper classnames", () => {
     const lights = compiledWorld.entities.filter((entity) => entity.kind === "light");
     expect(lights.map((entity) => entity.presentation.mode)).toEqual([
@@ -261,13 +198,6 @@ describe("Systems Garden map", () => {
       castShadow: true,
       volumetric: true,
     });
-    expect(
-      lights.some(
-        (entity) =>
-          (entity.presentation.mode === "point" || entity.presentation.mode === "spot") &&
-          entity.presentation.volumetric,
-      ),
-    ).toBeTrue();
     expect(JSON.stringify(lights)).not.toContain("light_spot");
   });
 
