@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14 AS build
+FROM oven/bun:1.4.4 AS build
 WORKDIR /app
 
 COPY package.json bun.lock tsconfig.json .oxfmtrc.json .oxlintrc.json ./
@@ -16,7 +16,7 @@ COPY scripts ./scripts
 RUN bun install --frozen-lockfile
 RUN bun run check:container && bun run build
 
-FROM oven/bun:1.3.14
+FROM oven/bun:1.4.4
 WORKDIR /app/dist
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
